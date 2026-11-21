@@ -44,9 +44,9 @@ def test_fork_moves_a_claude_session_to_codex(tmp_path):
     async def body():
         m, s = await started(tmp_path)
         sid = s["id"]
-        m.db.update_session(sid, backend="claude", model="claude-opus-5", effort="high", tool_profile="bash-only",
+        m.db.sessions.update_session(sid, backend="claude", model="claude-opus-5", effort="high", tool_profile="bash-only",
                             run={**s["run"], "backend_auth": "api_key", "backend_session_id": "abc"})
-        fork = m.db.get_session((await m.fork(sid, 1, "carry on", backend="codex"))["id"])
+        fork = m.db.sessions.get_session((await m.fork(sid, 1, "carry on", backend="codex"))["id"])
         assert (fork["backend"], fork["model"], fork["effort"]) == ("codex", "gpt-5.5", "medium")  # its own default, not the parent's
         assert fork["parent_id"] == sid and fork["fork_turn"] == 1
         assert "Summary of the earlier conversation" in fork["context"][1]["content"]
@@ -71,11 +71,11 @@ def test_fork_moves_a_claude_session_to_codex(tmp_path):
 def test_local_fork_to_hosted_uses_the_digest_and_same_backend_keeps_the_saved_context(tmp_path):
     async def body():
         m, s = await started(tmp_path)
-        hosted = m.db.get_session((await m.fork(s["id"], 1, "on claude", backend="claude"))["id"])
+        hosted = m.db.sessions.get_session((await m.fork(s["id"], 1, "on claude", backend="claude"))["id"])
         assert (hosted["backend"], hosted["model"], hosted["effort"]) == ("claude", "claude-opus-5", "high")
         assert len(hosted["context"]) == 2 and "Summary of the earlier conversation" in hosted["context"][1]["content"]
         await finished(m, hosted["id"])
-        same = m.db.get_session((await m.fork(s["id"], 1, "stay local", backend="local"))["id"])
+        same = m.db.sessions.get_session((await m.fork(s["id"], 1, "stay local", backend="local"))["id"])
         assert same["backend"] == "local" and same["model"] == s["model"]
         assert not any("Summary of the earlier" in str(x.get("content")) for x in same["context"])
         assert same["context"][-1]["content"] == "stay local"
@@ -89,7 +89,7 @@ def test_local_fork_to_hosted_uses_the_digest_and_same_backend_keeps_the_saved_c
 def test_hosted_fork_to_local_keeps_the_digest_in_its_checkpoint(tmp_path):
     async def body():
         m, s = await started(tmp_path)
-        m.db.update_session(s["id"], backend="claude", model="claude-opus-5")
+        m.db.sessions.update_session(s["id"], backend="claude", model="claude-opus-5")
         fork = await finished(m, (await m.fork(s["id"], 1, "carry on locally", backend="local"))["id"])
         assert fork["backend"] == "local" and fork["model"] == s["model"]
         rewound = await m.rewind(fork["id"], 1)       # back to where the fork started: the earlier work is still known
@@ -107,7 +107,7 @@ def test_a_forks_inherited_task_reaches_another_backend(tmp_path, via):
     async def body():
         m, s = await started(tmp_path)
         middle = await finished(m, (await m.fork(s["id"], 1, "Continue the task.", backend=via))["id"])
-        moved = m.db.get_session((await m.fork(middle["id"], 1, "Continue the task.", backend="codex"))["id"])
+        moved = m.db.sessions.get_session((await m.fork(middle["id"], 1, "Continue the task.", backend="codex"))["id"])
         assert "User: go" in moved["context"][1]["content"]   # the original task, from the saved context
         await finished(m, moved["id"])
 
@@ -119,8 +119,8 @@ def test_a_digest_fork_uses_the_checkpoints_system_prompt(tmp_path):
     async def body():
         m, s = await started(tmp_path)
         saved = s["context"][0]
-        m.db.update_session(s["id"], context=[{"role": "system", "content": "newer guidance"}, *s["context"][1:]])
-        moved = m.db.get_session((await m.fork(s["id"], 1, "on codex", backend="codex"))["id"])
+        m.db.sessions.update_session(s["id"], context=[{"role": "system", "content": "newer guidance"}, *s["context"][1:]])
+        moved = m.db.sessions.get_session((await m.fork(s["id"], 1, "on codex", backend="codex"))["id"])
         assert moved["context"][0] == saved
         await finished(m, moved["id"])
 
@@ -146,7 +146,7 @@ def test_member_reruns_a_hosted_session_on_the_local_model(tmp_path, monkeypatch
         m, s = await started(tmp_path)
         alice = AccountService(m).create("owner", "alice@example.com", "Alice")
         monkeypatch.setattr(m.member_keys, "has", lambda uid, backend: True)
-        m.db.update_session(s["id"], owner_id=alice["user_id"], project="scratch", backend="claude", model="claude-opus-5",
+        m.db.sessions.update_session(s["id"], owner_id=alice["user_id"], project="scratch", backend="claude", model="claude-opus-5",
                             end_user=member_keys.end_user_id(alice["user_id"]))
         local = m.rerun(s["id"], backend="local")
         assert (local["backend"], local["end_user"]) == ("local", "")
@@ -170,7 +170,7 @@ def test_invalid_member_and_app_overrides_are_refused(tmp_path):
         assert e.value.status == 400
 
         alice = AccountService(m).create("owner", "alice@example.com", "Alice")
-        m.db.update_session(sid, owner_id=alice["user_id"])
+        m.db.sessions.update_session(sid, owner_id=alice["user_id"])
         with pytest.raises(HarnessError) as created:
             m.create("x", backend="cursor", owner_id=alice["user_id"])
         with pytest.raises(HarnessError) as forked:
@@ -178,12 +178,12 @@ def test_invalid_member_and_app_overrides_are_refused(tmp_path):
         assert (forked.value.status, forked.value.code, str(forked.value)) == (
             created.value.status, created.value.code, str(created.value)) and created.value.status == 403
 
-        m.db.update_session(sid, owner_id="owner", app_id="app-1")
+        m.db.sessions.update_session(sid, owner_id="owner", app_id="app-1")
         for call in (lambda: m.fork(sid, 1, "x", backend="codex"), lambda: _now(m.rerun(sid, model="m"))):
             with pytest.raises(HarnessError) as e:
                 await call()
             assert (e.value.status, e.value.code) == (409, BACKEND_OVERRIDE_UNSUPPORTED)
-        m.db.update_session(sid, app_id="")
+        m.db.sessions.update_session(sid, app_id="")
 
     asyncio.run(body())
 
@@ -202,11 +202,11 @@ def test_override_routes_start_sessions_on_the_chosen_backend_and_rerun_still_ta
     owner = {"Tailscale-User-Login": LOGIN}
     with TestClient(create_app(m)) as client:
         sid = client.post("/sessions", json={"prompt": "go", "project": "proj"}, headers=owner).json()["id"]
-        original = wait_for(lambda: (s := m.db.get_session(sid))["status"] == "done" and s)
+        original = wait_for(lambda: (s := m.db.sessions.get_session(sid))["status"] == "done" and s)
 
         def stored(response, backend, model, effort):
             assert response.status_code == 201, response.text
-            row = m.db.get_session(response.json()["id"])
+            row = m.db.sessions.get_session(response.json()["id"])
             assert (response.json()["backend"], response.json()["model"]) == (backend, model)
             assert (row["backend"], row["model"], row["effort"]) == (backend, model, effort)
 
@@ -229,21 +229,21 @@ def test_continuing_a_hosted_session_carries_its_unanswered_follow_up(tmp_path):
     async def body():
         m, s = await started(tmp_path)
         sid = s["id"]
-        m.db.update_session(sid, backend="claude", model="claude-opus-5")
+        m.db.sessions.update_session(sid, backend="claude", model="claude-opus-5")
         # A follow-up the run never answered: it hit the subscription limit before changing a file, so the cancel
         # took no checkpoint and checkpoint 2 is still the latest (#664).
         m.bus.emit(sid, "user_message", {"content": "add tests"})
         m.bus.emit(sid, "limit_waiting", {"backend": "claude", "resets_at": 0})
-        moved = m.db.get_session((await m.fork(sid, 2, "Continue the task.", backend="codex"))["id"])
+        moved = m.db.sessions.get_session((await m.fork(sid, 2, "Continue the task.", backend="codex"))["id"])
         digest = moved["context"][1]["content"]
         assert digest.index("User: add tests") < digest.index("New instruction:\nContinue the task.")
         await finished(m, moved["id"])
-        earlier = m.db.get_session((await m.fork(sid, 1, "from one", backend="codex"))["id"])
+        earlier = m.db.sessions.get_session((await m.fork(sid, 1, "from one", backend="codex"))["id"])
         assert "add tests" not in earlier["context"][1]["content"]   # not of checkpoint 1's files
         await finished(m, earlier["id"])
         # A snapshot that failed since means the files changed after checkpoint 2, so its digest stops there
         m.bus.emit(sid, "checkpoint", {"status": "skipped", "reason": "the account is over its disk quota"})
-        stale = m.db.get_session((await m.fork(sid, 2, "Continue the task.", backend="codex"))["id"])
+        stale = m.db.sessions.get_session((await m.fork(sid, 2, "Continue the task.", backend="codex"))["id"])
         assert "add tests" not in stale["context"][1]["content"]
         await finished(m, stale["id"])
 

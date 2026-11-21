@@ -55,14 +55,14 @@ async def _session(m: Manager, files: dict[str, str] | None = None) -> tuple[dic
 
 
 async def _run(m: Manager, sid: str, *calls: dict) -> None:
-    s = m.db.get_session(sid)
+    s = m.db.sessions.get_session(sid)
     context = s["context"] + [{"role": "assistant", "content": None, "tool_calls": list(calls)}]
-    m.db.update_session(sid, context=context)
-    await m.runner._resolve_calls(m.db.get_session(sid), list(calls))
+    m.db.sessions.update_session(sid, context=context)
+    await m.runner._resolve_calls(m.db.sessions.get_session(sid), list(calls))
 
 
 def _result(m: Manager, sid: str, c: dict) -> str:
-    return next(x["content"] for x in m.db.get_session(sid)["context"] if x.get("tool_call_id") == c["id"])
+    return next(x["content"] for x in m.db.sessions.get_session(sid)["context"] if x.get("tool_call_id") == c["id"])
 
 
 def _payload(m: Manager, sid: str, c: dict) -> dict:
@@ -181,7 +181,7 @@ def test_propose_then_apply_keeps_snippets_out_of_the_worker_context(tmp_path):
         m = Manager(make_cfg(tmp_path), chat=chat)
         await m.start()
         sid = m.create("task")["id"]
-        root = Path(m.db.get_session(sid)["workspace"])
+        root = Path(m.db.sessions.get_session(sid)["workspace"])
         for name, text in {"app.py": SOURCE, "other.py": OTHER}.items():  # before the run's first turn, not by the worker
             (root / name).write_text(text, encoding="utf-8", newline="")
         live.update(m=m, sid=sid, root=root)
@@ -202,10 +202,10 @@ def test_propose_then_apply_keeps_snippets_out_of_the_worker_context(tmp_path):
         assert (root / "app.py").read_text(encoding="utf-8") == SOURCE.replace(old, new)
         assert (root / "other.py").read_text(encoding="utf-8") == "VALUE = 2\n"
 
-        run = m.db.get_session(sid)["run"]
+        run = m.db.sessions.get_session(sid)["run"]
         assert run["delegate_proposals"] == {} and run["delegate_edits"] == {}
         assert {"app.py", "other.py"} <= set(run["files_touched"])
-        worker = json.dumps(m.db.get_session(sid)["context"])
+        worker = json.dumps(m.db.sessions.get_session(sid)["context"])
         for snippet in (old, new, "VALUE = 2", "def part"):
             assert snippet not in worker
         await m.stop()
@@ -225,7 +225,7 @@ def test_atomic_multi_edit_failure_writes_nothing(tmp_path):
         result = _payload(m, sid, c)
         assert result["status"] == "error" and "exactly once, found 2" in result["error"]
         assert (root / "other.py").read_text(encoding="utf-8") == OTHER
-        assert m.db.get_session(sid)["run"].get("delegate_proposals") is None
+        assert m.db.sessions.get_session(sid)["run"].get("delegate_proposals") is None
         await m.stop()
     asyncio.run(body())
 
@@ -242,14 +242,14 @@ def test_stale_file_between_propose_and_apply_writes_nothing_and_keeps_retries(t
         await _run(m, sid, propose)
         patch_id = _payload(m, sid, propose)["patch_id"]
         (root / "app.py").write_text(SOURCE + "# changed\n", encoding="utf-8")
-        attempts = dict(m.db.get_session(sid)["run"]["delegate_edits"])
+        attempts = dict(m.db.sessions.get_session(sid)["run"]["delegate_edits"])
 
         apply = call("apply_delegated_edit", 2, patch_id=patch_id)
         await _run(m, sid, apply)
         result = _payload(m, sid, apply)
         assert result["status"] == "error" and "stale proposal: app.py changed" in result["error"]
         assert (root / "other.py").read_text(encoding="utf-8") == OTHER  # the unchanged file wasn't written either
-        assert m.db.get_session(sid)["run"]["delegate_edits"] == attempts
+        assert m.db.sessions.get_session(sid)["run"]["delegate_edits"] == attempts
         await m.stop()
     asyncio.run(body())
 
@@ -265,8 +265,8 @@ def test_retry_limit_is_keyed_persisted_across_round_reset_and_reset_by_apply(tm
         for i, paths in enumerate([["other.py"], ["./other.py"]], 1):  # the same edit however the path is spelled
             await _run(m, sid, call("delegate_edit", i, paths=paths, instruction="bump"))
         # A round reset clears the conversation but not the run's counter.
-        m.runner._round_reset(m.db.get_session(sid), m.db.get_session(sid)["context"], 0, 3.0, 0)
-        assert m.db.get_session(sid)["run"]["delegate_edits"] == {"paths:other.py": 2}
+        m.runner._round_reset(m.db.sessions.get_session(sid), m.db.sessions.get_session(sid)["context"], 0, 3.0, 0)
+        assert m.db.sessions.get_session(sid)["run"]["delegate_edits"] == {"paths:other.py": 2}
         third = call("delegate_edit", 3, paths=["other.py"], instruction="bump")
         await _run(m, sid, third)
         assert "not JSON" in _payload(m, sid, third)["error"]  # a failed delegation still counts
@@ -279,7 +279,7 @@ def test_retry_limit_is_keyed_persisted_across_round_reset_and_reset_by_apply(tm
         tasked = call("delegate_edit", 5, paths=["other.py"], instruction="bump", task_id="bump-value")
         await _run(m, sid, tasked)
         await _run(m, sid, call("apply_delegated_edit", 6, patch_id=_payload(m, sid, tasked)["patch_id"]))
-        assert m.db.get_session(sid)["run"]["delegate_edits"] == {"paths:other.py": 3}
+        assert m.db.sessions.get_session(sid)["run"]["delegate_edits"] == {"paths:other.py": 3}
         assert (root / "other.py").read_text(encoding="utf-8") == "VALUE = 2\n"
         await m.stop()
     asyncio.run(body())
@@ -294,10 +294,10 @@ def test_delegate_tokens_recorded_on_success_and_on_a_failed_call_with_usage(tmp
         m = _manager(tmp_path, delegate)
         s, _ = await _session(m)
         sid = s["id"]
-        before = m.db.get_session(sid)
+        before = m.db.sessions.get_session(sid)
         for i in range(1, 4):
             await _run(m, sid, call("delegate_edit", i, paths=["other.py"], instruction="bump"))
-        after = m.db.get_session(sid)
+        after = m.db.sessions.get_session(sid)
         expected = {"prompt_tokens": 50, "completion_tokens": 10, "calls": 2}  # the LLMError returned no usage
         assert after["totals"]["delegate_tokens"] == expected and after["run"]["delegate_tokens"] == expected
         assert after["totals"]["prompt_tokens"] == before["totals"].get("prompt_tokens", 0) + 50
@@ -320,7 +320,7 @@ def test_input_cap_and_binary_are_tool_errors_that_do_not_count(tmp_path):
         await _run(m, sid, big, binary)
         assert "total 2000 characters; a delegation may read at most 1500" in _payload(m, sid, big)["error"]
         assert "NUL byte" in _payload(m, sid, binary)["error"]
-        assert delegate.requests == [] and not m.db.get_session(sid)["run"].get("delegate_edits")
+        assert delegate.requests == [] and not m.db.sessions.get_session(sid)["run"].get("delegate_edits")
         await m.stop()
     asyncio.run(body())
 
@@ -342,7 +342,7 @@ def test_tools_offered_only_to_local_tower_agent_sessions_with_a_workspace(tmp_p
             assert not m.runner.delegate_edit_available({**s, **change})
 
         # A session that isn't offered the tool can't call it either.
-        m.db.update_session(sid, kind="chat")
+        m.db.sessions.update_session(sid, kind="chat")
         c = call("delegate_edit", 1, paths=["app.py"], instruction="x")
         await _run(m, sid, c)
         assert "unknown tool" in _result(m, sid, c)
@@ -360,7 +360,7 @@ def test_apply_is_decided_and_previewed_as_an_edit_of_each_file(tmp_path):
         propose = call("delegate_edit", 1, paths=["other.py"], instruction="bump")
         await _run(m, sid, propose)
         patch_id = _payload(m, sid, propose)["patch_id"]
-        s = m.db.get_session(sid)
+        s = m.db.sessions.get_session(sid)
         assert m.runner._decide(s, "apply_delegated_edit", {"patch_id": patch_id}).action == "allow"
         m.runner.policy = lambda _s: Policy([{"tool": "edit_file", "path": "other.py", "action": "ask",
                                               "reason": "guarded file"}])
@@ -433,7 +433,7 @@ def test_content_based_edit_rules_apply_to_apply_delegated_edit(tmp_path):
         propose = call("delegate_edit", 1, paths=["other.py"], instruction="bump")
         await _run(m, sid, propose)
         patch_id = _payload(m, sid, propose)["patch_id"]
-        s = m.db.get_session(sid)
+        s = m.db.sessions.get_session(sid)
         direct = {"path": "other.py", "old_text": "VALUE = 1", "new_text": "VALUE = 2  # secret"}
         for action, args in (("deny", {"new_text": "secret"}), ("ask", {"old_text": "VALUE = 1"})):
             rules = [{"tool": "edit_file", "args": args, "action": action, "reason": "content rule"}]

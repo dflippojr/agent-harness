@@ -137,7 +137,7 @@ def test_fork_runs_independently_with_its_own_branch(tmp_path):
         assert any(x.get("content") == "do something else" for x in fork["context"])
         # the parent can be reviewed on its own
         assert (await m.review(sid, "discard"))["review"] == "discarded"
-        assert m.db.get_session(fid)["workspace_removed"] == 0
+        assert m.db.sessions.get_session(fid)["workspace_removed"] == 0
 
     asyncio.run(body())
 
@@ -188,13 +188,13 @@ def test_hosted_session_is_fork_only(tmp_path):
     async def body():
         m, s = await started(tmp_path)
         sid = s["id"]
-        m.db.update_session(sid, backend="claude")
+        m.db.sessions.update_session(sid, backend="claude")
         listing = m.checkpoints(sid)
         assert listing["can_rewind"] is False and listing["can_fork"] is True
         with pytest.raises(HarnessError) as e:
             await m.rewind(sid, 1)
         assert e.value.status == 409
-        fork = m.db.get_session((await m.fork(sid, 1, "carry on"))["id"])
+        fork = m.db.sessions.get_session((await m.fork(sid, 1, "carry on"))["id"])
         assert "Summary of the earlier conversation" in fork["context"][1]["content"]
         assert not fork["run"].get("backend_session_id")
         assert "no model call" in events(m, fork["id"], "forked")[0]["summary_note"]
@@ -263,12 +263,12 @@ def test_rewind_and_fork_refuse_active_and_runner_sessions(shared):
     sid = s["id"]
 
     async def body():
-        m.db.update_session(sid, status="running")
+        m.db.sessions.update_session(sid, status="running")
         for action in (m.rewind(sid, 1), m.fork(sid, 1, "again")):
             with pytest.raises(HarnessError) as e:
                 await action
             assert e.value.status == 409 and "idle" in str(e.value)
-        m.db.update_session(sid, status="done", target="mac")
+        m.db.sessions.update_session(sid, status="done", target="mac")
         with pytest.raises(HarnessError) as e:
             await m.rewind(sid, 1)
         assert e.value.status == 409 and "tower" in str(e.value)
@@ -277,7 +277,7 @@ def test_rewind_and_fork_refuse_active_and_runner_sessions(shared):
     try:
         shared.run(body())
     finally:
-        m.db.update_session(sid, status=s["status"], target=s["target"])
+        m.db.sessions.update_session(sid, status=s["status"], target=s["target"])
 
 
 @needs_host_git
@@ -286,7 +286,7 @@ def test_rewind_after_compaction_restores_the_saved_context(tmp_path):
         m, s = await started(tmp_path)
         sid = s["id"]
         saved = checkpoints.Store(storage.checkpoints_dir(m.cfg, "owner") / sid).load_context(1)
-        m.db.update_session(sid, context=[s["context"][0], {"role": "user", "content": "[summary of everything]"}])
+        m.db.sessions.update_session(sid, context=[s["context"][0], {"role": "user", "content": "[summary of everything]"}])
         rewound = await m.rewind(sid, 1)
         assert rewound["context"] == saved and "[summary of everything]" not in str(rewound["context"])
 
@@ -402,7 +402,7 @@ def test_a_turn_that_only_generates_an_image_is_checkpointed(tmp_path):
         sid = m.create("make an icon")["id"]
         await wait_status(m, sid, "done", timeout=20)
         assert [c["turn"] for c in m.db.sessions.checkpoints(sid)] == [1]           # the PNG is in the workspace
-        store = m.runner.checkpointer.store(m.db.get_session(sid))
+        store = m.runner.checkpointer.store(m.db.sessions.get_session(sid))
         sha = m.db.sessions.checkpoints(sid)[0]["sha"]
         assert "assets/icon.png" in store._git(None, None, "ls-tree", "-r", "--name-only", sha).out
         await m.stop()
@@ -425,7 +425,7 @@ async def later_work(tmp_path):
     def state():
         files = {p.relative_to(ws).as_posix(): p.read_text() for p in ws.rglob("*")
                  if p.is_file() and ".git" not in p.relative_to(ws).parts}
-        row = m.db.get_session(sid)
+        row = m.db.sessions.get_session(sid)
         return (files, sh(ws, "symbolic-ref", "HEAD"), sh(ws, "rev-parse", "HEAD"),
                 sh(ws, "diff", "--cached", "--name-only"), sh(ws, "status", "--porcelain"), row["context"],
                 row["turn_seq"], [c["turn"] for c in m.db.sessions.checkpoints(sid)], len(events(m, sid, "rewound")))
@@ -450,12 +450,12 @@ def test_rewind_that_fails_midway_puts_everything_back(tmp_path, monkeypatch):
         assert e.value.status == 409
         assert "extra.txt" in str(e.value) and "nothing was rewound" in str(e.value)
         assert state() == before                                         # files, branch, index, context, turn_seq
-        store = m.runner.checkpointer.store(m.db.get_session(sid))
+        store = m.runner.checkpointer.store(m.db.sessions.get_session(sid))
         assert checkpoints.UNDO_PREFIX not in store._git(None, None, "for-each-ref").out
 
         monkeypatch.setattr(Path, "unlink", unlink)                      # unlocked: the same rewind goes through
         await m.rewind(sid, 1)
-        assert not (ws / "extra.txt").exists() and m.db.get_session(sid)["turn_seq"] == 1
+        assert not (ws / "extra.txt").exists() and m.db.sessions.get_session(sid)["turn_seq"] == 1
 
     asyncio.run(body())
 
@@ -477,11 +477,11 @@ def test_rewind_whose_record_fails_puts_the_files_back(tmp_path, monkeypatch):
         assert e.value.status == 500
         assert "nothing was rewound" in str(e.value) and "disk I/O error" in str(e.value)
         assert state() == before                                         # files, branch, index, context, turn_seq
-        assert checkpoints.UNDO_PREFIX not in cp.store(m.db.get_session(sid))._git(None, None, "for-each-ref").out
+        assert checkpoints.UNDO_PREFIX not in cp.store(m.db.sessions.get_session(sid))._git(None, None, "for-each-ref").out
         assert not m.operations and not m.unsettled                      # the hold ended; nothing to settle
 
         monkeypatch.undo()
-        context = m.db.get_session(sid)["context"]
+        context = m.db.sessions.get_session(sid)["context"]
         await m.send(sid, "after the failed rewind")                     # the later conversation, the later files
         s = await finished(m, sid)
         assert s["context"][:len(context)] == context
@@ -522,7 +522,7 @@ def test_rewind_that_can_neither_record_nor_undo_blocks_sends_until_a_rewind(tmp
             await m.send(sid, "on mismatched files")
         assert e.value.status == 409
         assert sid not in m.tasks and all(x["content"] != "on mismatched files" for x in
-                                          m.db.get_session(sid)["context"] if x["role"] == "user")
+                                          m.db.sessions.get_session(sid)["context"] if x["role"] == "user")
 
         rewound = await m.rewind(sid, 1)                                 # a rewind that succeeds settles it
         assert checkpoints.UNSETTLED not in rewound["run"] and not m.unsettled
@@ -549,14 +549,14 @@ def test_fork_whose_record_fails_leaves_no_child(tmp_path, monkeypatch):
         def failing_add(*args):
             raise sqlite3.OperationalError("disk I/O error")
         monkeypatch.setattr(m.db.sessions, "add_checkpoint", failing_add)
-        sessions = {x["id"] for x in m.db.list_sessions()}
+        sessions = {x["id"] for x in m.db.sessions.list_sessions()}
 
         with pytest.raises(sqlite3.OperationalError):
             await m.fork(sid, 1, "a fork that cannot be recorded")
         child, workspace = made[0]
         assert not Path(workspace).exists()
         assert not m.runner.checkpointer.store({**s, "id": child}).base.exists()
-        assert {x["id"] for x in m.db.list_sessions()} == sessions and not m.operations
+        assert {x["id"] for x in m.db.sessions.list_sessions()} == sessions and not m.operations
 
         monkeypatch.undo()
         fork = await m.fork(sid, 1, "a fork that works")
@@ -774,7 +774,7 @@ def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoabl
         assert event["status"] == "skipped"
         if failing == "quota":
             assert "quota" in event["reason"]
-        assert m.db.sessions.checkpoints(sid, hidden=True) == hidden and m.db.get_session(sid)["turn_seq"] == 1
+        assert m.db.sessions.checkpoints(sid, hidden=True) == hidden and m.db.sessions.get_session(sid)["turn_seq"] == 1
         refs = store._git(None, None, "for-each-ref", "--format=%(refname) %(objectname)").out.split("\n")
         assert f"{checkpoints.ref_name(sid, 2)} {hidden[0]['sha']}" in refs
         assert not [r for r in refs if "/staged/" in r or "/replaced/" in r]
@@ -786,7 +786,7 @@ def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoabl
     finally:                                                     # a failed case must not leak into the next
         monkeypatch.undo()
         (ws / "after-rewind.txt").unlink(missing_ok=True)
-        if m.db.get_session(sid)["turn_seq"] != 1:
+        if m.db.sessions.get_session(sid)["turn_seq"] != 1:
             rewound.run(m.rewind(sid, 1))
 
 
@@ -840,7 +840,7 @@ def test_a_send_or_review_during_a_rewind_is_refused_until_it_ends(tmp_path, out
             with pytest.raises(HarnessError) as e:
                 await attempt
             assert e.value.status == 409 and "rewind" in str(e.value)
-        assert sid not in m.tasks and m.db.get_session(sid)["status"] == "done"
+        assert sid not in m.tasks and m.db.sessions.get_session(sid)["status"] == "done"
         release.set()
         if outcome == "failed":
             with pytest.raises(HarnessError):
@@ -850,7 +850,7 @@ def test_a_send_or_review_during_a_rewind_is_refused_until_it_ends(tmp_path, out
             await rewinding
             assert not (ws / "extra.txt").exists()
         assert not m.operations                                      # released either way: a send works again
-        before = len(m.db.get_session(sid)["context"])
+        before = len(m.db.sessions.get_session(sid)["context"])
         await m.send(sid, "after the rewind")
         s = await finished(m, sid)
         assert {"role": "user", "content": "after the rewind"} in s["context"][before:]

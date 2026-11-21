@@ -116,7 +116,7 @@ A translator keeps only its own session's parse state (tool names by call id, Co
 answer and its usage over the turns) and touches no database, bus or Runner. The Runner applies the events in one
 place, `Runner._apply` (`harness/hosted_runs.py`, which `Runner` mixes in): it records them, asks the approval policy
 and answers through the transport's `respond_permission`, and stops the run on a limit. It writes the session's `run`
-only through `Database.patch_run`, which merges fields inside one writer transaction.
+only through `SessionStore.patch_run` (`db.sessions.patch_run`), which merges fields inside one writer transaction.
 
 `tests/test_cli_translators.py` replays a transcript per backend into the expected events, with no Manager, database
 or Docker: OpenCode's fixtures are recorded from the real CLI; the Claude Code, Codex and Cursor ones are assembled from

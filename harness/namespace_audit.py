@@ -56,7 +56,7 @@ def record(db, session, context, action, *, target=None, kind="session", outcome
     try:
         store = db.for_app(session.get("app_id") or "")
         def commit():
-            if store.get_session(session["id"]) is not None:
+            if store.sessions.get_session(session["id"]) is not None:
                 store.sessions.insert_namespace_audit(scope, session["id"], context or audit_context.SYSTEM,
                                                       session["id"] if target is None else target, kind, action,
                                                       outcome, data)
@@ -72,7 +72,7 @@ def failures(action):
     """Rejected/interrupting service actions on a known session carry truthful content-free outcomes."""
     def decorate(fn):
         def failure(manager, ref, context, exc, kind=None, approval_id=None):
-            session = manager.db.get_session(ref)
+            session = manager.db.sessions.get_session(ref)
             if session:
                 label = "session.context" if action == "session.message" and kind == "app_context" else action
                 target, target_kind = failure_target(manager.db, session, action, approval_id)

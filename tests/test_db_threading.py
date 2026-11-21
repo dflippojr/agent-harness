@@ -23,7 +23,7 @@ def _session(sid: str) -> dict:
 @pytest.fixture
 def db(tmp_path):
     d = Database(tmp_path / "t.db")
-    d.insert_session(_session("s1"))
+    d.sessions.insert_session(_session("s1"))
     yield d
     d.close()
 
@@ -40,23 +40,23 @@ def test_writes_run_on_the_writer_thread_and_reads_on_a_read_only_connection(db)
         assert conn is not db._wconn
         with pytest.raises(sqlite3.OperationalError):
             conn.execute("DELETE FROM sessions")
-    assert db.get_session("s1")["status"] == "running"
+    assert db.sessions.get_session("s1")["status"] == "running"
 
 
 def test_write_is_one_transaction_and_rolls_back_on_error(db):
     def fail():
-        db.update_session("s1", status="done")
+        db.sessions.update_session("s1", status="done")
         db.sessions.insert_event("s1", "status", {"status": "done"})
         raise RuntimeError("boom")
     with pytest.raises(RuntimeError):
         db.write(fail)
-    assert db.get_session("s1")["status"] == "running"
+    assert db.sessions.get_session("s1")["status"] == "running"
     assert db.sessions.events("s1") == []
 
 
 def test_nested_write_joins_the_outer_transaction(db):
     def inner():
-        db.update_session("s1", status="queued")
+        db.sessions.update_session("s1", status="queued")
 
     def outer():
         db.write(inner)
@@ -64,13 +64,13 @@ def test_nested_write_joins_the_outer_transaction(db):
         raise RuntimeError("undo both")
     with pytest.raises(RuntimeError):
         db.write(outer)
-    assert db.get_session("s1")["status"] == "running"
+    assert db.sessions.get_session("s1")["status"] == "running"
 
 
 def test_reads_inside_a_write_see_its_uncommitted_changes(db):
     def change_and_read():
-        db.update_session("s1", status="queued")
-        return db.get_session("s1")["status"]
+        db.sessions.update_session("s1", status="queued")
+        return db.sessions.get_session("s1")["status"]
     assert db.write(change_and_read) == "queued"
 
 
@@ -78,10 +78,10 @@ def test_emit_inside_a_transaction_publishes_after_commit_in_the_caller_thread(d
     bus = EventBus(db)
     heard = []
     bus.add_listener(lambda e: heard.append((e["type"], threading.current_thread().name,
-                                             db.get_session("s1")["status"])))
+                                             db.sessions.get_session("s1")["status"])))
 
     def change():
-        db.update_session("s1", status="done")
+        db.sessions.update_session("s1", status="done")
         bus.emit("s1", "status", {"status": "done"})
         assert heard == []  # not before the commit
     db.write(change)
@@ -107,14 +107,14 @@ def test_a_slow_write_does_not_block_reads_or_the_event_loop(db):
 
         def slow():
             started.set()
-            db.update_session("s1", status="done")
+            db.sessions.update_session("s1", status="done")
             released.append(release.wait(scaled(30)))  # the transaction stays open until the loop has read
 
         write = asyncio.create_task(db.awrite(slow))
         assert await asyncio.to_thread(started.wait, scaled(10))
         for _ in range(5):  # the loop keeps turning while the writer is busy
             await asyncio.sleep(0)
-        status = (await asyncio.wait_for(db.aio.get_session("s1"), scaled(10)))["status"]
+        status = (await asyncio.wait_for(db.sessions.aio.get_session("s1"), scaled(10)))["status"]
         still_writing = not write.done()
         release.set()
         await write
@@ -131,8 +131,8 @@ def test_aio_methods_and_aemit(db):
 
     async def run():
         event = await bus.aemit("s1", "user_message", {"content": "parser cache"})
-        await db.aio.update_session("s1", status="done")
-        return event, await db.aio.get_session("s1"), sub.queue.get_nowait()
+        await db.sessions.aio.update_session("s1", status="done")
+        return event, await db.sessions.aio.get_session("s1"), sub.queue.get_nowait()
 
     event, s, published = asyncio.run(run())
     assert s["status"] == "done"
@@ -149,12 +149,12 @@ def test_cancelling_an_awrite_still_delivers_its_events_once(db):
     """The commit happens on the writer whether or not its awaiter is still there, so its events must too."""
     bus = EventBus(db)
     heard = []
-    bus.add_listener(lambda e: heard.append((e["type"], db.get_session("s1")["status"])))
+    bus.add_listener(lambda e: heard.append((e["type"], db.sessions.get_session("s1")["status"])))
     release = threading.Event()
 
     def finish():
         release.wait(5)
-        db.update_session("s1", status="done")
+        db.sessions.update_session("s1", status="done")
         bus.emit("s1", "status", {"status": "done"})
 
     async def run():
@@ -201,7 +201,7 @@ def test_close_stops_the_writer_and_refuses_new_work(tmp_path):
     d.close()
     assert not writer.is_alive()
     with pytest.raises(sqlite3.ProgrammingError):
-        d.insert_session(_session("s2"))
+        d.sessions.insert_session(_session("s2"))
     d.close()  # idempotent
 
 

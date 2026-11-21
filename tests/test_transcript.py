@@ -10,7 +10,7 @@ from harness.transcript import render, write_transcript
 
 def _db(tmp_path, sid: str = "s1") -> Database:
     db = Database(tmp_path / "h.sqlite3")
-    db.insert_session({"id": sid, "project": "demo", "target": "tower", "model": "fake", "title": "Demo",
+    db.sessions.insert_session({"id": sid, "project": "demo", "target": "tower", "model": "fake", "title": "Demo",
                        "status": "done", "workspace": "", "created_at": 1, "updated_at": 1, "context": [],
                        "answer": "", "totals": {}})
     return db

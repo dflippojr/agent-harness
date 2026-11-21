@@ -91,7 +91,7 @@ def test_finish_tool_quote_is_flagged_after_second_try(tmp_path):
         assert len(events(m, s["id"], "quote_check")) == 1
         assert events(m, s["id"], "ungrounded_quotes")[0]["quotes"] == [made_up]
         assert events(m, s["id"], "run_finished")[-1]["ungrounded_quotes"] == [made_up]
-        assert m.db.get_session(s["id"])["run"]["ungrounded_quotes"] == [made_up]
+        assert m.db.sessions.get_session(s["id"])["run"]["ungrounded_quotes"] == [made_up]
         await m.stop()
     asyncio.run(body())
 
@@ -515,8 +515,8 @@ def _seed_unresolved_cancel_work(manager, sid):
                "function": {"name": "Bash", "arguments": json.dumps({"command": "sleep 1"})}}
     queued = {"id": "tool-queued", "type": "function",
               "function": {"name": "Read", "arguments": json.dumps({"file_path": "/workspace/a.txt"})}}
-    session = manager.db.get_session(sid)
-    manager.db.update_session(sid, context=session["context"] + [
+    session = manager.db.sessions.get_session(sid)
+    manager.db.sessions.update_session(sid, context=session["context"] + [
         {"role": "assistant", "content": "", "tool_calls": [running, queued]},
     ], run={**session["run"], "executing": {"id": "tool-running", "name": "Bash"}})
     manager.db.sessions.insert_approval({"id": f"a-pending-{sid[:8]}", "session_id": sid,
@@ -708,13 +708,13 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         await wait_status(m, sid, "running")
         cli = await wait_cli_alive(m, sid)
         _seed_unresolved_cancel_work(m, sid)
-        m.db.update_session(sid, job_id="job-pending-cancel")
+        m.db.sessions.update_session(sid, job_id="job-pending-cancel")
         m.runner.user_cancelled.add(sid)
         cli.process.kill()
         await wait_status(m, sid, "cancelled")
         await asyncio.gather(*m.tasks.values())
         await wait_cli_gone(m, sid)
-        s = m.db.get_session(sid)
+        s = m.db.sessions.get_session(sid)
         assert s["status"] == "cancelled"
         assert s["stop_reason"] == "cancelled"
         assert recorded == [sid]
@@ -746,7 +746,7 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         await wait_status(m, sid, "failed")
         await asyncio.gather(*m.tasks.values())
         await wait_cli_gone(m, sid)
-        s = m.db.get_session(sid)
+        s = m.db.sessions.get_session(sid)
         assert s["status"] == "failed"
         assert recorded == []
         assert s["stop_reason"].startswith("provider_unavailable") or s["stop_reason"].startswith("provider_error")
@@ -825,7 +825,7 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         await wait_status(m, sid, "cancelled")
         await asyncio.gather(*m.tasks.values())
         await wait_cli_gone(m, sid)
-        s = m.db.get_session(sid)
+        s = m.db.sessions.get_session(sid)
         assert s["status"] == "cancelled"
         assert s["stop_reason"] == "cancelled"
         assert recorded == [sid]
@@ -851,7 +851,7 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         await wait_status(m, sid, "failed")
         await asyncio.gather(*m.tasks.values())
         await wait_cli_gone(m, sid)
-        s = m.db.get_session(sid)
+        s = m.db.sessions.get_session(sid)
         assert s["status"] == "failed"
         assert recorded == []
         assert s["stop_reason"].startswith("internal_error")
@@ -1074,7 +1074,7 @@ def test_waiting_limit_status_commits_with_its_limit_waiting_event(tmp_path):
         sub = m.bus.subscribe(sid)
         while (await asyncio.wait_for(sub.queue.get(), 30))["data"].get("status") != "waiting_limit":
             pass
-        assert m.db.get_session(sid)["status"] == "waiting_limit"
+        assert m.db.sessions.get_session(sid)["status"] == "waiting_limit"
         assert [e["backend"] for e in events(m, sid, "limit_waiting")] == ["claude"]
         await m.cancel(sid)
         await m.stop()
@@ -1514,7 +1514,7 @@ def test_cursor_cancel_and_restart_recovery(tmp_path):
         await m1.start()
         sid = m1.create("wait", backend="cursor")["id"]
         for _ in range(500):
-            s = m1.db.get_session(sid)
+            s = m1.db.sessions.get_session(sid)
             if s["run"].get("backend_session_id"):
                 break
             await asyncio.sleep(0.02)

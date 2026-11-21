@@ -190,8 +190,8 @@ class CanaryRunner:
                 m.runner.web_overrides[sid] = web
             else:
                 baseline = self._prepare_hard(task, Path(s["workspace"]))
-                run = dict(m.db.get_session(sid)["run"], max_turns=task.max_turns)
-                m.db.update_session(sid, run=run)
+                run = dict(m.db.sessions.get_session(sid)["run"], max_turns=task.max_turns)
+                m.db.sessions.update_session(sid, run=run)
             # The limit counts only time the canary had the GPU: never time queued behind a real session (even
             # before its first turn), stepped aside, paused by the guard, or held up by an image batch that took the
             # GPU over. A wait that outlasts the run's cap is no verdict on the agent: stopped, excluded as suspended.
@@ -199,7 +199,7 @@ class CanaryRunner:
             limit, ran, stopped, starved = (task.wall_limit if kind == "hard" else WEB_WALL_LIMIT), 0.0, False, False
             asked: dict | None = None
             waited_on = ""
-            while m.db.get_session(sid)["status"] not in DONE:
+            while m.db.sessions.get_session(sid)["status"] not in DONE:
                 held, before = self._has_gpu(sid), self.clock()
                 await self.sleep(1 if self.poll > 1 else self.poll)
                 if held:
@@ -215,7 +215,7 @@ class CanaryRunner:
                     waited_on = self._waited_on(sid)  # before the stop ends the wait
                     starved = await self._stop(sid)
                     break
-            final = m.db.get_session(sid)
+            final = m.db.sessions.get_session(sid)
             status = (APPROVAL_NEEDED if asked else WALL_LIMIT if stopped else "suspended" if starved
                       else final["status"])
             suspended = bool(m.runner.yields.pop(sid, 0)) or any(
@@ -252,7 +252,7 @@ class CanaryRunner:
 
     def _waited_on(self, sid: str) -> str:
         """What a canary session not holding the GPU waits on, in words for the note (#1026)."""
-        status = self.m.db.get_session(sid)["status"]
+        status = self.m.db.sessions.get_session(sid)["status"]
         if status in WAITING_ON:
             return WAITING_ON[status]
         if self.m.runner.gate.exclusive or (self.m.images is not None and self.m.images.gpu_taken):
@@ -269,7 +269,7 @@ class CanaryRunner:
         """Cancel the canary session unless it already ended (safe to race its finish). True if this call ended it."""
         from harness.manager import HarnessError
         m = self.m
-        if m.db.get_session(sid)["status"] in DONE:
+        if m.db.sessions.get_session(sid)["status"] in DONE:
             return False
         try:
             await m.cancel(sid)
@@ -277,7 +277,7 @@ class CanaryRunner:
             if e.status != 409:
                 raise
             return False  # it ended between the read and the cancel
-        if m.db.get_session(sid)["status"] not in DONE:  # cancelled before its task ever ran: nothing marked it
+        if m.db.sessions.get_session(sid)["status"] not in DONE:  # cancelled before its task ever ran: nothing marked it
             m.runner.set_status(sid, "cancelled", stop_reason="cancelled")
         return True
 
@@ -367,7 +367,7 @@ def turn_metrics_by_session(db) -> list[dict]:
     """Every finished session's persisted `turn_metrics` rows, oldest session first (--keep-metrics)."""
     return [{"session": s["id"], "title": s["title"], "status": s["status"],
              "turns": [e["data"] for e in db.sessions.events(s["id"]) if e["type"] == "turn_metrics"]}
-            for s in db.sessions_with_status(*DONE)]
+            for s in db.sessions.sessions_with_status(*DONE)]
 
 
 # by hand, daemon stopped

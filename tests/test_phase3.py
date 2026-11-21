@@ -55,7 +55,7 @@ def edit_steps(content: str = "VALUE = 2\n") -> Script:
 async def finished(m: Manager, sid: str) -> dict:
     await wait_status(m, sid, "done", "failed")
     await asyncio.gather(*list(m.tasks.values()), return_exceptions=True)  # branch is saved as the run wraps up
-    return m.db.get_session(sid)
+    return m.db.sessions.get_session(sid)
 
 
 # git projects
@@ -136,14 +136,14 @@ def test_review_cancelled_mid_write_still_rewrites_the_transcript(tmp_path):
         await m.start(maintenance=False)
         s = await finished(m, m.create("bump", project="proj")["id"])
         entered, release, rewritten = threading.Event(), threading.Event(), threading.Event()
-        update_session, written = m.db.update_session, []
+        update_session, written = m.db.sessions.update_session, []
 
         def slow_update(sid, **fields):
             if "review" in fields:
                 entered.set()
                 release.wait(scaled(60))
             return update_session(sid, **fields)
-        m.db.update_session = slow_update
+        m.db.sessions.update_session = slow_update
 
         def record_write(sid):
             written.append(sid)
@@ -158,7 +158,7 @@ def test_review_cancelled_mid_write_still_rewrites_the_transcript(tmp_path):
             await request
         # the rewrite is an after-commit callback on the writer's caller thread: it can land after the cancel surfaces
         assert await asyncio.to_thread(rewritten.wait, scaled(60)), "transcript was never rewritten"
-        assert m.db.get_session(s["id"])["review"] == "merged"
+        assert m.db.sessions.get_session(s["id"])["review"] == "merged"
         assert written == [s["id"]]
         await m.stop()
     asyncio.run(body())
@@ -285,7 +285,7 @@ def test_cleanup_removes_old_workspaces_keeps_unsaved(tmp_path, monkeypatch):
         assert report["workspaces_removed"] == 2
         assert report["kept"] == 1
         assert sh(src, "show", f"{local['branch']}:late.txt") == "late"
-        assert m.db.get_session(local["id"])["workspace_removed"] == 1
+        assert m.db.sessions.get_session(local["id"])["workspace_removed"] == 1
         assert (await m.changes(local["id"]))["removed"]
         usage = await m.maintenance.usage()
         assert [w["session"] for w in usage["workspaces"]] == [url["id"]]
@@ -364,10 +364,10 @@ def test_homelab_tools_only_in_homelab_projects(tmp_path):
         m = Manager(cfg, chat=Script([Completion(content="hi")]))
         s_lab = m.create("x", project="lab")
         s_plain = m.create("y")
-        names = lambda s: {t["function"]["name"] for t in m.runner.workspace(m.db.get_session(s["id"])).schemas()}
+        names = lambda s: {t["function"]["name"] for t in m.runner.workspace(m.db.sessions.get_session(s["id"])).schemas()}
         assert "restart_service" in names(s_lab)
         assert "restart_service" not in names(s_plain)
-        assert "Homelab access" in m.db.get_session(s_lab["id"])["context"][0]["content"]
+        assert "Homelab access" in m.db.sessions.get_session(s_lab["id"])["context"][0]["content"]
         await asyncio.gather(*m.tasks.values(), return_exceptions=True)
     asyncio.run(body())
 

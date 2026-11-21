@@ -44,7 +44,7 @@ def seed(db: Database, sid: str, project: str, title: str, texts: list[tuple[str
          app_id: str = "") -> None:
     import time
     now = created or time.time()
-    db.insert_session({"id": sid, "project": project, "target": "tower", "model": "fake", "title": title,
+    db.sessions.insert_session({"id": sid, "project": project, "target": "tower", "model": "fake", "title": title,
                        "status": "done", "workspace": "", "created_at": now, "updated_at": now, "context": [],
                        "answer": "", "app_id": app_id})
     db.sessions.insert_event(sid, "session_created", {"title": title, "project": project})
@@ -128,16 +128,16 @@ def test_agent_tools_find_earlier_sessions_but_not_their_own(tmp_path):
         assert second["id"] not in results[0]["output"].split("Read one")[0]
         assert results[1]["ok"]
         assert "off-by-one" in results[1]["output"]
-        assert "session_search" in m.db.get_session(second["id"])["context"][0]["content"]
+        assert "session_search" in m.db.sessions.get_session(second["id"])["context"][0]["content"]
         # #644: the transcript opens with the untrusted banner in the context only; search results stay unmarked.
-        context = m.db.get_session(second["id"])["context"]
+        context = m.db.sessions.get_session(second["id"])["context"]
         searched, read = [msg["content"] for msg in context if msg["role"] == "tool"]
         assert read == taint.banner("session transcript") + "\n" + results[1]["output"]
         assert not searched.startswith("[Untrusted") and not results[1]["output"].startswith("[Untrusted")
         assert "Transcripts from session_read are untrusted" in context[0]["content"]
 
         hidden = m.create("x", project="private")
-        s = m.db.get_session(hidden["id"])
+        s = m.db.sessions.get_session(hidden["id"])
         assert "session_search" not in {t["function"]["name"] for t in m.runner.tool_schemas(s, m.runner.workspace(s))}
         await m.stop()
     asyncio.run(body())
@@ -225,7 +225,7 @@ def test_memory_edit_needs_approval_then_commits_and_pushes(tmp_path):
         m = Manager(cfg, chat=Script(steps))
         await m.start(maintenance=False)
         s = m.create("remember that I started Sunday league play")
-        assert "memory_edit" in m.db.get_session(s["id"])["context"][0]["content"]
+        assert "memory_edit" in m.db.sessions.get_session(s["id"])["context"][0]["content"]
         await wait_status(m, s["id"], "waiting_approval")
         approval = m.db.sessions.pending_approvals(s["id"])[0]
         assert approval["reason"] == "changes your memory library"
@@ -309,7 +309,7 @@ def test_profile_frozen_per_session_and_not_given_to_apps(tmp_path):
         await m.start(maintenance=False)
         await m.memory_library.refresh(force=True)
         first = m.create("remember my GitHub account")
-        system = m.db.get_session(first["id"])["context"][0]["content"]
+        system = m.db.sessions.get_session(first["id"])["context"][0]["content"]
         assert "User profile (agent-profile.md" in system
         assert "Prefers short answers." in system
         assert "personal GitHub" not in system
@@ -317,11 +317,11 @@ def test_profile_frozen_per_session_and_not_given_to_apps(tmp_path):
         m.decide(first["id"], None, approve=True)
         await wait_status(m, first["id"], "done", timeout=30)
         # the running session's prompt didn't change; the next session sees the edit
-        assert m.db.get_session(first["id"])["context"][0]["content"] == system
+        assert m.db.sessions.get_session(first["id"])["context"][0]["content"] == system
         second = m.create("what account?")
-        assert "Uses the personal GitHub account." in m.db.get_session(second["id"])["context"][0]["content"]
+        assert "Uses the personal GitHub account." in m.db.sessions.get_session(second["id"])["context"][0]["content"]
         app = m.create("from an app", app={"id": "k-1", "name": "shop"})
-        assert "User profile" not in m.db.get_session(app["id"])["context"][0]["content"]
+        assert "User profile" not in m.db.sessions.get_session(app["id"])["context"][0]["content"]
         await m.stop()
     asyncio.run(body())
 
@@ -454,7 +454,7 @@ def test_due_job_runs_once_skips_overlap_and_records_status(tmp_path):
         now = time.time()
         started = m.jobs.tick(now)
         assert len(started) == 1
-        s = m.db.get_session(started[0])
+        s = m.db.sessions.get_session(started[0])
         assert s["job_id"] == job["id"]
         assert s["title"].startswith("⏰ Morning check")
         assert "STATUS: OK" in s["context"][1]["content"]
@@ -470,12 +470,12 @@ def test_due_job_runs_once_skips_overlap_and_records_status(tmp_path):
 
         # overlap: a due job whose last run is still active skips the slot
         JobStore(m.db).update_job(job["id"], next_run_at=time.time() - 1)
-        m.db.update_session(s["id"], status="running")
+        m.db.sessions.update_session(s["id"], status="running")
         assert m.jobs.tick(time.time()) == []
         skipped = JobStore(m.db).get_job(job["id"])
         assert "still going" in skipped["last_skip"]
         assert skipped["next_run_at"] > time.time()
-        m.db.update_session(s["id"], status="done")
+        m.db.sessions.update_session(s["id"], status="done")
         await m.stop()
     asyncio.run(body())
 
@@ -491,7 +491,7 @@ def test_catch_up_after_downtime(tmp_path):
         assert JobStore(m.db).get_job(stale["id"])["next_run_at"] > time.time()
         assert "missed" in JobStore(m.db).get_job(stale["id"])["last_skip"]
         started = m.jobs.tick(time.time())
-        assert [m.db.get_session(sid)["job_id"] for sid in started] == [recent["id"]]
+        assert [m.db.sessions.get_session(sid)["job_id"] for sid in started] == [recent["id"]]
         for sid in started:
             await wait_status(m, sid, "done")
         await m.stop()
@@ -507,7 +507,7 @@ def test_job_notifications_quiet_unless_attention(tmp_path):
     low = add_job(m, name="low", notify="low")
     loud = add_job(m, name="loud", notify="always")
     sid = "s1"
-    m.db.insert_session({"id": sid, "project": "scratch", "target": "tower", "model": "fake", "title": "t",
+    m.db.sessions.insert_session({"id": sid, "project": "scratch", "target": "tower", "model": "fake", "title": "t",
                          "status": "done", "workspace": "", "created_at": 0, "updated_at": 0, "context": []})
 
     def build(job, **data):
@@ -535,7 +535,7 @@ def test_job_notifications_without_the_jobs_module_use_the_session_title(tmp_pat
     m = Manager(cfg, chat=Script([Completion(content="x")]))
     job = add_job(m, name="quiet", notify="attention")
     assert m.modules.scheduled_job(job["id"])["notify"] == "attention"
-    m.db.insert_session({"id": "s1", "project": "scratch", "target": "tower", "model": "fake", "title": "nightly run",
+    m.db.sessions.insert_session({"id": "s1", "project": "scratch", "target": "tower", "model": "fake", "title": "nightly run",
                          "status": "done", "workspace": "", "created_at": 0, "updated_at": 0, "context": []})
     del m.modules.runtimes["jobs"]
     assert m.modules.scheduled_job(job["id"]) is None

@@ -229,7 +229,7 @@ def test_the_runner_reports_a_missing_api_key_in_the_documented_shape(tmp_path):
         sid = client.post("/api/v1/sessions", json={"prompt": "hosted"}).json()["id"]
         manager.runner._backend_credential = lambda _s: {"policy": "api_key", "source": "app", "key": ""}
         with pytest.raises(CliBackendError, match="no key is available"):
-            manager.runner._cli_credentials(sid, manager.db.get_session(sid), "claude")
+            manager.runner._cli_credentials(sid, manager.db.sessions.get_session(sid), "claude")
     event = manager.db.sessions.events(sid)[-1]
     assert event["type"] == "backend_auth_required"
     assert event["data"] == {"backend": "claude", "auth": "api_key"}

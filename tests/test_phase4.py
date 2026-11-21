@@ -131,7 +131,7 @@ def executor(tmp: Path, roots: list[Path]) -> harness_runner.Executor:
 async def settle(m: Manager, sid: str) -> dict:
     await wait_status(m, sid, "done", "failed", "cancelled", timeout=30)
     await asyncio.gather(*list(m.tasks.values()), return_exceptions=True)
-    return m.db.get_session(sid)
+    return m.db.sessions.get_session(sid)
 
 
 needs_bash = pytest.mark.skipif(bash() is None, reason="needs bash (Git Bash on Windows)")

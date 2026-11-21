@@ -2,7 +2,7 @@
 
 `run` is one JSON column of about 34 keys. Writing one key means writing the whole value, so a write that builds the
 new value from a copy read on a pooled reader, and commits it later in a writer job of its own, overwrites whatever
-another writer job committed in between. `Database.patch_run` merges the fields into the row as it stands inside one
+another writer job committed in between. `SessionStore.patch_run` merges the fields into the row as it stands inside one
 writer transaction, so nothing written meanwhile is lost.
 
 Each case below runs one of the runner's `run` writes while `Interleave` queues a writer job at the worst moment: right
@@ -41,23 +41,25 @@ class Interleave:
     the session on a pooled reader and its write; or, when it does not read first, before its first write or the
     first transaction it starts on the session's store."""
 
+    SESSION_NAMES = ("get_session", "update_session", "patch_run")  # on the session proxy or store (#992 stage 6)
+
     def __init__(self, db, sid: str):
         self.db, self.sid, self.fired = db, sid, False
-        self.names = [name for name in ("get_session", "update_session", "patch_run", "for_session")
-                      if hasattr(db, name)]
 
     def __enter__(self):
-        self.real = {name: getattr(self.db, name) for name in self.names}
-        self.db.get_session = self._get_session
-        self.db.update_session = self._update_session
+        sessions = self.db.sessions
+        self.real = {name: getattr(sessions, name) for name in self.SESSION_NAMES}
+        self.real["for_session"] = self.db.for_session
+        sessions.get_session = self._get_session
+        sessions.update_session = self._update_session
+        sessions.patch_run = self._patch_run
         self.db.for_session = self._for_session
-        if "patch_run" in self.real:
-            self.db.patch_run = self._patch_run
         return self
 
     def __exit__(self, *exc):
-        for name in self.names:
-            self.db.__dict__.pop(name, None)
+        for name in self.SESSION_NAMES:
+            self.db.sessions.__dict__.pop(name, None)
+        self.db.__dict__.pop("for_session", None)
 
     def _outside(self, sid: str) -> bool:
         return sid == self.sid and not self.fired and not self.db.in_transaction()
@@ -119,7 +121,7 @@ def manager(tmp_path):
 
 
 def _run(manager, sid: str) -> dict:
-    return manager.db.get_session(sid)["run"]
+    return manager.db.sessions.get_session(sid)["run"]
 
 
 def _check(manager, sid: str, interleave: Interleave, **expected) -> None:
@@ -173,12 +175,12 @@ def test_workspace_context_keeps_a_field_written_meanwhile(manager):
 
 def test_origin_refresh_keeps_a_field_written_meanwhile(manager):
     sid = manager.create("refresh")["id"]
-    manager.db.update_session(sid, project="repo", base_commit="abc123")
+    manager.db.sessions.update_session(sid, project="repo", base_commit="abc123")
 
     async def refreshed(*_args):
         return ""
     manager.runner._refresh_origin = refreshed
-    s = manager.db.get_session(sid)
+    s = manager.db.sessions.get_session(sid)
     with Interleave(manager.db, sid) as interleave:
         asyncio.run(manager.runner._setup_repo(s))
     _check(manager, sid, interleave, origin_refreshed=True)
@@ -210,7 +212,7 @@ def test_hosted_start_keeps_a_field_written_meanwhile(manager):
 def test_split_mode_file_write_keeps_a_field_written_meanwhile(manager):
     manager.cfg.backends["claude"].tool_mode = "split"
     sid = manager.create("split", backend="claude")["id"]
-    s = manager.db.get_session(sid)
+    s = manager.db.sessions.get_session(sid)
     with Interleave(manager.db, sid) as interleave:
         asyncio.run(manager.runner._split_call(s, "write_file", {"path": "a.txt", "content": "hi"}))
     _check(manager, sid, interleave, files_touched=["a.txt"])
@@ -248,20 +250,20 @@ def _row(sid: str, app_id: str = "", run: dict | None = None) -> dict:
 def test_patch_run_merges_unset_run_removes_and_both_return_the_new_run(tmp_path):
     db = Database(tmp_path / "harness.sqlite3")
     try:
-        db.insert_session(_row("s-1"))
-        assert db.patch_run("s-1", turns=3, rate_limits={"utilization": 0.5}) == {
+        db.sessions.insert_session(_row("s-1"))
+        assert db.sessions.patch_run("s-1", turns=3, rate_limits={"utilization": 0.5}) == {
             "turns": 3, "notes": "keep", "stale": 1, "rate_limits": {"utilization": 0.5}}
-        assert db.unset_run("s-1", "stale", "never-there") == {
+        assert db.sessions.unset_run("s-1", "stale", "never-there") == {
             "turns": 3, "notes": "keep", "rate_limits": {"utilization": 0.5}}
-        assert db.get_session("s-1")["run"] == {"turns": 3, "notes": "keep", "rate_limits": {"utilization": 0.5}}
-        assert db.patch_run("missing", turns=1) is None  # a session that is gone: nothing written, no error
-        assert db.unset_run("missing", "turns") is None
+        assert db.sessions.get_session("s-1")["run"] == {"turns": 3, "notes": "keep", "rate_limits": {"utilization": 0.5}}
+        assert db.sessions.patch_run("missing", turns=1) is None  # a session that is gone: nothing written, no error
+        assert db.sessions.unset_run("missing", "turns") is None
 
         def one_transaction() -> None:  # nested in a write it joins that transaction
-            db.patch_run("s-1", a=1)
-            db.patch_run("s-1", b=2)
+            db.sessions.patch_run("s-1", a=1)
+            db.sessions.patch_run("s-1", b=2)
         db.write(one_transaction)
-        run = db.get_session("s-1")["run"]
+        run = db.sessions.get_session("s-1")["run"]
         assert (run["a"], run["b"], run["turns"]) == (1, 2, 3)
     finally:
         db.close()
@@ -270,16 +272,16 @@ def test_patch_run_merges_unset_run_removes_and_both_return_the_new_run(tmp_path
 def test_patch_run_goes_to_the_app_store_and_never_to_an_erased_session(tmp_path):
     stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
     try:
-        stores.insert_session(_row("app-sess", app_id="k-app1"))
-        stores.insert_session(_row("web-sess"))
-        stores.patch_run("app-sess", turns=9)
-        stores.patch_run("web-sess", turns=7)
-        assert stores.get_session("app-sess")["run"]["turns"] == 9
-        assert stores.get_session("web-sess")["run"]["turns"] == 7
-        assert stores.main.get_session("app-sess") is None  # the App's row lives in its own store only
-        stores.delete_session("app-sess")
+        stores.sessions.insert_session(_row("app-sess", app_id="k-app1"))
+        stores.sessions.insert_session(_row("web-sess"))
+        stores.sessions.patch_run("app-sess", turns=9)
+        stores.sessions.patch_run("web-sess", turns=7)
+        assert stores.sessions.get_session("app-sess")["run"]["turns"] == 9
+        assert stores.sessions.get_session("web-sess")["run"]["turns"] == 7
+        assert stores.main.sessions.get_session("app-sess") is None  # the App's row lives in its own store only
+        stores.sessions.delete_session("app-sess")
         with pytest.raises(sqlite3.ProgrammingError):
-            stores.patch_run("app-sess", turns=10)
+            stores.sessions.patch_run("app-sess", turns=10)
     finally:
         stores.close()
 
@@ -293,7 +295,7 @@ class AfterTheRead:
     def __init__(self, db: Database, sid: str):
         self.db, self.sid, self.fired = db, sid, False
 
-    def __enter__(self):  # on the SessionStore, where the primitive reads (#992; `db.get_session` forwards to it)
+    def __enter__(self):  # on the SessionStore, where the primitive reads (#992)
         self.read = self.db.sessions.get_session
         self.db.sessions.get_session = self._get_session
         return self
@@ -311,7 +313,7 @@ class AfterTheRead:
     def _another_writer(self) -> None:  # a read and a write in one transaction: it loses nothing itself
         run = dict(self.read(self.sid)["run"])
         run[INTERLEAVED] = True
-        self.db.update_session(self.sid, run=run)
+        self.db.sessions.update_session(self.sid, run=run)
 
 
 @pytest.mark.parametrize("call, expected", [
@@ -324,11 +326,11 @@ def test_a_field_another_writer_commits_after_the_primitive_reads_survives(tmp_p
     primitive loses the transaction wrapper or reads outside the transaction it writes in."""
     db = Database(tmp_path / "harness.sqlite3")
     try:
-        db.insert_session(_row("s-1"))
+        db.sessions.insert_session(_row("s-1"))
         with AfterTheRead(db, "s-1") as after:
-            assert call(db) == expected
+            assert call(db.sessions) == expected
         assert after.fired, "the primitive never read the session through SessionStore.get_session"
-        run = db.get_session("s-1")["run"]
+        run = db.sessions.get_session("s-1")["run"]
         assert run.get(INTERLEAVED) is True, f"the field another writer committed after the read was lost: {run}"
         assert run == {**expected, INTERLEAVED: True}
     finally:
@@ -387,10 +389,10 @@ def _scan() -> list[str]:
 
 
 def test_no_code_rewrites_run_from_a_copy():
-    """#991: every write of some of `run`'s fields goes through `Database.patch_run`, which merges them into the row
+    """#991: every write of some of `run`'s fields goes through `SessionStore.patch_run`, which merges them into the row
     inside one writer transaction. A whole-value write built from a spread copy of `run` would overwrite whatever
     another write committed after that copy was read."""
-    assert _scan() == [], "write these fields with db.patch_run(sid, **fields) instead"
+    assert _scan() == [], "write these fields with db.sessions.patch_run(sid, **fields) instead"
 
 
 def test_the_audit_flags_each_form_of_a_rewrite_from_a_copy():

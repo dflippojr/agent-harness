@@ -133,7 +133,7 @@ def test_rejected_approval_audit_failure_preserves_conflict(manager, monkeypatch
 
 @pytest.mark.parametrize("kind", ["member", "app"])
 def test_foreign_sessions_not_copied(manager, monkeypatch, kind):
-    manager.db.update_session("session1", **({"owner_id": "u-member"} if kind == "member" else {"app_id": "app-a"}))
+    manager.db.sessions.update_session("session1", **({"owner_id": "u-member"} if kind == "member" else {"app_id": "app-a"}))
     approval(manager)
     manager.decide("session1", "a-test", True, context=CTX)
     monkeypatch.setattr(manager, "_review", AsyncMock(return_value={}))
@@ -287,7 +287,7 @@ def test_job_mutation_aliases(manager, path, source, monkeypatch):
 def test_checkpoint_aliases(manager, monkeypatch, kind, path, source):
     m = manager
     key, secret = m.db.create_api_key("test", "admin", kind="owner")
-    monkeypatch.setattr(m, "_idle_for_checkpoint", AsyncMock(return_value=m.db.get_session("session1")))
+    monkeypatch.setattr(m, "_idle_for_checkpoint", AsyncMock(return_value=m.db.sessions.get_session("session1")))
     if kind == "fork":
         seed(m.db, "new-session", "scratch", SENTINEL, [])
         monkeypatch.setattr(m, "_fork", AsyncMock(return_value="new-session"))
@@ -312,7 +312,7 @@ def test_checkpoint_aliases(manager, monkeypatch, kind, path, source):
 def test_review_aliases_and_error_contract(manager, monkeypatch, path, source, action):
     m = manager
     key, secret = m.db.create_api_key("test", "admin sessions", kind="owner")
-    monkeypatch.setattr(m, "_review", AsyncMock(return_value=m.db.get_session("session1")))
+    monkeypatch.setattr(m, "_review", AsyncMock(return_value=m.db.sessions.get_session("session1")))
     with TestClient(create_app(m)) as client:
         response = client.post(path + "/sessions/session1/review/" + action,
                                headers={"Authorization": "Bearer " + secret})
@@ -410,10 +410,10 @@ def test_compare_preserves_review_initiator(manager, monkeypatch):
     m = manager
     seed(m.db, "session2", "scratch", SENTINEL, [])
     for sid in ("session1", "session2"):
-        m.db.update_session(sid, compare_group="group1")
+        m.db.sessions.update_session(sid, compare_group="group1")
     async def review(sid, action):
-        m.db.update_session(sid, review="merged" if action == "merge" else "discarded")
-        return m.db.get_session(sid)
+        m.db.sessions.update_session(sid, review="merged" if action == "merge" else "discarded")
+        return m.db.sessions.get_session(sid)
     monkeypatch.setattr(m, "_review", review)
     asyncio.run(m.compare_pick("group1", "session1", "merge", True, context=CTX))
     assert pair(m, "review.merge")["target_id"] == "session1"

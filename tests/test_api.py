@@ -96,11 +96,11 @@ def test_pushed_session_links_to_github_pull_request(tmp_path):
     oh = {"Tailscale-User-Login": LOGIN}
     with client:
         sid = client.post("/sessions", json={"prompt": "hi"}, headers=oh).json()["id"]
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
 
         def url(project="ghp", review="pushed", item=None, base="", title="Fix A & B #2 now"):
             meta = {"github_base_branch": base, **({"github_item": item} if item else {})}
-            m.db.update_session(sid, project=project, review=review, branch="agent/abc", base_branch="main",
+            m.db.sessions.update_session(sid, project=project, review=review, branch="agent/abc", base_branch="main",
                                 title=title, app_metadata=meta)
             return client.get(f"/sessions/{sid}", headers=oh).json().get("pull_request_url")
 
@@ -199,7 +199,7 @@ def test_create_project_api_is_hot_and_private(tmp_path):
         assert (m.cfg.data_dir / "projects.yaml").exists()
         session = client.post("/sessions", headers=owner, json={"prompt": "hello", "project": "notes"})
         assert session.status_code == 201
-        assert m.db.get_session(session.json()["id"])["owner_id"] == "owner"
+        assert m.db.sessions.get_session(session.json()["id"])["owner_id"] == "owner"
         assert client.post("/projects", headers=owner, json={"name": "notes"}).status_code == 400
         assert client.post("/projects", headers=owner, json={"name": "Not a slug"}).status_code == 400
         assert client.post("/projects", headers=owner,
@@ -210,7 +210,7 @@ def test_rename_session(tmp_path):
     client, m, _ = make_client(tmp_path, [Completion(content="hi")])
     with client:
         sid = client.post("/sessions", json={"prompt": "Make dark mode black"}).json()["id"]
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
         renamed = client.patch(f"/sessions/{sid}", json={"title": "  Dark mode  "}).json()
         assert renamed["title"] == "Dark mode"
         assert client.get(f"/sessions/{sid}").json()["title"] == "Dark mode"
@@ -225,9 +225,9 @@ def test_session_list_has_whole_chat_summary(tmp_path):
                                           Completion(content="Moved the control to the header.")])
     with client:
         sid = client.post("/sessions", json={"prompt": "Make dark mode black"}).json()["id"]
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
         client.post(f"/sessions/{sid}/messages", json={"content": "Also move the profile control"})
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
         card = next(item for item in client.get("/sessions").json() if item["id"] == sid)
         assert "Make dark mode black" in card["chat_summary"]
         assert "Also move the profile control" in card["chat_summary"]
@@ -256,7 +256,7 @@ def test_approval_notification_and_token_buttons(tmp_path):
         path = approve_url[len(PUBLIC):]
         assert client.post(path).json()["status"] == "approved"
         assert client.post(path).json()["status"] == "approved"  # pressing twice is harmless
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
         replaced = wait_for(lambda: next((p for p in sent if p.get("sequence_id") == approval["id"]
                                           and "Approved" in p["title"]), None))
         assert "a.txt" in replaced["message"]
@@ -283,7 +283,7 @@ def test_templates_rerun_and_changes(tmp_path):
         repo = m.cfg.workspaces_dir / s["id"] / "repo"
         repo.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        wait_for(lambda: m.db.get_session(s["id"])["status"] == "done")
+        wait_for(lambda: m.db.sessions.get_session(s["id"])["status"] == "done")
         changes = client.get(f"/sessions/{s['id']}/changes").json()["repos"][0]
         assert changes["path"] == "repo"
         assert "+hello" in changes["diff"]
@@ -319,7 +319,7 @@ def test_sleeping_model_is_announced_and_warmed(tmp_path):
 
         states["now"] = SLEEPING  # asleep again when the task starts
         sid = client.post("/sessions", json={"prompt": "hi"}).json()["id"]
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
         types = [e["type"] for e in m.db.sessions.events(sid)]
         assert types.index("model_waking") < types.index("model_ready") < types.index("assistant")
         note = wait_for(lambda: next((p for p in sent if p["title"].startswith("Waking the model")), None))
@@ -372,7 +372,7 @@ def test_guest_demo_access(tmp_path):
         created = client.post("/sessions", json={"prompt": "hello"}, headers=oh)
         assert created.status_code == 201
         sid = created.json()["id"]
-        assert m.db.get_session(sid)["owner_id"] == "owner"
+        assert m.db.sessions.get_session(sid)["owner_id"] == "owner"
         assert client.patch(f"/sessions/{sid}", json={"title": "Nope"}, headers=gh).status_code == 403
         assert client.get(f"/sessions/{sid}", headers=gh).status_code == 404
         assert client.get(f"/sessions/{sid}/transcript", headers=gh).status_code == 404

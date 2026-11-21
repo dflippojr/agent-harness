@@ -235,7 +235,7 @@ def test_native_loop_approval_events_taint_metrics_and_cleanup(tmp_path, fake_tr
                 if m.db.sessions.pending_approvals(sid):
                     break
                 await asyncio.sleep(0.01)
-            assert m.db.sessions.pending_approvals(sid), m.db.get_session(sid)
+            assert m.db.sessions.pending_approvals(sid), m.db.sessions.get_session(sid)
             assert not events(m, sid, "tool_result")
             m.decide(sid, None, approve=approve)
             final = await wait_status(m, sid, "done", "failed")
@@ -388,7 +388,7 @@ def test_session_isolation_rule_overrides_and_cancellation(tmp_path, fake_transp
             m.tasks[s["id"]].cancel()
             await asyncio.gather(m.tasks[s["id"]], return_exceptions=True)
             assert not m.modules.get("mcp_client").sessions
-            assert not m.db.get_session(s["id"])["taint"]
+            assert not m.db.sessions.get_session(s["id"])["taint"]
             assert all(client.proc.poll() is not None for client in fake_transport[0])
         finally:
             await m.stop()
@@ -424,7 +424,7 @@ def test_client_prefix_can_overlap_the_harness_alias(tmp_path, fake_transport):
             name = "mcp__harness__docs__echo"
             assert m.runner.policy(final).decide(name, {}).action == "ask"
             m.runner._taint_from_result(final, name, {})
-            assert m.db.get_session(s["id"])["taint"][0]["origin"] == name
+            assert m.db.sessions.get_session(s["id"])["taint"][0]["origin"] == name
             assert taint.source_for("mcp__harness__read_file", {}) is None
             # #644: the configured server's tool is bannered; the harness's own alias is not.
             mcp_banner = taint.banner("MCP tool result") + "\n"

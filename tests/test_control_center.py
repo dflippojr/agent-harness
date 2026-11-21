@@ -26,8 +26,8 @@ def make_client(tmp_path):
 def wait_done(manager, sid: str, timeout: float = 10) -> None:
     """The run continues on the app's loop after the create request returns (its writes are awaited, #294)."""
     deadline = time.monotonic() + timeout
-    while manager.db.get_session(sid)["status"] != "done" or sid in manager.tasks:
-        assert time.monotonic() < deadline, manager.db.get_session(sid)["status"]
+    while manager.db.sessions.get_session(sid)["status"] != "done" or sid in manager.tasks:
+        assert time.monotonic() < deadline, manager.db.sessions.get_session(sid)["status"]
         time.sleep(0.01)
 
 
@@ -37,7 +37,7 @@ def test_bundled_web_dogfoods_app_api_without_becoming_an_app(tmp_path):
         created = client.post("/api/v1/sessions", json={"prompt": "from bundled Stables"})
         assert created.status_code == 201
         sid = created.json()["id"]
-        assert manager.db.get_session(sid)["app_id"] == ""
+        assert manager.db.sessions.get_session(sid)["app_id"] == ""
         wait_done(manager, sid)
         listed = client.get("/api/v1/sessions").json()[0]
         assert listed["id"] == sid
@@ -227,7 +227,7 @@ def test_independent_web_owner_token_cors_and_stream_ticket(tmp_path):
         created = client.post("/api/v1/sessions", headers=headers, json={"prompt": "remote owner"})
         assert created.status_code == 201
         sid = created.json()["id"]
-        assert manager.db.get_session(sid)["app_id"] == ""
+        assert manager.db.sessions.get_session(sid)["app_id"] == ""
         ticket = client.post(f"/api/v1/sessions/{sid}/events/ticket", headers=headers)
         assert ticket.status_code == 201
         streamed = client.get(ticket.json()["events_url"] + "&follow=false", headers={"Origin": ORIGIN})

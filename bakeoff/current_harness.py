@@ -76,7 +76,7 @@ async def run_current(task, run_dir: Path, model: str, base_url: str, chat=None)
             return {"answer": "", "finished": False, "turns": 0, "tool_calls": 0, "tool_errors": 0,
                     "stop_reason": report.status, "adapter_error": "Manager did not create a session",
                     "wall_seconds": time.monotonic() - started}
-        final = manager.db.get_session(workspace.name)
+        final = manager.db.sessions.get_session(workspace.name)
         events = manager.db.sessions.events(final["id"])
         result = session_result(final, events)
         if report.outcomes[0]["status"] == "wall_limit":

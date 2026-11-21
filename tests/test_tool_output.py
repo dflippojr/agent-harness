@@ -334,7 +334,7 @@ def test_bookkeeping_results_are_bounded_like_every_other_result(tmp_path):
             assert_bounded(notes, script.requests[2][-1]["content"])
             # reset_round restarts the context, which a step-indexed Script would replay, so it is called directly.
             await m.runner._reset_round_call(sid, call("reset_round", 9), {})
-            assert_bounded(events(m, sid, "tool_result")[-1], m.db.get_session(sid)["context"][-1]["content"])
+            assert_bounded(events(m, sid, "tool_result")[-1], m.db.sessions.get_session(sid)["context"][-1]["content"])
         finally:
             await m.stop()
     m = sid = None

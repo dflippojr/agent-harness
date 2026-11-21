@@ -296,7 +296,7 @@ def test_sending_code_never_runs_it_and_the_model_has_no_runner_tool(tmp_path):
         wait_for(lambda: client.get(f"/chats/{chat['id']}").json()["status"] == "done")
         client.post(f"/chats/{chat['id']}/messages", json={"content": "run this " + code}, headers=OWNER)
         wait_for(lambda: client.get(f"/chats/{chat['id']}").json()["status"] == "done")
-        s = m.db.get_session(chat["id"])
+        s = m.db.sessions.get_session(chat["id"])
         names = {t["function"]["name"] for t in Runner.tool_schemas(m.runner, s, None)}
         assert not any("snippet" in n or "run" in n for n in names)
         assert fake.calls == []
@@ -378,7 +378,7 @@ def test_results_reach_the_model_with_the_next_message_only(tmp_path):
         wait_for(lambda: client.get(f"/chats/{sid}").json()["status"] == "done")
         client.post(f"/chats/{sid}/messages", json={"content": "thanks"}, headers=OWNER)
         wait_for(lambda: client.get(f"/chats/{sid}").json()["status"] == "done")
-        users = [x["content"] for x in m.db.get_session(sid)["context"] if x["role"] == "user"]
+        users = [x["content"] for x in m.db.sessions.get_session(sid)["context"] if x["role"] == "user"]
         assert "untrusted" in users[-2]
         assert "print('hi')" in users[-2]
         assert "<b>hi</b>" in users[-2]

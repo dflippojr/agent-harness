@@ -146,7 +146,7 @@ def test_a_member_with_a_key_runs_on_that_key_alone(tmp_path, monkeypatch):
         assert put(client, BOB, "claude", OTHER).status_code == 200
         r = client.post("/api/v1/sessions", json={"prompt": "hi", "backend": "claude"}, headers=H(ALICE))
         assert r.status_code == 201, r.text
-        row = m.db.get_session(r.json()["id"])
+        row = m.db.sessions.get_session(r.json()["id"])
         assert row["end_user"] == member_keys.end_user_id(ids[ALICE]) and row["app_id"] == ""
         # The key the runner uses is proved through the runner in the next test.
         # Codex needs its own key.
@@ -240,7 +240,7 @@ def test_a_members_hosted_session_runs_through_the_runner_on_their_key(tmp_path,
             return sid
         sid = asyncio.run(run())
         assert started == {"api_key": CANARY, "end_user": member_keys.end_user_id(ids[ALICE]), "app_id": ""}
-        run_row = m.db.get_session(sid)["run"]
+        run_row = m.db.sessions.get_session(sid)["run"]
         assert run_row["credential_source"] == "member_api_key" and run_row["billing_mode"] == "api_key"
 
 

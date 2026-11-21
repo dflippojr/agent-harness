@@ -157,7 +157,7 @@ class HostedRuns:
     def _live(self, sid: str) -> dict:
         """Session `sid` while its hosted run is live: its row exists until the run ends (a missing one fails the
         run, as reading it would)."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s is None:
             raise TypeError(f"session {sid} is gone")
         return s
@@ -270,17 +270,17 @@ class HostedRuns:
             await self.aset_status(sid, "running")
         source = (credential["source"] if use_api_key or credential["source"] == "end_user_login"
                   else "subscription")
-        run = self.db.patch_run(sid, billing_mode="api_key" if use_api_key else backend.billing,
+        run = self.db.sessions.patch_run(sid, billing_mode="api_key" if use_api_key else backend.billing,
                                 credential_source=source, credential_assignment=credential["assignment_id"]) or {}
         warning = billing_warning(backend, run.get("rate_limits"), using_api_key=use_api_key)
         if warning and not run.get("billing_warned"):
-            self.db.patch_run(sid, billing_warned=True)
+            self.db.sessions.patch_run(sid, billing_warned=True)
             await self.bus.aemit(sid, "billing_warning", {"backend": backend_name, "message": warning})
         end_user = s.get("end_user") or ""
         if backend_name == "claude" and not end_user and claude_token.uses_token(backend, s.get("app_id") or "", api_key):
             note = claude_token.reminder(backend.oauth_token_file)
             if note and not run.get("token_expiry_warned"):
-                self.db.patch_run(sid, token_expiry_warned=True)
+                self.db.sessions.patch_run(sid, token_expiry_warned=True)
                 await self.bus.aemit(sid, "billing_warning", {"backend": backend_name, "message": note})
         frozen = replace(backend, model=s["model"], effort=s.get("effort") or backend.effort)
         if backend.is_cli:
@@ -324,7 +324,7 @@ class HostedRuns:
                         if m.get("role") == "user" and isinstance(m.get("content"), str)), ""))
         await cli.initialize(prompt)
         if cli.backend_session_id and cli.backend_session_id != backend_session_id:
-            self.db.patch_run(sid, backend_session_id=cli.backend_session_id)
+            self.db.sessions.patch_run(sid, backend_session_id=cli.backend_session_id)
         return cli
 
     async def _print_mode_extra(self, sid: str, s: dict, name: str, backend) -> dict:
@@ -413,7 +413,7 @@ class HostedRuns:
         credential = self._backend_credential(s)
         if credential["policy"] == "subscription_then_api_key" and credential["key"] and not use_api_key:
             def fall_back() -> None:  # queued for a slot again: that wait is not its running time (#524)
-                self.db.patch_run(sid, backend_auth="api_key")
+                self.db.sessions.patch_run(sid, backend_auth="api_key")
                 self._status_writer(sid, "queued", {})()
                 self.bus.emit(sid, "backend_fallback", {"backend": backend_name, "auth": "api_key"})
             await self.db.for_session(sid).awrite(fall_back)
@@ -421,7 +421,7 @@ class HostedRuns:
         reset = limit.reset_at or time.time() + 300
 
         def wait_for_limit() -> None:  # one commit, so nobody sees waiting_limit without when it resets
-            self.db.patch_run(sid, limit_resets_at=reset)
+            self.db.sessions.patch_run(sid, limit_resets_at=reset)
             self._status_writer(sid, "waiting_limit", {})()
             self.bus.emit(sid, "limit_waiting", {"backend": backend_name, "resets_at": reset})
         await self.db.for_session(sid).awrite(wait_for_limit)
@@ -487,11 +487,11 @@ class HostedRuns:
         def drain_inbox() -> None:
             current = self._live(sid)["inbox"]
             remaining = current[len(queued):] if current[:len(queued)] == queued else current
-            self.db.update_session(sid, inbox=remaining)
+            self.db.sessions.update_session(sid, inbox=remaining)
         await self.db.for_session(sid).awrite(drain_inbox)
 
     def _bind_backend_session(self, sid: str, cli, backend_session_id: str) -> None:
-        self.db.patch_run(sid, backend_session_id=backend_session_id)
+        self.db.sessions.patch_run(sid, backend_session_id=backend_session_id)
         cli.backend_session_id = backend_session_id
 
     async def _apply(self, sid: str, cli, event: Event, recovered: bool = False) -> bool:
@@ -531,7 +531,7 @@ class HostedRuns:
         backend's `stop_at_utilization`, until the window resets."""
         s = self._live(sid)
         backend = self.cfg.backends[s["backend"]]
-        self.db.patch_run(sid, rate_limits=event.info)
+        self.db.sessions.patch_run(sid, rate_limits=event.info)
         self.db.usage.set_backend_usage(s["backend"], event.info)
         self.bus.emit(sid, "rate_limit", event.info)
         if event.billing:
@@ -577,7 +577,7 @@ class HostedRuns:
             counts = {"tool_calls": run.get("tool_calls", 0) + 1}
             if not ok:
                 counts["tool_errors"] = run.get("tool_errors", 0) + 1
-            self.db.patch_run(sid, **counts)
+            self.db.sessions.patch_run(sid, **counts)
             self.bus.emit(sid, "tool_result", {"id": call_id, "name": name, "ok": ok, "seconds": seconds,
                                                "output_chars": len(output),
                                                "output": truncate_middle(output, 20000)})
@@ -701,13 +701,13 @@ class HostedRuns:
                 failure = {"code": "provider_error", "provider": s["backend"],
                            "message": result.answer or result.subtype or "provider failed", "retryable": True}
                 fields["failure"] = failure
-            run = self.db.patch_run(sid, **fields) or {}
+            run = self.db.sessions.patch_run(sid, **fields) or {}
             totals = dict(s["totals"])
             totals["turns"] = totals.get("turns", 0) + result.turns
             totals["prompt_tokens"] = totals.get("prompt_tokens", 0) + prompt_tokens
             totals["completion_tokens"] = totals.get("completion_tokens", 0) + completion_tokens
             totals["total_cost_usd"] = round(float(totals.get("total_cost_usd", 0)) + result.cost, 10)
-            self.db.update_session(sid, totals=totals, status=status, stop_reason=reason, answer=result.answer)
+            self.db.sessions.update_session(sid, totals=totals, status=status, stop_reason=reason, answer=result.answer)
             self._flag_end_pending(sid, status)
             self.db.usage.record_usage(
                 s["backend"], sid, s.get("app_id", ""), prompt_tokens, completion_tokens, result.cost,

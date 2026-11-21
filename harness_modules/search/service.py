@@ -203,7 +203,7 @@ def _compact_event(t: str, d: dict, lines: list[str], last_content: str) -> str:
 
 
 def compact_transcript(db, sid: str) -> str:
-    s = db.get_session(sid)
+    s = db.sessions.get_session(sid)
     if s is None:
         raise ToolError(f"no session {sid}")
     created = time.strftime("%Y-%m-%d %H:%M", time.localtime(s["created_at"]))
@@ -299,9 +299,9 @@ class SessionSearch:
         ids = readable_session_ids(self.db, session_id, _session)
         if len(ids) != 1:
             raise ToolError(f"no session matches {session_id!r}" if not ids else f"{session_id!r} is ambiguous")
-        before = self.db.get_session(ids[0])
+        before = self.db.sessions.get_session(ids[0])
         text = compact_transcript(self.db, ids[0])
-        read = self.db.get_session(ids[0]) or before  # taint added during the read counts; a deleted one keeps its own
+        read = self.db.sessions.get_session(ids[0]) or before  # taint added during the read counts; a deleted one keeps its own
         tainted = (read or {}).get("taint") or []
         source = [("session", f"session {ids[0]} ({tainted[0]['origin']})")] if tainted else []
         return ToolOutput(self._page(text, start, find), taint=source)

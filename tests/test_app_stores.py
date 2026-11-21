@@ -147,7 +147,7 @@ def test_startup_migration_moves_app_sessions_with_a_backup_once(tmp_path):
     db = Database(path)
     for sid, app_id, word in (("own1", "", "heron"), ("a1", "k-aaaa", "pelican"), ("a2", "k-aaaa", "osprey"),
                               ("b1", "k-bbbb", "walrus")):
-        db.insert_session(_session(sid, app_id))
+        db.sessions.insert_session(_session(sid, app_id))
         _fill(db, sid, word)
     db.usage.record_usage("fake", "a1", "k-aaaa", 10, 5, 0.0, "subscription")  # metadata: stays in the main store
     db.close()
@@ -157,7 +157,7 @@ def test_startup_migration_moves_app_sessions_with_a_backup_once(tmp_path):
     assert len(backups) == 1 and session_ids(backups[0]) == {"own1", "a1", "a2", "b1"}
     web_backups = sorted((tmp_path / "pre-migration").glob("harness-web-store-*.sqlite3"))
     assert len(web_backups) == 1 and session_ids(web_backups[0]) == {"own1"}  # the App sessions had moved
-    assert stores.get_session("a1")["app_id"] == "k-aaaa"
+    assert stores.sessions.get_session("a1")["app_id"] == "k-aaaa"
     assert [e["data"]["content"] for e in stores.sessions.events("b1")] == ["find the walrus"]
     assert stores.sessions.get_approval("ap-a2")["session_id"] == "a2"
     assert stores.sessions.full_artifact("a1", "h1") == "artifact body"
@@ -180,7 +180,7 @@ def test_startup_migration_moves_app_sessions_with_a_backup_once(tmp_path):
               (path, web, apps_dir / "k-aaaa" / APP_STORE_FILE, apps_dir / "k-bbbb" / APP_STORE_FILE)}
     again = SessionStores(Database(path), apps_dir)
     assert again.migrate_app_sessions() is None
-    assert again.get_session("b1")["app_id"] == "k-bbbb" and again.get_session("own1")["app_id"] == ""
+    assert again.sessions.get_session("b1")["app_id"] == "k-bbbb" and again.sessions.get_session("own1")["app_id"] == ""
     again.close()
     assert len(list((tmp_path / "pre-migration").glob("harness-app-stores-*.sqlite3"))) == 1
     assert len(list((tmp_path / "pre-migration").glob("harness-web-store-*.sqlite3"))) == 1
@@ -189,7 +189,7 @@ def test_startup_migration_moves_app_sessions_with_a_backup_once(tmp_path):
 
 def test_an_idle_app_store_closes_and_reopens_on_use(tmp_path):
     stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps", idle_seconds=0.2)
-    stores.insert_session(_session("a1", "k-aaaa", status="queued"))
+    stores.sessions.insert_session(_session("a1", "k-aaaa", status="queued"))
     assert stores.open_apps() == ["k-aaaa"]
     first = stores._open["k-aaaa"].db
     assert first._writer.is_alive()
@@ -198,18 +198,18 @@ def test_an_idle_app_store_closes_and_reopens_on_use(tmp_path):
     wait_for(lambda: not first._writer.is_alive() and first._readers == [], timeout=10)  # closed after let go
     assert not first._writer.is_alive() and first._readers == []
 
-    stores.update_session("a1", status="running")                           # first use reopens it
+    stores.sessions.update_session("a1", status="running")                           # first use reopens it
     assert stores.open_apps() == ["k-aaaa"]
     assert stores._open["k-aaaa"].db is not first
-    assert stores.get_session("a1")["status"] == "running"
-    assert [s["id"] for s in stores.sessions_with_status("running")] == ["a1"]
-    assert stores.count_sessions("owner", "running") == 1
+    assert stores.sessions.get_session("a1")["status"] == "running"
+    assert [s["id"] for s in stores.sessions.sessions_with_status("running")] == ["a1"]
+    assert stores.sessions.count_sessions("owner", "running") == 1
     stores.close()
 
 
 def test_a_store_in_use_is_not_closed(tmp_path):
     stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps", idle_seconds=60)
-    stores.insert_session(_session("a1", "k-aaaa"))
+    stores.sessions.insert_session(_session("a1", "k-aaaa"))
     assert stores.close_idle() == []                                        # used just now
     with stores._using("k-aaaa"):
         assert stores.close_idle(now=time.monotonic() + 61) == []           # busy: kept
@@ -220,9 +220,9 @@ def test_a_store_in_use_is_not_closed(tmp_path):
 
 def test_one_writer_per_store_and_no_write_across_stores(tmp_path):
     stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
-    stores.insert_session(_session("own1"))
-    stores.insert_session(_session("a1", "k-aaaa"))
-    stores.insert_session(_session("b1", "k-bbbb"))
+    stores.sessions.insert_session(_session("own1"))
+    stores.sessions.insert_session(_session("a1", "k-aaaa"))
+    stores.sessions.insert_session(_session("b1", "k-bbbb"))
     writers = {sid: stores.for_session(sid).write(threading.current_thread) for sid in ("own1", "a1", "b1")}
     assert len({id(t) for t in writers.values()}) == 3
     assert all(t is not threading.current_thread() for t in writers.values())
@@ -230,22 +230,22 @@ def test_one_writer_per_store_and_no_write_across_stores(tmp_path):
     seen = []
 
     def app_tx():  # an App's transaction may use the main store (its writer is waited for)
-        stores.update_session("a1", title="renamed")
+        stores.sessions.update_session("a1", title="renamed")
         stores.set_meta("probe", "1")
         seen.append(stores.in_transaction())
         stores.after_commit(lambda: seen.append("committed"))
     stores.for_session("a1").write(app_tx)
-    assert stores.get_session("a1")["title"] == "renamed" and stores.get_meta("probe") == "1"
+    assert stores.sessions.get_session("a1")["title"] == "renamed" and stores.get_meta("probe") == "1"
     assert seen == [True, "committed"]
 
     with pytest.raises(RuntimeError, match="another store's transaction"):
-        stores.main.write(lambda: stores.update_session("a1", title="from main"))
+        stores.main.write(lambda: stores.sessions.update_session("a1", title="from main"))
     with pytest.raises(RuntimeError, match="another store's transaction"):
-        stores.for_session("b1").write(lambda: stores.update_session("a1", title="from b"))
-    assert stores.get_session("a1")["title"] == "renamed"
+        stores.for_session("b1").write(lambda: stores.sessions.update_session("a1", title="from b"))
+    assert stores.sessions.get_session("a1")["title"] == "renamed"
 
     async def reads_off_the_loop():
-        return await stores.aio.get_session("a1"), await stores.for_session("a1").sessions.aio.events("a1")
+        return await stores.sessions.aio.get_session("a1"), await stores.for_session("a1").sessions.aio.events("a1")
     s, events = asyncio.run(reads_off_the_loop())
     assert s["id"] == "a1" and events == []
     stores.close()
@@ -253,16 +253,16 @@ def test_one_writer_per_store_and_no_write_across_stores(tmp_path):
 
 def test_session_ids_stay_unique_across_stores(tmp_path):
     stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
-    stores.insert_session(_session("same"))
+    stores.sessions.insert_session(_session("same"))
     with pytest.raises(sqlite3.IntegrityError):
-        stores.insert_session(_session("same", "k-aaaa"))
-    stores.insert_session(_session("a1", "k-aaaa"))
+        stores.sessions.insert_session(_session("same", "k-aaaa"))
+    stores.sessions.insert_session(_session("a1", "k-aaaa"))
     with pytest.raises(sqlite3.IntegrityError):
-        stores.insert_session(_session("a1", "k-bbbb"))
+        stores.sessions.insert_session(_session("a1", "k-bbbb"))
     with pytest.raises(sqlite3.IntegrityError):
-        stores.insert_session(_session("a1"))
-    assert stores.get_session("a1")["app_id"] == "k-aaaa"
-    assert stores.find_session_ids("a") == ["a1"]
+        stores.sessions.insert_session(_session("a1"))
+    assert stores.sessions.get_session("a1")["app_id"] == "k-aaaa"
+    assert stores.sessions.find_session_ids("a") == ["a1"]
     stores.close()
     assert session_ids(tmp_path / "apps" / "k-aaaa" / APP_STORE_FILE) == {"a1"}
 
@@ -279,59 +279,59 @@ def test_an_app_session_create_that_rolls_back_leaves_no_trace_in_the_index(tmp_
     seen = []
 
     def insert_created(status="queued"):  # as Manager._insert_created: the session, then its events
-        stores.insert_session(_session("a1", "k-aaaa", status=status))
-        seen.append((stores.app_of("a1"), stores.count_sessions("owner", status)))
+        stores.sessions.insert_session(_session("a1", "k-aaaa", status=status))
+        seen.append((stores.app_of("a1"), stores.sessions.count_sessions("owner", status)))
         stores.sessions.insert_event("a1", "session_created", {})
     with pytest.raises(sqlite3.OperationalError):
         stores.for_app("k-aaaa").write(insert_created)
     assert seen == [("k-aaaa", 0)]                            # routed inside its transaction, not counted yet
-    assert stores.app_of("a1") == "" and stores.get_session("a1") is None
-    assert stores.count_sessions("owner", "queued") == 0
-    assert stores.sessions_with_status("queued") == [] and stores.find_session_ids("a") == []
+    assert stores.app_of("a1") == "" and stores.sessions.get_session("a1") is None
+    assert stores.sessions.count_sessions("owner", "queued") == 0
+    assert stores.sessions.sessions_with_status("queued") == [] and stores.sessions.find_session_ids("a") == []
 
     monkeypatch.setattr(SessionStore, "insert_event", real)
     stores.for_app("k-aaaa").write(insert_created)            # the same id again
-    assert stores.get_session("a1")["status"] == "queued"
+    assert stores.sessions.get_session("a1")["status"] == "queued"
     assert [e["type"] for e in stores.sessions.events("a1")] == ["session_created"]
-    assert stores.count_sessions("owner", "queued") == 1
+    assert stores.sessions.count_sessions("owner", "queued") == 1
     stores.close()
     assert session_ids(tmp_path / "apps" / "k-aaaa" / APP_STORE_FILE) == {"a1"}
 
 
 def test_a_status_write_that_rolls_back_leaves_the_index_as_committed(tmp_path):
     stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
-    stores.insert_session(_session("a1", "k-aaaa", status="queued"))
-    stores.insert_session(_session("a2", "k-aaaa", status="running"))
+    stores.sessions.insert_session(_session("a1", "k-aaaa", status="queued"))
+    stores.sessions.insert_session(_session("a2", "k-aaaa", status="running"))
     seen = []
 
     def status_write(sid, status):  # as Manager._status_writer: the status, then its event
-        stores.update_session(sid, status=status)
-        seen.append(stores.count_sessions("owner", status))
+        stores.sessions.update_session(sid, status=status)
+        seen.append(stores.sessions.count_sessions("owner", status))
         raise sqlite3.OperationalError("disk I/O error")
     for sid in ("a1", "a2"):
         with pytest.raises(sqlite3.OperationalError):
             stores.for_session(sid).write(status_write, sid, "done")
     assert seen == [0, 0]                                     # not ahead of the commit, even inside it
-    assert {sid: stores.get_session(sid)["status"] for sid in ("a1", "a2")} == {"a1": "queued", "a2": "running"}
+    assert {sid: stores.sessions.get_session(sid)["status"] for sid in ("a1", "a2")} == {"a1": "queued", "a2": "running"}
     assert {sid: e["status"] for sid, e in stores._indexed(lambda e: True)} == {"a1": "queued", "a2": "running"}
-    assert stores.count_sessions("owner", "queued", "running") == 2 and stores.count_sessions("owner", "done") == 0
+    assert stores.sessions.count_sessions("owner", "queued", "running") == 2 and stores.sessions.count_sessions("owner", "done") == 0
     # what startup resume asks for
-    assert {s["id"] for s in stores.sessions_with_status("queued", "running", "waiting_approval")} == {"a1", "a2"}
+    assert {s["id"] for s in stores.sessions.sessions_with_status("queued", "running", "waiting_approval")} == {"a1", "a2"}
 
     with pytest.raises(sqlite3.OperationalError):             # nor does a delete count before it commits
-        stores.for_session("a1").write(lambda: (stores.delete_session("a1"), status_write("a2", "done")))
-    assert stores.app_of("a1") == "k-aaaa" and stores.get_session("a1")["status"] == "queued"
+        stores.for_session("a1").write(lambda: (stores.sessions.delete_session("a1"), status_write("a2", "done")))
+    assert stores.app_of("a1") == "k-aaaa" and stores.sessions.get_session("a1")["status"] == "queued"
 
-    stores.for_session("a1").write(lambda: stores.update_session("a1", status="running"))
-    assert stores.count_sessions("owner", "running") == 2
-    stores.delete_session("a2")
-    assert stores.app_of("a2") == "" and stores.count_sessions("owner", "running") == 1
+    stores.for_session("a1").write(lambda: stores.sessions.update_session("a1", status="running"))
+    assert stores.sessions.count_sessions("owner", "running") == 2
+    stores.sessions.delete_session("a2")
+    assert stores.app_of("a2") == "" and stores.sessions.count_sessions("owner", "running") == 1
     stores.close()
 
 
 def test_an_app_approval_insert_that_rolls_back_is_not_routed(tmp_path):
     stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
-    stores.insert_session(_session("a1", "k-aaaa", status="running"))
+    stores.sessions.insert_session(_session("a1", "k-aaaa", status="running"))
     approval = {"id": "ap1", "session_id": "a1", "tool_call_id": "c1", "tool": "write_file", "args": {},
                 "reason": "", "status": "pending", "created_at": time.time()}
 
@@ -370,7 +370,7 @@ def test_the_owner_and_sessions_all_never_reach_another_apps_sessions(tmp_path):
         b_sid = client.post("/api/v1/sessions", headers=b, json={"prompt": "check the walrus ledger"}).json()["id"]
         owner_sid = client.post("/sessions", json={"prompt": "check the heron ledger"}).json()["id"]
         for sid in (a_sid, b_sid, owner_sid):
-            wait_for(lambda sid=sid: m.db.get_session(sid)["status"] == "done")
+            wait_for(lambda sid=sid: m.db.sessions.get_session(sid)["status"] == "done")
         tools = SessionSearch(m.db)
 
         # Nothing the owner asks for opens an App's store.
@@ -400,7 +400,7 @@ def test_the_owner_and_sessions_all_never_reach_another_apps_sessions(tmp_path):
         assert keys[a_id]["store"]["sessions"] == {"done": 1}
         assert keys[b_id]["store"]["sessions"] == {"done": 1}
         assert "store" not in keys[owner_key_id]
-        assert not skills.session_eligible(m.db.get_session(a_sid))
+        assert not skills.session_eligible(m.db.sessions.get_session(a_sid))
 
         # sessions:all adds the owner's sessions to an App's own, never another App's.
         assert {s["id"] for s in client.get("/api/v1/sessions", headers=b).json()} == {owner_sid, b_sid}
@@ -419,21 +419,21 @@ def test_the_owner_and_sessions_all_never_reach_another_apps_sessions(tmp_path):
 def test_lists_searches_and_lookups_reach_only_the_app_they_name(tmp_path):
     stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
     for sid, app_id in (("abc1", ""), ("abc2", "k-aaaa"), ("abc3", "k-bbbb")):
-        stores.insert_session(_session(sid, app_id, status="running"))
+        stores.sessions.insert_session(_session(sid, app_id, status="running"))
         _fill(stores, sid, "ledger")
     owner, app_a = stores.scope(""), stores.scope("k-aaaa")
 
-    assert owner.find_session_ids("abc") == ["abc1"]
-    assert sorted(app_a.find_session_ids("abc")) == ["abc1", "abc2"]
-    assert sorted(stores.find_session_ids("abc")) == ["abc1", "abc2", "abc3"]  # the daemon's own lookups
-    assert {s["id"] for s in owner.list_sessions()} == {"abc1"}
-    assert {s["id"] for s in app_a.list_sessions()} == {"abc1", "abc2"}
+    assert owner.sessions.find_session_ids("abc") == ["abc1"]
+    assert sorted(app_a.sessions.find_session_ids("abc")) == ["abc1", "abc2"]
+    assert sorted(stores.sessions.find_session_ids("abc")) == ["abc1", "abc2", "abc3"]  # the daemon's own lookups
+    assert {s["id"] for s in owner.sessions.list_sessions()} == {"abc1"}
+    assert {s["id"] for s in app_a.sessions.list_sessions()} == {"abc1", "abc2"}
     assert {r["session_id"] for r in owner.sessions.search_events("ledger")} == {"abc1"}
     assert {r["session_id"] for r in app_a.sessions.search_events("ledger")} == {"abc1", "abc2"}
     assert {r["session_id"] for r in stores.sessions.search_events("ledger", app_id="k-bbbb")} == {"abc3"}
     assert {a["id"] for a in owner.sessions.pending_approvals()} == {"ap-abc1"}
     assert {a["id"] for a in app_a.sessions.pending_approvals()} == {"ap-abc1", "ap-abc2"}
-    assert {s["id"] for s in stores.sessions_with_status("running")} == {"abc1", "abc2", "abc3"}  # sweeps
+    assert {s["id"] for s in stores.sessions.sessions_with_status("running")} == {"abc1", "abc2", "abc3"}  # sweeps
     stores.close()
 
 
@@ -445,9 +445,9 @@ def test_app_metadata_counts_sessions_usage_and_errors_without_their_content(tmp
                                               "completion_tokens": 0, "cost_usd": 0}, "errors": 0,
                                               "last_error": "", "last_error_at": None}
     for sid in ("s1", "s2", "s3"):
-        stores.insert_session(_session(sid, app["id"], status="running"))
-    stores.update_session("s1", status="done")
-    stores.update_session("s2", status="failed", stop_reason="quota_exceeded: 900 MB of checking > 500 MB")
+        stores.sessions.insert_session(_session(sid, app["id"], status="running"))
+    stores.sessions.update_session("s1", status="done")
+    stores.sessions.update_session("s2", status="failed", stop_reason="quota_exceeded: 900 MB of checking > 500 MB")
     stores.main.usage.record_usage("hosted", "s1", app["id"], 10, 5, 0.25, "api")
 
     meta = stores.app_metadata(app["id"])
@@ -465,7 +465,7 @@ def test_owner_totals_count_the_main_store_and_apps_only_as_metadata(tmp_path):
 
     m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
     for sid, app_id in (("own1", ""), ("a1", "k-aaaa"), ("a2", "k-aaaa")):
-        m.db.insert_session(_session(sid, app_id))
+        m.db.sessions.insert_session(_session(sid, app_id))
         m.db.sessions.insert_smart_review(f"sr-{sid}", sid, "", {"outcome": "auto_approved", "tool": "write_file"})
     assert 'harness_sessions{status="done"} 1' in render(m)
     assert m.db.sessions.smart_review_stats()["attempts"] == 1
@@ -483,7 +483,7 @@ def test_the_nightly_backup_holds_one_file_per_app_store(tmp_path):
         m = Manager(cfg, chat=Script([Completion(content="ok")]))
         await m.start(maintenance=False)
         for sid, app_id in (("own1", ""), ("a1", "k-aaaa"), ("a2", "k-aaaa"), ("b1", "k-bbbb")):
-            m.db.insert_session(_session(sid, app_id))
+            m.db.sessions.insert_session(_session(sid, app_id))
         (Path(cfg.data_dir) / "apps" / "not an app").mkdir()
         result = await m.modules.get("backup").service.backup()
         await m.stop()
@@ -526,7 +526,7 @@ def test_app_tool_arguments_and_results_never_reach_logs_spans_or_the_audit_log(
                 for c in client.get(f"/api/v1/sessions/{sid}/tool_calls", headers=auth).json():
                     client.post(f"/api/v1/sessions/{sid}/tool_calls/{c['call_id']}", headers=auth,
                                 json={"output": f"balance {result}"})
-                return m.db.get_session(sid)["status"] == "done"
+                return m.db.sessions.get_session(sid)["status"] == "done"
             wait_for(answer, timeout=60)
             held = json.dumps([e["data"] for e in m.db.sessions.events(sid)])
             audit = m.db.main.read(lambda: [tuple(r) for r in
@@ -575,13 +575,13 @@ def test_a_session_id_prefix_is_matched_literally_not_as_a_like_pattern(tmp_path
     """#785: `%` and `_` in a ref never act as wildcards, in Web's store or an App's."""
     stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
     for sid, app_id in (("abc1", ""), ("abd2", "k-aaaa"), ("x_y1", ""), ("x_y2", "k-aaaa")):
-        stores.insert_session(_session(sid, app_id))
+        stores.sessions.insert_session(_session(sid, app_id))
     for ref in ("%", "_", "a%", "ab_", "%1", "x%"):
-        assert stores.find_session_ids(ref) == [], ref
-        assert stores.web.find_session_ids(ref) == [], ref
-    assert sorted(stores.find_session_ids("x_")) == ["x_y1", "x_y2"]
-    assert stores.web.find_session_ids("x_y") == ["x_y1"]
-    assert sorted(stores.find_session_ids("ab")) == ["abc1", "abd2"]
+        assert stores.sessions.find_session_ids(ref) == [], ref
+        assert stores.web.sessions.find_session_ids(ref) == [], ref
+    assert sorted(stores.sessions.find_session_ids("x_")) == ["x_y1", "x_y2"]
+    assert stores.web.sessions.find_session_ids("x_y") == ["x_y1"]
+    assert sorted(stores.sessions.find_session_ids("ab")) == ["abc1", "abd2"]
 
 
 def test_metrics_count_live_app_sessions_across_every_app_store(tmp_path):
@@ -593,7 +593,7 @@ def test_metrics_count_live_app_sessions_across_every_app_store(tmp_path):
     m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
     for sid, app_id, status in (("own1", "", "done"), ("a1", "k-aaaa", "running"), ("a2", "k-aaaa", "done"),
                                 ("b1", "k-bbbb", "queued"), ("b2", "k-bbbb", "waiting_app")):
-        m.db.insert_session(_session(sid, app_id, status=status))
+        m.db.sessions.insert_session(_session(sid, app_id, status=status))
     text = render(m)
     for status, count in (("running", 1), ("queued", 1), ("waiting_app", 1), ("done", 1), ("failed", 0)):
         assert f'harness_app_sessions{{status="{status}"}} {count}' in text
@@ -606,7 +606,7 @@ def test_metrics_report_no_app_sessions_as_zeros(tmp_path):
     from harness.metrics import render
 
     m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
-    m.db.insert_session(_session("own1", "", status="running"))
+    m.db.sessions.insert_session(_session("own1", "", status="running"))
     text = render(m)
     assert 'harness_app_sessions{status="running"} 0' in text and 'harness_app_sessions{status="queued"} 0' in text
     m.db.close()
@@ -621,8 +621,8 @@ def test_metrics_session_counts_are_fresh_on_every_scrape(tmp_path, monkeypatch)
     monkeypatch.setattr(metrics, "CORE_CACHE_SECONDS", 10.0)
     m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
     assert 'harness_sessions{status="running"} 0' in render(m)   # an idle scrape fills the cache
-    m.db.insert_session(_session("own1", "", status="running"))
-    m.db.insert_session(_session("a1", "k-aaaa", status="queued"))
+    m.db.sessions.insert_session(_session("own1", "", status="running"))
+    m.db.sessions.insert_session(_session("a1", "k-aaaa", status="queued"))
     text = render(m)
     assert 'harness_sessions{status="running"} 1' in text and 'harness_app_sessions{status="queued"} 1' in text
     assert 'harness_sessions_active 1' in text

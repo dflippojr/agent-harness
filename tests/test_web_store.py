@@ -34,12 +34,12 @@ def _seed(path: Path) -> None:
     """A main store as before #330 stage c: the owner's and members' sessions, each with its rows, and an App's."""
     db = Database(path)
     for sid, word in OWNER:
-        db.insert_session(_session(sid))
+        db.sessions.insert_session(_session(sid))
         _fill(db, sid, word)
     for sid, user, word in MEMBERS:
-        db.insert_session(_session(sid, owner_id=user))
+        db.sessions.insert_session(_session(sid, owner_id=user))
         _fill(db, sid, word)
-    db.insert_session(_session("app1", "k-aaaa"))
+    db.sessions.insert_session(_session("app1", "k-aaaa"))
     _fill(db, "app1", "pelican")
     db.sessions.add_checkpoint("own1", 1, "abc123", "abc123", "main")
     db.sessions.add_review_comment("own1", {"repo": "", "path": "x", "side": "new", "start_line": 1, "end_line": 1,
@@ -108,7 +108,7 @@ def test_the_migration_moves_every_owner_and_member_session_with_a_backup_once(t
     assert f"moving {len(EVERYONE)} session(s)" in logged and f"moved {len(EVERYONE)} session(s)" in logged
 
     # Reads route there: the routing wrapper finds each session, its events, approvals and artifacts.
-    assert stores.get_session("own1")["owner_id"] == "owner"
+    assert stores.sessions.get_session("own1")["owner_id"] == "owner"
     assert [e["data"]["content"] for e in stores.sessions.events("mem2")] == ["find the merlin"]
     assert stores.sessions.get_approval("ap-own2")["session_id"] == "own2"
     assert stores.sessions.full_artifact("own3", "h1") == "artifact body"
@@ -119,7 +119,7 @@ def test_the_migration_moves_every_owner_and_member_session_with_a_backup_once(t
     before = {p: _snapshot(p) for p in (path, web)}
     again = SessionStores(Database(path), tmp_path / "apps")
     assert Path(again.web.path) == web
-    assert again.get_session("own2")["title"] == "own2"
+    assert again.sessions.get_session("own2")["title"] == "own2"
     again.close()
     assert len(_backups(tmp_path)) == 1
     assert {p: _snapshot(p) for p in before} == before
@@ -136,8 +136,8 @@ def test_a_dry_run_changes_nothing(tmp_path, monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="harness.app_stores"):
         stores = SessionStores(Database(path), tmp_path / "apps")
     assert stores.web is stores.main                              # the main store keeps serving the sessions
-    assert stores.get_session("own1")["title"] == "own1"
-    assert {s["id"] for s in stores.scope("").list_sessions(owner_id="owner")} == {"own1", "own2", "own3"}
+    assert stores.sessions.get_session("own1")["title"] == "own1"
+    assert {s["id"] for s in stores.scope("").sessions.list_sessions(owner_id="owner")} == {"own1", "own2", "own3"}
     stores.close()
     assert "dry run): would move 5 session(s)" in caplog.text
     assert _snapshot(path) == before
@@ -162,7 +162,7 @@ def test_an_aborted_migration_leaves_the_main_store_untouched(tmp_path, monkeypa
     with caplog.at_level(logging.ERROR, logger="harness.app_stores"):
         stores = SessionStores(Database(path), tmp_path / "apps")
     assert "Web store migration aborted" in caplog.text
-    assert stores.web is stores.main and stores.get_session("mem1")["owner_id"] == "u-ann"
+    assert stores.web is stores.main and stores.sessions.get_session("mem1")["owner_id"] == "u-ann"
     stores.close()
     assert _snapshot(path) == before and session_ids(path) == EVERYONE
     assert session_ids(_web(tmp_path)) == set()                     # the copy rolled back
@@ -196,7 +196,7 @@ def test_owner_surfaces_read_webs_store(tmp_path):
         # Background counts: metrics, the Control Center totals, the smart-review stats.
         from harness.metrics import render
         assert 'harness_sessions{status="done"} 5' in render(m)
-        assert m.db.count_sessions("owner", "done") == 3 + 1        # the App's counted by owner id, as before
+        assert m.db.sessions.count_sessions("owner", "done") == 3 + 1        # the App's counted by owner id, as before
         assert m.db.sessions.smart_review_stats() is not None
         # Web's store can't be revoked, erased or given a retention through the App paths.
         assert client.delete(f"/keys/{WEB_APP_ID}").status_code == 404
@@ -214,14 +214,14 @@ def test_members_stay_isolated_in_webs_store(tmp_path):
     _seed(path)
     stores = SessionStores(Database(path), tmp_path / "apps")
     view = stores.scope("")
-    assert {s["id"] for s in view.list_sessions(owner_id="u-ann")} == {"mem1"}
-    assert {s["id"] for s in view.list_sessions(owner_id="owner")} == {"own1", "own2", "own3"}
+    assert {s["id"] for s in view.sessions.list_sessions(owner_id="u-ann")} == {"mem1"}
+    assert {s["id"] for s in view.sessions.list_sessions(owner_id="owner")} == {"own1", "own2", "own3"}
     assert {r["session_id"] for r in view.sessions.search_events("find", user_id="u-bob")} == {"mem2"}
-    assert view.find_session_ids("mem", user_id="u-ann") == ["mem1"]
-    assert stores.get_session_for_user("own1", "u-ann") is None
-    assert stores.get_session_for_user("mem2", "u-ann") is None
+    assert view.sessions.find_session_ids("mem", user_id="u-ann") == ["mem1"]
+    assert stores.sessions.get_session_for_user("own1", "u-ann") is None
+    assert stores.sessions.get_session_for_user("mem2", "u-ann") is None
     tools = SessionSearch(stores)
-    stores.insert_session(_session("mem3", owner_id="u-ann"))
+    stores.sessions.insert_session(_session("mem3", owner_id="u-ann"))
     assert tools.session_search("heron", _session="mem3").startswith("No earlier sessions")
     assert tools.session_search("merlin", _session="mem3").startswith("No earlier sessions")
     assert "kestrel" in tools.session_search("kestrel", _session="mem3")
@@ -237,7 +237,7 @@ def test_other_apps_never_reach_webs_store_and_the_owner_never_reaches_theirs(tm
     with client:
         a_id, a = _key(client, "app-a", "sessions")
         a_sid = client.post("/api/v1/sessions", headers=a, json={"prompt": "check the pelican ledger"}).json()["id"]
-        wait_for(lambda: m.db.get_session(a_sid)["status"] == "done" and a_sid not in m.tasks)
+        wait_for(lambda: m.db.sessions.get_session(a_sid)["status"] == "done" and a_sid not in m.tasks)
 
         # Every read the App makes, by any path, stays out of Web's store. (The daemon's own background work may read
         # it meanwhile: only calls made for the App's requests and tools count.)
@@ -290,7 +290,7 @@ def test_a_session_from_before_the_move_resumes_from_webs_store(tmp_path, monkey
         s = m.create("list")
         m.tasks[s["id"]].cancel()
         await asyncio.sleep(0.05)
-        m.db.update_session(s["id"], status="running")
+        m.db.sessions.update_session(s["id"], status="running")
         m.db.close()
         return s["id"]
 

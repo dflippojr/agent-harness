@@ -228,7 +228,7 @@ def owned_session(request: Request, ref: str, *, kind: str | None = "agent") -> 
         raise HarnessError(404, "no session matches that id")
     scope = owner_id(request)
     sid = m.resolve_id(ref, user_id=scope, kind=kind, app="")  # never an App's session (#330 decision 3)
-    session = m.db.get_session(sid)
+    session = m.db.sessions.get_session(sid)
     if (session is None or session.get("owner_id", "owner") != scope
             or (kind is not None and (session.get("kind") or "agent") != kind) or session.get("app_id")):
         m.db.accounts.insert_audit(scope, scope, "cross_user", "denied")
@@ -540,8 +540,8 @@ async def me(request: Request):
                 "disk_note": quota_message(used, int(account["disk_quota_bytes"])),
                 "max_running": int(account["max_running"]),
                 "max_queued": int(account["max_queued"]),
-                "running": m.db.count_sessions(ident.user_id, "running"),
-                "queued": m.db.count_sessions(ident.user_id, "queued"),
+                "running": m.db.sessions.count_sessions(ident.user_id, "running"),
+                "queued": m.db.sessions.count_sessions(ident.user_id, "queued"),
                 "account_hint": ident.user_id[2:10] if ident.user_id.startswith("u-") else ident.user_id[:8],
             }
     return {
@@ -702,7 +702,7 @@ async def queue(request: Request):
     for sid, pos in sorted(positions.items(), key=lambda x: x[1]):
         if m.db.app_of(sid):  # an App's session (#330 decision 3)
             continue
-        session = m.db.get_session(sid) or {}
+        session = m.db.sessions.get_session(sid) or {}
         if session.get("owner_id", "owner") != scope or (session.get("kind") or "agent") != "agent":
             continue
         out.append({"session_id": sid, "position": pos})
@@ -731,7 +731,7 @@ async def list_sessions(request: Request, response: Response, limit: int = 50, b
     """One page of the caller's sessions, newest first. The first page (no `before`) also holds every session that
     is active or waits on an approval, whatever its age; `X-Next-Before` names the next older page (#663)."""
     m = mgr(request)
-    rows, cursor = m.db.session_page(max(1, min(limit, 200)), owner_id=owner_id(request), before=_page_cursor(before),
+    rows, cursor = m.db.sessions.session_page(max(1, min(limit, 200)), owner_id=owner_id(request), before=_page_cursor(before),
                                      target=target or None, include_active=not before)
     if cursor is not None:
         response.headers[NEXT_BEFORE] = f"{cursor[0]!r}:{cursor[1]}"
@@ -1024,7 +1024,7 @@ async def snippet_languages(request: Request):
 async def list_chats(request: Request, limit: int = 50):
     """The caller's chats, newest first, up to `limit` (1 to 200, default 50)."""
     m = require_owner(request)
-    rows = m.db.list_sessions(max(1, min(limit, 200)), owner_id=owner_id(request), kind="chat")
+    rows = m.db.sessions.list_sessions(max(1, min(limit, 200)), owner_id=owner_id(request), kind="chat")
     return [m.summary(r) for r in rows]
 
 
@@ -1115,7 +1115,7 @@ async def session_metrics(ref: str, request: Request):
     """Owner-only per-turn context-efficiency metrics for one agent session (#159)."""
     m = require_owner(request)
     sid = m.resolve_id(ref, kind="agent", app="")
-    session = m.db.get_session(sid)
+    session = m.db.sessions.get_session(sid)
     if session is None or session.get("app_id"):
         raise HarnessError(404, "no session matches that id")
     return efficiency.session_payload(sid, m.db.sessions.events(sid))
@@ -1159,7 +1159,7 @@ def _session_list_payload(m: Manager, scope: str, e: dict) -> str | None:
     one (#330 decision 3): its store is not even read."""
     if m.db.app_of(e["session_id"]):
         return None
-    session = m.db.get_session(e["session_id"])
+    session = m.db.sessions.get_session(e["session_id"])
     if not (e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == scope
             and (session.get("kind") or "agent") == "agent" and not session.get("app_id")):
         return None

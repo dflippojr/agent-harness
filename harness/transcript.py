@@ -247,7 +247,7 @@ _RENDERERS = {
 
 
 def render(db: Database, sid: str) -> str:
-    s = db.get_session(sid)
+    s = db.sessions.get_session(sid)
     if s is None:
         raise KeyError(sid)
     created = time.strftime("%Y-%m-%d %H:%M", time.localtime(s["created_at"]))

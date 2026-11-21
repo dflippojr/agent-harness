@@ -304,7 +304,7 @@ class Runner(HostedRuns):
         """The disk watchdog's limits for one sandbox command (#525): the workspace quota, a member's account quota,
         and the data drive's free-space floor. The account is re-measured while the command runs, so commands in
         several of a member's sessions at once share what is left rather than each getting all of it."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         user_id = session_user_id(s)
         limit = None
         if user_id != OWNER_USER_ID:
@@ -318,7 +318,7 @@ class Runner(HostedRuns):
     async def _park_sandbox(self, sid: str) -> None:
         """The session is about to wait on the owner or the GPU guard: stop its idle container (#428). Best effort;
         the next command restarts it."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s is None or s.get("backend", "local") != "local":
             return
         sb = self.sandbox(s)
@@ -451,7 +451,7 @@ class Runner(HostedRuns):
         """The daemon tools a hosted Claude Code or Codex session may call over MCP: web, session search, memory
         library and images as enabled for its project and app, plus app-registered tools. Never remote control or
         skills."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s is None or s.get("kind") == "chat" or s.get("backend") not in MCP_BACKENDS:
             return []
         served = [k for k in (self.web_overrides.get(sid, self.web),) if k is not None]
@@ -490,7 +490,7 @@ class Runner(HostedRuns):
         if grant is None:
             return ("Error: this call was not allowed through the harness approval policy. Call the tool normally "
                     "so the harness can decide it."), False
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if name not in {t["function"]["name"] for t in self.mcp_tool_schemas(sid)}:
             return f"Error: unknown tool {name!r}", False
         try:
@@ -534,9 +534,9 @@ class Runner(HostedRuns):
             sid, path = s["id"], str(args["path"]).replace("\\", "/")
 
             def touch() -> None:  # the list is read and extended in one transaction
-                touched = list(self.db.get_session(sid)["run"].get("files_touched") or [])
+                touched = list(self.db.sessions.get_session(sid)["run"].get("files_touched") or [])
                 if path not in touched:
-                    self.db.patch_run(sid, files_touched=(touched + [path])[:agent_state.FILES_MODIFIED_MAX])
+                    self.db.sessions.patch_run(sid, files_touched=(touched + [path])[:agent_state.FILES_MODIFIED_MAX])
             await self.db.for_session(sid).awrite(touch)
         return output
 
@@ -547,7 +547,7 @@ class Runner(HostedRuns):
 
         def resume() -> None:
             status = self._hosted_status(sid)
-            if self.db.get_session(sid)["status"] == "waiting_app" and status != "waiting_app":
+            if self.db.sessions.get_session(sid)["status"] == "waiting_app" and status != "waiting_app":
                 self._status_writer(sid, status, {})()
         await self.db.for_session(sid).awrite(resume)
 
@@ -568,7 +568,7 @@ class Runner(HostedRuns):
             def wait() -> None:
                 parked["waiting"] = True
                 self._app_waits[sid] = self._app_waits.get(sid, 0) + 1
-                if self.db.get_session(sid)["status"] == "running":
+                if self.db.sessions.get_session(sid)["status"] == "running":
                     self.set_status(sid, self._hosted_status(sid))
 
             async def resume() -> None:
@@ -644,7 +644,7 @@ class Runner(HostedRuns):
                 self.bus.emit(sid, "smart_review", record)
             if existing["status"] == "approved":
                 self.bus.emit(sid, "approval_auto_approved", {"id": existing["id"], **(record or {})})
-                namespace_audit.record(self.db, self.db.get_session(sid),
+                namespace_audit.record(self.db, self.db.sessions.get_session(sid),
                                        audit_context.AuditContext("system", "system", "", "agent"),
                                        "approval.auto_decide", target=existing["id"], kind="approval",
                                        metadata={"decision": "approved"})
@@ -654,7 +654,7 @@ class Runner(HostedRuns):
                 self.db, audit_context.AuditContext("system", "system", "", "agent"),
                 existing["id"], "approval.auto_decide",
                 {"session_id": sid, "decision": "approved", "reviewer_mode": (record or {}).get("mode")},
-                enabled=existing["status"] == "approved" and operation_audit.owner_session(self.db.get_session(sid))):
+                enabled=existing["status"] == "approved" and operation_audit.owner_session(self.db.sessions.get_session(sid))):
             self.db.for_session(sid).write(persist_ask)
         return existing
 
@@ -671,10 +671,10 @@ class Runner(HostedRuns):
     def _status_writer(self, sid: str, status: str, fields: dict):
         def set_status() -> None:
             clock = self._clocks.get(sid)
-            self.db.update_session(sid, status=status, **fields)
+            self.db.sessions.update_session(sid, status=status, **fields)
             if "run" not in fields and (status == "running" or (clock is not None and clock.since is not None)):
                 # Its first `running` marks its place; leaving `running` records the time it has spent (#524).
-                self.db.patch_run(sid, **{HOLDS_PLACE: True, RUN_SECONDS: self._run_seconds(sid)})
+                self.db.sessions.patch_run(sid, **{HOLDS_PLACE: True, RUN_SECONDS: self._run_seconds(sid)})
             self._flag_end_pending(sid, status)
             self.bus.emit(sid, "status", {"status": status, **{k: v for k, v in fields.items()
                                                                  if k in ("stop_reason", "answer")}})
@@ -691,7 +691,7 @@ class Runner(HostedRuns):
         clock = self._clocks.get(sid)
         if clock is None:
             return
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         clock.set_running(s is not None and s["status"] == "running")
 
     def _run_seconds(self, sid: str) -> float:
@@ -709,7 +709,7 @@ class Runner(HostedRuns):
         """Inside the write that sets `status`: mark a live run's final status as awaiting its _end_run."""
         if status in ACTIVE or sid not in self._unended:
             return
-        self.db.patch_run(sid, **{END_PENDING: True})
+        self.db.sessions.patch_run(sid, **{END_PENDING: True})
 
     def set_status(self, sid: str, status: str, **fields) -> None:
         self.db.for_session(sid).write(self._status_writer(sid, status, fields))
@@ -724,7 +724,7 @@ class Runner(HostedRuns):
     async def _acquire(self, sid: str, front: bool = False) -> None:
         if self.scheduler.holder == sid:
             return
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s["status"] != "queued":
             await self.aset_status(sid, "queued")
         if self.guard is not None and self.guard.active:
@@ -746,7 +746,7 @@ class Runner(HostedRuns):
         """A session the pause held is still active: it will want the model when the hold ends. Checked live, since
         the set is cleared only on resume and a held session may be cancelled, fail or be deleted meanwhile."""
         for sid in self.gpu_paused_sessions:
-            s = self.db.get_session(sid)
+            s = self.db.sessions.get_session(sid)
             if s is not None and s["status"] in ACTIVE:
                 return True
         return False
@@ -839,7 +839,7 @@ class Runner(HostedRuns):
     # runner targets (the MacBook)
     async def _wait_for_target(self, sid: str) -> None:
         """Hold a session whose target is offline in `waiting_target`, without the GPU, until it's back."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         target = s["target"]
         if target == "tower" or self.hub.online(target):
             return
@@ -912,7 +912,7 @@ class Runner(HostedRuns):
         if not trace:
             await self._run(sid, recovered)
             return
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         attrs = {"harness.session_id": sid, "harness.backend": s.get("backend", "local"),
                  "gen_ai.request.model": s["model"], "harness.recovered": recovered}
         with telemetry.tracer().session_run(trace, float(trace.get("started_at") or s["created_at"]),
@@ -924,28 +924,28 @@ class Runner(HostedRuns):
 
     def _trace_run_stopped(self, sid: str, trace: dict, root) -> None:
         """Record the run's end on the session so the next run's `idle` span starts there."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s is None:  # deleted while running
             return
         root.set({"harness.status": s["status"]})
-        self.db.patch_run(sid, trace={**(s["run"].get("trace") or trace), "last_stop": time.time()})
+        self.db.sessions.patch_run(sid, trace={**(s["run"].get("trace") or trace), "last_stop": time.time()})
 
     def _session_trace(self, sid: str) -> dict:
         """The session's persisted trace ids ({} when tracing is off), created on its first traced run."""
         if not telemetry.tracer().enabled:
             return {}
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s is None:
             return {}
         trace = s["run"].get("trace") or {}
         if not trace.get("trace_id"):
             trace = {**telemetry.tracer().new_trace(), "started_at": s["created_at"]}
-            self.db.patch_run(sid, trace=trace)
+            self.db.sessions.patch_run(sid, trace=trace)
         return trace
 
     async def _run(self, sid: str, recovered: bool = False) -> None:
         self._unended.add(sid)
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         # A recovered run goes on from the time it had spent running (a new run starts at 0: new_run() drops it).
         self._clocks[sid] = RunClock(spent=float(((s or {}).get("run") or {}).get(RUN_SECONDS) or 0))
         started_at = ((s or {}).get("run") or {}).get("started_at")  # tells this run from one a message queues next
@@ -977,7 +977,7 @@ class Runner(HostedRuns):
                 return
             message = str(e)
             code = (TOOLS_ONLY_UNSUPPORTED if isinstance(e, ToolsOnlyUnsupported)
-                    else e.code or self._cli_failure_code(self.db.get_session(sid), message))
+                    else e.code or self._cli_failure_code(self.db.sessions.get_session(sid), message))
             await self._fail_run(sid, code, message, code in ("model_unavailable", "provider_unavailable"),
                                  f"{code}: {message}")
         except SandboxUnavailable as e:
@@ -1022,7 +1022,7 @@ class Runner(HostedRuns):
           held for its offline Mac first): it is denied as expired. One the run waits on, `_wait_approval` expires.
         It watches its own run (`started_at`) only: once that has ended, a run a message queued next is not its."""
         while True:
-            s = self.db.get_session(sid)
+            s = self.db.sessions.get_session(sid)
             if s is None or s["status"] not in ACTIVE or s["run"].get("started_at") != started_at:
                 return
             waits = [30.0]  # a new approval or a resumed clock is noticed within this
@@ -1061,10 +1061,10 @@ class Runner(HostedRuns):
         seconds = self._run_seconds(sid)
 
         def keep() -> None:
-            current = self.db.get_session(sid)
+            current = self.db.sessions.get_session(sid)
             if (current is not None and current["status"] in ACTIVE
                     and current["run"].get("started_at") == started_at):
-                self.db.patch_run(sid, **{RUN_SECONDS: seconds})
+                self.db.sessions.patch_run(sid, **{RUN_SECONDS: seconds})
         try:
             await self.db.for_session(sid).awrite(keep)
         except Exception:  # noqa: BLE001 - an erased session, a closing store: nothing to keep
@@ -1083,9 +1083,9 @@ class Runner(HostedRuns):
             return
 
         def mark() -> None:
-            current = self.db.get_session(sid)
+            current = self.db.sessions.get_session(sid)
             if current is not None and current["status"] in ran:
-                self.db.patch_run(sid, **{HOLDS_PLACE: True})
+                self.db.sessions.patch_run(sid, **{HOLDS_PLACE: True})
         await self.db.for_session(sid).awrite(mark)
 
     def _stop_on_deadline(self, sid: str, run: asyncio.Task, reason: str) -> None:
@@ -1096,7 +1096,7 @@ class Runner(HostedRuns):
     async def _end_on_deadline(self, sid: str, reason: str, started_at) -> None:
         """End a run on its time budget (`budget_time`) or an expired approval (`approval_expired`): each tool call
         it leaves gets a result, as on a cancel. Only its own run (`started_at`), not one a message queued next."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s is not None and s["status"] in ACTIVE and s["run"].get("started_at") == started_at:
             if reason == "budget_time":
                 await self._close_unresolved(sid, "Not run: the task reached its time budget.",
@@ -1116,7 +1116,7 @@ class Runner(HostedRuns):
                 await self.sandbox(s).restart()  # kill the orphaned command
         with telemetry.span("run_setup"):
             await self._wait_for_target(sid)
-            s = self.db.get_session(sid)
+            s = self.db.sessions.get_session(sid)
             await self._prepare_repo(s)
             self._snapshot_git_baseline(sid)
             self._workspace_context_at_start(sid)
@@ -1152,9 +1152,9 @@ class Runner(HostedRuns):
         await self._end_run(sid)
 
     def _record_failure(self, sid: str, code: str, message: str, retryable: bool, stop_reason: str) -> None:
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         failure = {"code": code, "provider": s.get("backend", "local"), "message": message, "retryable": retryable}
-        self.db.patch_run(sid, failure=failure)
+        self.db.sessions.patch_run(sid, failure=failure)
         self.bus.emit(sid, "error", failure)
         self.set_status(sid, "failed", stop_reason=stop_reason)
 
@@ -1164,7 +1164,7 @@ class Runner(HostedRuns):
         turn = telemetry.NOOP_SPAN
         try:
             while True:
-                s = self.db.get_session(sid)
+                s = self.db.sessions.get_session(sid)
                 if s["status"] not in ACTIVE:
                     return
                 pending = unresolved_calls(s["context"])
@@ -1184,7 +1184,7 @@ class Runner(HostedRuns):
 
                 if s["inbox"]:
                     context = s["context"] + [{"role": "user", "content": m} for m in s["inbox"]]
-                    self.db.update_session(sid, context=context, inbox=[])
+                    self.db.sessions.update_session(sid, context=context, inbox=[])
                     continue
 
                 reason = self._budget_reason(s["run"], s)
@@ -1331,7 +1331,7 @@ class Runner(HostedRuns):
         }
 
     def _emit_turn_metrics(self, sid: str, final: bool = False) -> None:
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         pending = (s.get("run") or {}).get("pending_turn_metrics")
         if not pending and (not final or s.get("backend", "local") != "local"):
             return  # hosted runs have no native turns: their retry aggregate stays null
@@ -1346,8 +1346,8 @@ class Runner(HostedRuns):
         payload = {**pending, **counts}
 
         def emit_turn_metrics() -> None:
-            totals = efficiency.add_activity(self.db.get_session(sid)["totals"], counts)
-            self.db.update_session(sid, run=run, totals=totals)
+            totals = efficiency.add_activity(self.db.sessions.get_session(sid)["totals"], counts)
+            self.db.sessions.update_session(sid, run=run, totals=totals)
             self.bus.emit(sid, "turn_metrics", payload)
         self.db.for_session(sid).write(emit_turn_metrics)
 
@@ -1379,7 +1379,7 @@ class Runner(HostedRuns):
         def commit_completion() -> bool:
             if final:
                 run["idle"] = 0
-                self.db.update_session(sid, context=context, run=run, totals=totals, status="done",
+                self.db.sessions.update_session(sid, context=context, run=run, totals=totals, status="done",
                                        stop_reason="final_message", answer=completion.content)
                 self._flag_end_pending(sid, "done")
                 self.bus.emit(sid, "assistant", event)
@@ -1387,7 +1387,7 @@ class Runner(HostedRuns):
                                               "answer": completion.content})
                 return True
             self._nudge(sid, context, run, completion, quotes)
-            self.db.update_session(sid, context=context, run=run, totals=totals)
+            self.db.sessions.update_session(sid, context=context, run=run, totals=totals)
             self.bus.emit(sid, "assistant", event)
             return False
         if await self.db.for_session(s["id"]).awrite(commit_completion):
@@ -1430,7 +1430,7 @@ class Runner(HostedRuns):
         try:
             for i, call in enumerate(pending):
                 # Checked before each call, so a stop saved before a daemon restart runs nothing more either.
-                if stuck.stop_reason(self.db.get_session(sid)["run"]):   # `_budget_reason` ends the run next
+                if stuck.stop_reason(self.db.sessions.get_session(sid)["run"]):   # `_budget_reason` ends the run next
                     await self._skip_rest(sid, pending[i:], "Not run: the run stopped because it was stuck.")
                     return False
                 done, used = await self._resolve_call(s, call, pending[i + 1:], executing, budget, mutated)
@@ -1438,7 +1438,7 @@ class Runner(HostedRuns):
                     return done
                 if used is not None:
                     budget -= used
-                    s = self.db.get_session(sid)
+                    s = self.db.sessions.get_session(sid)
             return False
         finally:
             if mutated:     # in the background: the next model call does not need it (see `_join_checkpoint`)
@@ -1450,7 +1450,7 @@ class Runner(HostedRuns):
         position are taken now, so the checkpoint is of this turn whatever runs meanwhile, and the files are
         safe to read because only a mutating tool changes them. `_join_checkpoint` waits for it."""
         await self._join_checkpoint(sid)        # one at a time: the turn numbers and the store's index are shared
-        at = (self.db.get_session(sid), self.db.sessions.last_event_seq(sid))
+        at = (self.db.sessions.get_session(sid), self.db.sessions.last_event_seq(sid))
         stats: dict = {}
         if defer:
             # No trace span of its own: it would outlive the turn that owns it. `_join_checkpoint` records the wait.
@@ -1573,11 +1573,11 @@ class Runner(HostedRuns):
         """The agent called `finish`: True when the task is done, False when its quotes need fixing first."""
         sid = s["id"]
         answer = str(args.get("answer", ""))
-        run = self.db.get_session(sid)["run"]
+        run = self.db.sessions.get_session(sid)["run"]
         quotes = self._quote_check(s, run, answer)
         if quotes:
             def quote_check() -> None:
-                self.db.update_session(sid, run=run)
+                self.db.sessions.update_session(sid, run=run)
                 self.bus.emit(sid, "quote_check", {"quotes": quotes})
             await self.db.for_session(s["id"]).awrite(quote_check)
             await self._record_result(sid, call, "finish", "Not finished yet. " + grounding.nudge(quotes), ok=False)
@@ -1591,7 +1591,7 @@ class Runner(HostedRuns):
     async def _over_quota(self, sid: str) -> bool:
         """Stop the run when the workspace outgrows its quota. Shrinking is always allowed, so a follow-up run
         can clean up."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         quota = self.quota_mb(s)
         run = s["run"]
         last = run.get("workspace_mb", 0)
@@ -1604,7 +1604,7 @@ class Runner(HostedRuns):
         except (ToolError, RunnerError):
             return False
         run["workspace_mb"] = mb
-        self.db.update_session(sid, run=run)
+        self.db.sessions.update_session(sid, run=run)
         user_id = session_user_id(s)
         if user_id != OWNER_USER_ID:
             from .storage import account_usage_bytes, quota_message
@@ -1645,19 +1645,19 @@ class Runner(HostedRuns):
             return
         if not s["base_commit"]:
             info = await self._first_prepare(s, project, ws, remote, member)
-            s = self.db.get_session(s["id"])
+            s = self.db.sessions.get_session(s["id"])
             context = s["context"]
             context[0] = {**context[0], "content": context[0]["content"].replace("{base_branch}", info["base_branch"])}
 
             def workspace_ready() -> None:
-                self.db.update_session(s["id"], context=context, **info)
+                self.db.sessions.update_session(s["id"], context=context, **info)
                 self.bus.emit(s["id"], "workspace_ready", {"repo": project.repo, **info})
             await self.db.for_session(s["id"]).awrite(workspace_ready)
         elif not s["run"].get("origin_refreshed"):
             error = await self._refresh_origin(s, project, ws, remote, member)
             if error:
                 await self.bus.aemit(s["id"], "error", {"message": f"could not refresh origin: {error}"})
-            self.db.patch_run(s["id"], origin_refreshed=True)
+            self.db.sessions.patch_run(s["id"], origin_refreshed=True)
 
     async def _first_prepare(self, s: dict, project, ws: Path, remote: bool, member: bool) -> dict:
         github_branch = (s.get("app_metadata") or {}).get("github_base_branch") or ""
@@ -1780,11 +1780,11 @@ class Runner(HostedRuns):
         """The session's current taint (read fresh: an earlier call in the same batch may have just set it)."""
         if s.get("kind") == "chat":
             return []
-        fresh = self.db.get_session(s["id"])
+        fresh = self.db.sessions.get_session(s["id"])
         return list((fresh or s).get("taint") or [])
 
     def _add_taint(self, sid: str, kind: str, origin: str) -> None:
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s is None or s.get("kind") == "chat":
             return
         updated = taint.add(s.get("taint") or [], kind, origin)
@@ -1792,7 +1792,7 @@ class Runner(HostedRuns):
             return
 
         def add_taint() -> None:
-            self.db.update_session(sid, taint=updated)
+            self.db.sessions.update_session(sid, taint=updated)
             self.bus.emit(sid, "taint_added", {"kind": kind, "origin": origin, "sources": len(updated)})
         self.db.for_session(sid).write(add_taint)
 
@@ -1912,13 +1912,13 @@ class Runner(HostedRuns):
     async def _execute(self, sid: str, call: dict, name: str, args: dict, ws: Workspace,
                        max_chars: int = 10**9) -> str:
         await self._acquire(sid)  # e.g. resumed after a restart with the approval already granted
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         assert s is not None  # the loop only resolves calls of a session it holds
         if name == "run_shell":
             args = self._shell_within_budget(s, args)
         run = s["run"]
         run["executing"] = {"id": call["id"], "name": name}
-        self.db.update_session(sid, run=run)
+        self.db.sessions.update_session(sid, run=run)
         started = time.monotonic()
         ok = True
         try:
@@ -1982,11 +1982,11 @@ class Runner(HostedRuns):
         if ok and name in ("write_file", "edit_file"):
             path = str(args.get("path") or "").replace("\\", "/")
             if path:
-                run = self.db.get_session(sid)["run"]
+                run = self.db.sessions.get_session(sid)["run"]
                 touched = list(run.get("files_touched") or [])
                 if path not in touched:
                     run["files_touched"] = (touched + [path])[:agent_state.FILES_MODIFIED_MAX]
-                    self.db.update_session(sid, run=run)
+                    self.db.sessions.update_session(sid, run=run)
         output_chars = len(output)
         if len(banner) + len(output) > max_chars:
             output = self._cut_to_fit(output, artifact_content, name == "verify", max(0, max_chars - len(banner)),
@@ -2030,7 +2030,7 @@ class Runner(HostedRuns):
 
     async def _record_bounded(self, sid: str, call: dict, name: str, output: str) -> None:
         """Record a successful result the loop builds itself (update_state, reset_round, finish), bounded the same way."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         assert s is not None  # the loop only resolves calls of a session it holds
         output, stored = self._bound_native(s, output)
         await self._record_result(sid, call, name, output, ok=True,
@@ -2082,20 +2082,20 @@ class Runner(HostedRuns):
             raise ToolError(self._delegate_result(status="error", error=str(e))) from None
 
     async def _delegate_propose_inner(self, sid: str, args: dict, ws: Workspace) -> str:
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         model = self.cfg.models[s["model"]]
         paths = [str(p) for p in args.get("paths") or []]
         cap = int(delegate_edit.INPUT_SHARE * model.context_tokens * s["run"].get("chars_per_token", 3.0))
         texts = await asyncio.to_thread(delegate_edit.read_inputs, ws.files, paths, cap)
         key = delegate_edit.edit_key(list(texts), args.get("task_id"))
-        run = self.db.get_session(sid)["run"]
+        run = self.db.sessions.get_session(sid)["run"]
         counts = dict(run.get("delegate_edits") or {})
         if counts.get(key, 0) >= delegate_edit.MAX_ATTEMPTS:
             raise ToolError(f"this edit was already delegated {counts[key]} times without being applied; make "
                             "the change yourself with edit_file")
         counts[key] = counts.get(key, 0) + 1
         run["delegate_edits"] = counts
-        self.db.update_session(sid, run=run)
+        self.db.sessions.update_session(sid, run=run)
         try:
             completion = await self._model_call(
                 sid, model, delegate_edit.request(str(args.get("instruction", "")), texts), None, None,
@@ -2109,24 +2109,24 @@ class Runner(HostedRuns):
         new_texts = delegate_edit.apply_to_texts(texts, edits)
         summary = delegate_edit.summarize(summary, edits, new_texts, texts)
         patch_id, proposal = delegate_edit.new_proposal(texts, edits, key, summary)
-        run = self.db.get_session(sid)["run"]
+        run = self.db.sessions.get_session(sid)["run"]
         proposals = {k: v for k, v in (run.get("delegate_proposals") or {}).items() if v.get("key") != key}
         proposals[patch_id] = proposal  # a new proposal for the same edit supersedes the old one
         run["delegate_proposals"] = proposals
-        self.db.update_session(sid, run=run)
+        self.db.sessions.update_session(sid, run=run)
         return self._delegate_result(patch_id, summary)
 
     async def _delegate_apply(self, sid: str, args: dict, ws: Workspace) -> str:
         """Write a stored proposal, all of it or nothing. A stale file is an error and doesn't use up a retry."""
         patch_id = str(args.get("patch_id", ""))
-        proposal = (self.db.get_session(sid)["run"].get("delegate_proposals") or {}).get(patch_id)
+        proposal = (self.db.sessions.get_session(sid)["run"].get("delegate_proposals") or {}).get(patch_id)
         try:
             if proposal is None:
                 raise ToolError(f"unknown patch_id {patch_id!r}; call delegate_edit first")
             written = await asyncio.to_thread(delegate_edit.apply, ws.files, proposal)
         except ToolError as e:
             raise ToolError(self._delegate_result(patch_id, status="error", error=str(e))) from None
-        run = self.db.get_session(sid)["run"]
+        run = self.db.sessions.get_session(sid)["run"]
         run["delegate_proposals"] = {k: v for k, v in (run.get("delegate_proposals") or {}).items()
                                      if k != patch_id}
         run["delegate_edits"] = {k: v for k, v in (run.get("delegate_edits") or {}).items()
@@ -2134,13 +2134,13 @@ class Runner(HostedRuns):
         touched = list(run.get("files_touched") or [])
         touched += [p for p in proposal["hashes"] if p not in touched]
         run["files_touched"] = touched[:agent_state.FILES_MODIFIED_MAX]
-        self.db.update_session(sid, run=run)
+        self.db.sessions.update_session(sid, run=run)
         return self._delegate_result(patch_id, written, status="applied")
 
     def _add_delegate_tokens(self, sid: str, c: llm.Completion) -> None:
         """A delegate call's tokens go to session totals (not a turn) and to a separate delegate_tokens tally, on
         the run and in totals; run["completion_tokens"], which the budget uses, stays the worker's alone."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         totals = self._add_totals(s["totals"], c, turn=False)
         run = s["run"]
         for holder in (totals, run):
@@ -2149,7 +2149,7 @@ class Runner(HostedRuns):
             d["completion_tokens"] = d.get("completion_tokens", 0) + c.completion_tokens
             d["calls"] = d.get("calls", 0) + 1
             holder["delegate_tokens"] = d
-        self.db.update_session(sid, totals=totals, run=run)
+        self.db.sessions.update_session(sid, totals=totals, run=run)
 
     def _read_artifact(self, sid: str, args: dict) -> str:
         """The model-facing read of a masked result: characters [start, end) of this session's artifact."""
@@ -2176,10 +2176,10 @@ class Runner(HostedRuns):
         return await kit.call(name, {**args, "_session": sid}, workspace_root=root, put_bytes=put_bytes)
 
     def _bump(self, sid: str, counter: str) -> None:
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         run = s["run"]
         run[counter] = run.get(counter, 0) + 1
-        self.db.update_session(sid, run=run)
+        self.db.sessions.update_session(sid, run=run)
 
     async def _record_result(self, sid: str, call: dict, name: str, output: str, ok: bool, seconds: float = 0.0,
                        artifact_content: str | None = None, extra: dict | None = None,
@@ -2189,7 +2189,7 @@ class Runner(HostedRuns):
         it (bad JSON, unknown tool, bad arguments), for the stuck caps."""
         def record_result() -> None:
             nonlocal output, output_chars
-            s = self.db.get_session(sid)
+            s = self.db.sessions.get_session(sid)
             run = s["run"]
             run["tool_calls"] = run.get("tool_calls", 0) + 1
             if not ok:
@@ -2218,7 +2218,7 @@ class Runner(HostedRuns):
                        "output": truncate_middle(output, 20000)}
             if extra:
                 payload.update(extra)
-            self.db.update_session(sid, context=context, run=run)
+            self.db.sessions.update_session(sid, context=context, run=run)
             self.bus.emit(sid, "tool_result", payload)
             if stop is not None:
                 self.bus.emit(sid, "stuck", stop)
@@ -2250,11 +2250,11 @@ class Runner(HostedRuns):
 
         def update_notes() -> None:
             fields = {"notes": notes}
-            state = self.db.get_session(sid)["run"].get("state")
+            state = self.db.sessions.get_session(sid)["run"].get("state")
             if isinstance(state, dict):
                 fields["state"] = {**state, "notes": notes}
                 self.bus.emit(sid, "state", {"state": fields["state"]})
-            self.db.patch_run(sid, **fields)
+            self.db.sessions.patch_run(sid, **fields)
             self.bus.emit(sid, "notes", {"notes": notes})
         await self.db.for_session(sid).awrite(update_notes)
         await self._record_bounded(sid, call, "update_notes", f"Notes saved ({len(notes)} characters).")
@@ -2268,7 +2268,7 @@ class Runner(HostedRuns):
             return
 
         def update_state() -> None:
-            self.db.patch_run(sid, state=payload, notes=payload["notes"])
+            self.db.sessions.patch_run(sid, state=payload, notes=payload["notes"])
             self.bus.emit(sid, "state", {"state": payload})
             if payload["notes"]:
                 self.bus.emit(sid, "notes", {"notes": payload["notes"]})
@@ -2282,14 +2282,14 @@ class Runner(HostedRuns):
             await self._record_result(sid, call, "reset_round",
                                 "Error: reset_round takes no arguments.", ok=False, invalid=True)
             return
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if not self.has_valid_saved_state(s):
             self._bump(sid, "invalid_tool_calls")
             await self._record_result(sid, call, "reset_round",
                                 "Error: call update_state first so a valid saved state exists before reset_round.",
                                 ok=False, invalid=True)
             return
-        self.db.patch_run(sid, pending_round_reset=True)
+        self.db.sessions.patch_run(sid, pending_round_reset=True)
         await self._record_bounded(sid, call, "reset_round", "Round reset scheduled.")
 
     @staticmethod
@@ -2321,19 +2321,19 @@ class Runner(HostedRuns):
     def _workspace_context_at_start(self, sid: str) -> None:
         """Add the workspace guidance and map once, the first time a session runs, after the clone; later changes
         only come from a round reset."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         run = s["run"]
         if not self._guidance_eligible(s) or run.get("workspace_context_applied") or run.get("repo_map_applied"):
             return
         context = self._with_workspace_context(s, s["context"])
 
         def applied() -> None:
-            self.db.update_session(sid, context=context)
-            self.db.patch_run(sid, workspace_context_applied=True)
+            self.db.sessions.update_session(sid, context=context)
+            self.db.sessions.patch_run(sid, workspace_context_applied=True)
         self.db.for_session(sid).write(applied)
 
     def _snapshot_git_baseline(self, sid: str) -> None:
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s.get("kind", "agent") != "agent" or s.get("target") != "tower" or s.get("workspace_removed"):
             return
         run = s["run"]
@@ -2343,7 +2343,7 @@ class Runner(HostedRuns):
         if snapshot is None:
             return
         run["git_baseline"] = snapshot
-        self.db.update_session(sid, run=run)
+        self.db.sessions.update_session(sid, run=run)
 
     def _files_modified(self, s: dict) -> list[str]:
         """Git changes since the run-start HEAD on tower agent sessions; otherwise write/edit paths."""
@@ -2369,12 +2369,12 @@ class Runner(HostedRuns):
         after = compaction.estimate_tokens(new_context, cpt) + overhead
 
         def round_reset() -> None:
-            self.db.update_session(sid, context=new_context)
-            self.db.unset_run(sid, "pending_round_reset")
+            self.db.sessions.update_session(sid, context=new_context)
+            self.db.sessions.unset_run(sid, "pending_round_reset")
             self.bus.emit(sid, "compaction", {"tier": "round_reset", "tokens_before": before,
                                               "tokens_after": after, "context_tokens": model.context_tokens})
         self.db.for_session(s["id"]).write(round_reset)
-        return self.db.get_session(sid)
+        return self.db.sessions.get_session(sid)
 
     # compaction
     async def _maybe_compact(self, s: dict) -> dict:
@@ -2393,7 +2393,7 @@ class Runner(HostedRuns):
                 if compaction.mask_batch_worthwhile(saved / cpt, before, n, self.cfg.mask_batch_at, self.cfg.elide_at):
                     context, artifacts, masked_chars = masked, found, saved
         await self._store_masked(sid, context, artifacts, masked_chars, cpt)
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         # Per-turn masking keeps `before` close to the masked size. A batch can be most of it, and what it frees is
         # no reason to reset or elide.
         pressure = compaction.estimate_tokens(context, cpt) + overhead if self.cfg.mask_batch_at else before
@@ -2404,8 +2404,8 @@ class Runner(HostedRuns):
                                                "harness.tokens_before": before}):
                 return self._round_reset(s, context, before, cpt, overhead)
         if explicit:
-            self.db.unset_run(sid, "pending_round_reset")
-            s = self.db.get_session(sid)
+            self.db.sessions.unset_run(sid, "pending_round_reset")
+            s = self.db.sessions.get_session(sid)
         if pressure < self.cfg.elide_at * n:
             return s
         return await self._elide_and_summarize(s, context, before, cpt, overhead, outcomes=outcomes)
@@ -2417,7 +2417,7 @@ class Runner(HostedRuns):
         def mask_results() -> None:
             for digest, content in artifacts.items():
                 self.db.sessions.put_artifact(sid, digest, content)
-            self.db.update_session(sid, context=context)
+            self.db.sessions.update_session(sid, context=context)
             if masked_chars > 0:
                 self.bus.emit(sid, "compaction", {"tier": "mask", "tokens_saved": int(masked_chars / cpt),
                                                    "characters_saved": masked_chars})
@@ -2457,13 +2457,13 @@ class Runner(HostedRuns):
                       "harness.compaction_reason": data.get("reason", "threshold")})
 
             def compact() -> None:
-                self.db.update_session(sid, context=context)
+                self.db.sessions.update_session(sid, context=context)
                 if data["tier"] == "summary":  # the next summary request quotes it as the prior notes
-                    self.db.patch_run(sid, summary=data["summary"],
+                    self.db.sessions.patch_run(sid, summary=data["summary"],
                                       summary_notes=s["run"].get("notes", ""))  # what apply_summary framed it with
                 self.bus.emit(sid, "compaction", data)
             await self.db.for_session(s["id"]).awrite(compact)
-        return self.db.get_session(sid)
+        return self.db.sessions.get_session(sid)
 
     async def _trim(self, s: dict, context: list, cpt: float, outcomes: dict | None = None) -> list:
         """The free rule tier ahead of elide and summary (compaction.trim); the `trim` event goes out before any summary
@@ -2528,8 +2528,8 @@ class Runner(HostedRuns):
         except llm.LLMError as e:
             await self.bus.aemit(sid, "error", {"message": f"compaction summary failed: {e}"})
             return context
-        totals = self._add_totals(self.db.get_session(sid)["totals"], summary, turn=False)
-        self.db.update_session(sid, totals=totals)
+        totals = self._add_totals(self.db.sessions.get_session(sid)["totals"], summary, turn=False)
+        self.db.sessions.update_session(sid, totals=totals)
         data.update(prompt_tokens=summary.prompt_tokens, completion_tokens=summary.completion_tokens,
                     totals=totals)
         if summary.content.strip():
@@ -2556,12 +2556,12 @@ class Runner(HostedRuns):
         `cancelled`: the run's task was cancelled, by anyone (daemon shutdown too); a final status that already
         committed still gets its _end_run then."""
         if sid not in self.user_cancelled:
-            s = self.db.get_session(sid)
+            s = self.db.sessions.get_session(sid)
             if not cancelled or sid not in self._unended or not s or s["status"] in ACTIVE:
                 return False
             await self._end_run(sid)
             return True
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s["status"] in ("cancelled", "done"):
             if sid not in self._unended:
                 return False
@@ -2582,7 +2582,7 @@ class Runner(HostedRuns):
 
     async def _close_unresolved(self, sid: str, not_run: str, while_running: str = "") -> None:
         """Give each tool call the run ends without a result one, so the next run's context answers every call."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         executing = (s["run"].get("executing") or {}).get("id")
         for call in unresolved_calls(s["context"]):
             text = while_running if while_running and call["id"] == executing else not_run
@@ -2604,7 +2604,7 @@ class Runner(HostedRuns):
 
     async def _end_run_inner(self, sid: str) -> None:
         await self._join_checkpoint(sid)
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s is None:  # erased: nothing of it may be written again
             return
         if s["run"].get(END_PENDING) != RUN_FINISHED:  # else a restart after its run_finished: just the rest
@@ -2623,9 +2623,9 @@ class Runner(HostedRuns):
         self.write_transcript(sid)
 
         def ended() -> None:
-            current = self.db.get_session(sid)
+            current = self.db.sessions.get_session(sid)
             if current and END_PENDING in current["run"]:
-                self.db.unset_run(sid, END_PENDING)
+                self.db.sessions.unset_run(sid, END_PENDING)
         await self.db.for_session(sid).awrite(ended)
 
     def _clear_tools_only_workspace(self, s: dict) -> None:
@@ -2643,7 +2643,7 @@ class Runner(HostedRuns):
 
     async def _run_finished(self, sid: str) -> dict:
         self._emit_turn_metrics(sid, final=True)
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         extra, fields, quotes = {}, {}, []
         if s.get("job_id"):  # scheduled job: the answer's last STATUS line decides how loudly to notify (jobs.py)
             from .job_results import parse_status
@@ -2658,13 +2658,13 @@ class Runner(HostedRuns):
 
         def run_finished() -> dict:  # one commit, so nobody sees the job status without its run_finished
             if fields:
-                self.db.update_session(sid, **fields)
+                self.db.sessions.update_session(sid, **fields)
             if quotes:
-                self.db.patch_run(sid, ungrounded_quotes=quotes)
+                self.db.sessions.patch_run(sid, ungrounded_quotes=quotes)
                 self.bus.emit(sid, "ungrounded_quotes", {"quotes": quotes})
-            final = self.db.get_session(sid)
+            final = self.db.sessions.get_session(sid)
             run = {k: v for k, v in final["run"].items() if k != END_PENDING}
-            self.db.patch_run(sid, **{END_PENDING: RUN_FINISHED})
+            self.db.sessions.patch_run(sid, **{END_PENDING: RUN_FINISHED})
             self.bus.emit(sid, "run_finished", {"status": final["status"], "stop_reason": final["stop_reason"],
                                                 "answer": final["answer"], "run": run, **extra})
             return final
@@ -2674,7 +2674,7 @@ class Runner(HostedRuns):
         try:
             from .transcript import write_transcript
             from . import storage
-            s = self.db.get_session(sid)
+            s = self.db.sessions.get_session(sid)
             if s is None:  # erased meanwhile
                 return
             dest = storage.session_dirs(self.cfg, s)["transcripts"]
@@ -2685,7 +2685,7 @@ class Runner(HostedRuns):
 
     async def save_branch(self, sid: str) -> None:
         """Commit leftovers on the session branch and copy it to a local source repo."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         project = self.project_for(s) if s else None
         if not project or not project.repo or not s["base_commit"] or s["workspace_removed"]:
             return
@@ -2715,6 +2715,6 @@ class Runner(HostedRuns):
         def branch_saved() -> None:
             reviewed = next((e["data"] for e in reversed(self.db.sessions.events(sid)) if e["type"] == "review"), None)
             if s["review"] and reviewed and reviewed.get("head") != info["head"]:
-                self.db.update_session(sid, review="", review_detail="")  # new work since the last review action
+                self.db.sessions.update_session(sid, review="", review_detail="")  # new work since the last review action
             self.bus.emit(sid, "branch_saved", {"branch": s["branch"], **info})
         await self.db.for_session(sid).awrite(branch_saved)

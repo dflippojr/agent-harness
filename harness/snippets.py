@@ -482,7 +482,7 @@ class SnippetService:
         if self.stopping and "cancelled" in result["reasons"]:
             result["reasons"] = ["daemon_restart"]
             result["status"] = "interrupted"
-        if self.db.get_session(sid) is not None:
+        if self.db.sessions.get_session(sid) is not None:
             self.bus.emit(sid, "snippet_result", result)
 
     def cancel(self, sid: str, run_id: str) -> dict:

@@ -375,7 +375,7 @@ class AppToolBroker:
         def commit():
             if not self.db.sessions.finish_app_tool_call(sid, call_id, "done", output, ok):
                 return False
-            namespace_audit.record(self.db, self.db.get_session(sid), context, "tool_result.submit", target=call_id,
+            namespace_audit.record(self.db, self.db.sessions.get_session(sid), context, "tool_result.submit", target=call_id,
                                    kind="call", metadata={"fields": ["output", "ok"]})
             return True
         if not self.db.for_session(sid).write(commit):
@@ -438,7 +438,7 @@ def _owned_session(request: Request, key: dict, ref: str) -> dict:
     app = key.get("kind") == "app"
     mine = calling_app(key)
     try:
-        s = m.db.get_session(m.resolve_id(ref, user_id=user_id, kind=None if app else "agent", app=mine,
+        s = m.db.sessions.get_session(m.resolve_id(ref, user_id=user_id, kind=None if app else "agent", app=mine,
                                           app_only=not reaches_web(key)))
     except HarnessError as e:
         if e.status in (400, 404):
@@ -642,8 +642,8 @@ def _member_me(m, key: dict, ident) -> dict:
         },
         "usage": {"disk_used_bytes": used, "disk_quota_bytes": limit,
                   "disk_note": quota_message(used, limit) if limit else "",
-                  "running": m.db.count_sessions(key["user_id"], "running"),
-                  "queued": m.db.count_sessions(key["user_id"], "queued"),
+                  "running": m.db.sessions.count_sessions(key["user_id"], "running"),
+                  "queued": m.db.sessions.count_sessions(key["user_id"], "queued"),
                   "account_hint": key["user_id"][2:10] if key["user_id"].startswith("u-") else key["user_id"][:8]},
     }
 
@@ -840,7 +840,7 @@ async def api_queue(request: Request):
             continue
         if not m.db.app_of(sid) and not reaches_web(key):  # in Web's store, which this App never reads
             continue
-        session = m.db.get_session(sid) or {}
+        session = m.db.sessions.get_session(sid) or {}
         if session.get("owner_id", "owner") != user_id or (session.get("kind") or "agent") != "agent":
             continue
         out.append({"session_id": sid, "position": pos})
@@ -888,7 +888,7 @@ async def _global_events_stream(request: Request, m, user_id: str, key: dict, ep
                 continue
             if not m.db.app_of(e["session_id"]) and not reaches_web(key):  # Web's store: unread without sessions:all
                 continue
-            if _global_event_visible(e, m.db.get_session(e["session_id"]), user_id, key, global_types):
+            if _global_event_visible(e, m.db.sessions.get_session(e["session_id"]), user_id, key, global_types):
                 # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
                 yield sse({**e, "seq": None})
     finally:
@@ -1012,7 +1012,7 @@ def _replay(m, key: dict, record: dict | None) -> JSONResponse | None:
     sid = idempotency.replayed_session(m.db.for_app(key["id"]), record)
     if sid is None:
         return None
-    session = m.db.get_session(sid)
+    session = m.db.sessions.get_session(sid)
     if session is None:
         raise HarnessError(410, f"the session this {idempotency.HEADER} created was erased; it is not created again",
                            idempotency.ERASED)
@@ -1138,7 +1138,7 @@ async def delete_session(ref: str, request: Request):
         s = own_session(request, key, ref)
     except HarnessError as e:
         # Gone from everywhere (an id this App erased before): done. Another App's or the owner's: 404.
-        if e.status == 404 and not m.db.app_of(ref) and m.db.for_app("").get_session(ref) is None:
+        if e.status == 404 and not m.db.app_of(ref) and m.db.for_app("").sessions.get_session(ref) is None:
             return None
         raise
     if s.get("app_id") != mine:
@@ -1172,13 +1172,13 @@ async def list_sessions(request: Request, limit: int = 50):
     m = mgr(request)
     key = auth(request, "sessions")
     if key.get("kind") == "member":
-        return await m.list_summaries(m.db.list_sessions(limit, owner_id=key["user_id"]))
+        return await m.list_summaries(m.db.sessions.list_sessions(limit, owner_id=key["user_id"]))
     if owner_key(key) or SESSIONS_ALL in key["scope_set"]:  # the owner's sessions, and an App's own (#330)
-        mine = m.db.scope(calling_app(key)).list_sessions(limit * 5, owner_id="owner")
+        mine = m.db.scope(calling_app(key)).sessions.list_sessions(limit * 5, owner_id="owner")
     else:  # this App's own store only
-        mine = m.db.for_app(key["id"]).list_sessions(limit * 5, owner_id="owner") if key.get("kind") == "app" else []
+        mine = m.db.for_app(key["id"]).sessions.list_sessions(limit * 5, owner_id="owner") if key.get("kind") == "app" else []
     if key.get("kind") == "app":  # an App's tools-only sessions are listed to that App alone (#329)
-        mine += m.db.for_app(key["id"]).list_sessions(limit * 5, owner_id="owner", kind=TOOLS_ONLY)
+        mine += m.db.for_app(key["id"]).sessions.list_sessions(limit * 5, owner_id="owner", kind=TOOLS_ONLY)
         mine.sort(key=lambda r: r["created_at"], reverse=True)
     return await m.list_summaries(mine[:limit])
 

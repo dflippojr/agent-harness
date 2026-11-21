@@ -514,7 +514,7 @@ def test_native_loop_counts_read_artifact_edit_mismatch_and_elide_only(tmp_path)
         sid = m.create("recover and edit")["id"]
         live.update(m=m, sid=sid)
         await wait_status(m, sid, "done")
-        totals = m.db.get_session(sid)["totals"]
+        totals = m.db.sessions.get_session(sid)["totals"]
         assert totals["read_artifact_calls"] == 2
         assert totals["read_artifact_repeats"] == 1
         assert totals["edit_mismatches"] == 1
@@ -565,12 +565,12 @@ def test_pass_before_a_failed_model_call_still_reaches_totals(tmp_path):
         # The last pass has no turn: its row carries the counts and no turn data.
         unturned = [row for row in rows if row.get("composition") is None]
         assert len(unturned) == 1 and unturned[0]["elide_only_compactions"] == 1
-        totals = m.db.get_session(sid)["totals"]
+        totals = m.db.sessions.get_session(sid)["totals"]
         assert totals["elide_only_compactions"] == len(elides)
         assert totals["edit_mismatches"] == 1  # "one" occurs twice in "one one"
         assert sum(row["elide_only_compactions"] for row in rows) == len(elides)
         # A session from before the counts has no such totals keys; the summary still reports them as zero.
-        legacy = m.summary({**m.db.get_session(sid), "totals": {"turns": 1}})
+        legacy = m.summary({**m.db.sessions.get_session(sid), "totals": {"turns": 1}})
         assert legacy["totals"]["read_artifact_calls"] == 0 and legacy["totals"]["turns"] == 1
         await m.stop()
         return sid, m
@@ -652,7 +652,7 @@ def test_hosted_run_end_adds_no_native_retry_metrics(tmp_path):
         sid = m.create("hosted retries")["id"]
         await wait_status(m, sid, "done")
         before = len(events(m, sid, "turn_metrics"))
-        m.db.update_session(sid, backend="claude")
+        m.db.sessions.update_session(sid, backend="claude")
         args = {"command": "false"}
 
         def hosted_retries() -> None:  # a hosted Bash call that failed, then the same call again

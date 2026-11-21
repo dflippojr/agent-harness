@@ -165,6 +165,7 @@ def test_listener_drops_chat_and_member_sessions(tmp_path):
     n.db = type("Db", (), {"get_session": staticmethod(lambda sid: {
         "kind": {"c": "chat", "m": "agent", "a": "agent", "t": "tools_only"}[sid],
         "owner_id": "u1" if sid == "m" else "owner", "app_id": "x" if sid in "at" else ""})})()
+    n.db.sessions = n.db  # the session routing proxy (#992 stage 6), where the listener reads the session
     for sid in "cmat":  # #329: an App's tools-only session never reaches the owner's phone either
         n.listener({"type": "run_finished", "session_id": sid, "data": {}})
         assert n.queue.empty(), sid

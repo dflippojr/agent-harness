@@ -52,7 +52,7 @@ def _session(sid: str, workspace: str) -> dict:
 
 
 async def fake_session(db: Database, sid: str, stop: asyncio.Event, large_every: int, stats: dict, workspace: str) -> None:
-    await db.aio.insert_session(_session(sid, workspace))
+    await db.sessions.aio.insert_session(_session(sid, workspace))
     blob = ("x" * 63 + "\n") * (LARGE_BYTES // 64)
     i = 0
     while not stop.is_set():

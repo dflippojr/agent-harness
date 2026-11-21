@@ -81,7 +81,7 @@ class Checkpointer:
     def _take(self, sid: str, only_if_changed: bool, stats: dict, made: dict,
               at: tuple[dict, int] | None = None) -> dict | None:
         """`take`, raising on failure; `made` tracks what exists so far for `_discard`."""
-        s, event_seq = at if at else (self.db.get_session(sid), None)
+        s, event_seq = at if at else (self.db.sessions.get_session(sid), None)
         if s is None or not eligible(s):
             stats["skipped"] = "ineligible"
             return None
@@ -163,7 +163,7 @@ class Checkpointer:
         beyond the cap. Returns the capped turns; the caller deletes their refs once this has committed."""
         self.db.sessions.delete_checkpoints(sid, stale)
         self.db.sessions.add_checkpoint(sid, turn, sha, head, branch, event_seq)
-        self.db.update_session(sid, turn_seq=turn)
+        self.db.sessions.update_session(sid, turn_seq=turn)
         visible = self.db.sessions.checkpoints(sid, hidden=False)
         capped = [c["turn"] for c in visible[:max(0, len(visible) - CAP)]]
         self.db.sessions.delete_checkpoints(sid, capped)
@@ -241,7 +241,7 @@ class Checkpointer:
 
         All or nothing: every file the restore must remove or replace is probed first, and a step that still
         fails puts the branch, index and files back as they were before raising (409, naming the files)."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         ckpt = self.checkpoint(sid, turn)
         store, workspace = self.store(s), Path(s["workspace"])
         # Decided from the records, not from the workspace, which the agent can change while this runs: a git
@@ -309,9 +309,9 @@ class Checkpointer:
         event log. The log itself keeps the full history."""
         ckpt = self.checkpoint(sid, turn)
         context, carried = saved
-        self.db.unset_run(sid, *TURN_RUN_KEYS, UNSETTLED)
-        self.db.patch_run(sid, **carried)
-        self.db.update_session(sid, context=context, inbox=[], turn_seq=turn, review="", review_detail="", answer="",
+        self.db.sessions.unset_run(sid, *TURN_RUN_KEYS, UNSETTLED)
+        self.db.sessions.patch_run(sid, **carried)
+        self.db.sessions.update_session(sid, context=context, inbox=[], turn_seq=turn, review="", review_detail="", answer="",
                                stop_reason="")
         self.db.sessions.show_checkpoints_through(sid, turn)
         self.bus.emit(sid, "rewound", {"turn": turn, "head": ckpt["head"][:12]})

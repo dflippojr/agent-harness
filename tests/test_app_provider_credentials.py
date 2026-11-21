@@ -127,7 +127,7 @@ def test_revoked_default_backend_drops_its_model_and_falls_back_to_local(tmp_pat
 
         created = client.post("/api/v1/sessions", headers=headers, json={"prompt": "hello"})
         assert created.status_code == 201, created.text
-        session = manager.db.get_session(created.json()["id"])
+        session = manager.db.sessions.get_session(created.json()["id"])
         assert session["backend"] == "local"
         assert session["model"] == manager.cfg.default_model
 

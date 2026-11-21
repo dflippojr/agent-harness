@@ -556,7 +556,7 @@ def test_hard_setup_failure_stops_the_spawned_session_and_clears_low_priority(tm
             except RuntimeError:
                 pass
             assert len(seen) == 1
-            assert m.db.get_session(seen[0])["status"] == "cancelled"
+            assert m.db.sessions.get_session(seen[0])["status"] == "cancelled"
             assert not m.tasks and m.scheduler.holder is None and not m.scheduler.low_priority
         finally:
             await m.stop()
@@ -688,7 +688,7 @@ def test_an_attempt_that_asks_for_an_approval_ends_at_once_as_a_graded_fail_that
         polls.append(1)
         sid = next(iter(m.tasks), None)
         for _ in range(400):
-            if sid is None or m.db.get_session(sid)["status"] == "waiting_approval":
+            if sid is None or m.db.sessions.get_session(sid)["status"] == "waiting_approval":
                 return
             await asyncio.sleep(0.005)
         raise AssertionError("the scripted model's cd + rm never asked for an approval")
@@ -700,7 +700,7 @@ def test_an_attempt_that_asks_for_an_approval_ends_at_once_as_a_graded_fail_that
         assert "GPU" not in o["note"] and o["restarts"] == 0
         assert len(polls) == 1  # ended on the first poll, not at the run's cap (the clock crosses a limit per poll)
         assert row["status"] == "complete" and row["attempts"] == 1 and row["pass_rate"] == 0.0
-        sid = m.db.sessions_with_status("cancelled")[0]["id"]
+        sid = m.db.sessions.sessions_with_status("cancelled")[0]["id"]
         assert not m.db.sessions.pending_approvals(sid) and len(chat.requests) == 1  # no model call after the request
     _hard_night(tmp_path, chat, until_it_asks, check)
 
@@ -726,7 +726,7 @@ def test_the_cap_note_names_what_the_attempt_waited_on(tmp_path, status, image, 
     m = FakeManager(guard_state=guard)
     m.guard.manual = manual
     m.images = SimpleNamespace(gpu_taken=image, phase="idle")
-    m.db = SimpleNamespace(get_session=lambda sid: {"status": status})
+    m.db = SimpleNamespace(sessions=SimpleNamespace(get_session=lambda sid: {"status": status}))
     runner, _ = _runner(m, tmp_path)
     assert runner._waited_on("s1") == expected
 
@@ -826,7 +826,7 @@ def _crashed_canary(tmp_path, outcomes: list[dict] | None = None):
         m = Manager(cfg)
         for sid, project, status in (("c-hard", "canary-hard", "running"), ("c-web", "canary-web", "queued"),
                                      ("real", "scratch", "waiting_approval")):
-            m.db.insert_session({"id": sid, "title": sid, "project": project, "target": "t", "model": "fake",
+            m.db.sessions.insert_session({"id": sid, "title": sid, "project": project, "target": "t", "model": "fake",
                                  "status": status, "workspace": str(tmp_path / sid), "created_at": 1.0,
                                  "updated_at": 1.0, "context": []})
         store = CanaryStore(m.db)
@@ -852,7 +852,7 @@ def _restart(cfg, chat):
                 if row and row["finished_at"]:
                     break
                 await asyncio.sleep(0.01)
-            return ({sid: m.db.get_session(sid)["status"] for sid in ("c-hard", "c-web", "real")}, spawned,
+            return ({sid: m.db.sessions.get_session(sid)["status"] for sid in ("c-hard", "c-web", "real")}, spawned,
                     CanaryStore(m.db).get("f" * 40), dict(m.runner.web_overrides))
         finally:
             await m.stop()

@@ -78,7 +78,7 @@ class Notifier:
             return
         sid = event.get("session_id")
         if sid:
-            session = self.db.get_session(sid)
+            session = self.db.sessions.get_session(sid)
             if session and session.get("kind") == "chat":
                 return  # Chat replies are read live, not pushed
             if session and (session.get("kind") == TOOLS_ONLY or session.get("app_id")):
@@ -160,7 +160,7 @@ class Notifier:
 
     def build(self, event: dict) -> dict | None:
         sid, d = event["session_id"], event["data"]
-        session = self.db.get_session(sid)
+        session = self.db.sessions.get_session(sid)
         if session is None:
             return None
         if (session.get("owner_id") or "owner") != "owner":

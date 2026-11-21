@@ -72,7 +72,7 @@ def test_timed_lock_records_outermost_hold_per_method():
 def test_tx_users_are_labelled_by_their_own_method(tmp_path):
     db = Database(tmp_path / "t.db")
     before = {k: h.snapshot()[2] for k, h in telemetry.lock_held.items()}
-    db.delete_session("missing")  # takes the lock through `with self.tx():`
+    db.sessions.delete_session("missing")  # takes the lock through `with self.tx():`
     after = {k: h.snapshot()[2] for k, h in telemetry.lock_held.items()}
     assert after.get("delete_session", 0) == before.get("delete_session", 0) + 1
     assert after.get("tx", 0) == before.get("tx", 0)

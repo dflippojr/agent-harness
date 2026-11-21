@@ -232,8 +232,8 @@ class AccountService:
 
     def public_account(self, row: dict, *, include_usage: bool = True) -> dict:
         user_id = row["user_id"]
-        running = self._db().count_sessions(user_id, "running")
-        queued = self._db().count_sessions(user_id, "queued")
+        running = self._db().sessions.count_sessions(user_id, "running")
+        queued = self._db().sessions.count_sessions(user_id, "queued")
         used = account_usage_bytes(self._cfg(), user_id) if include_usage else 0
         return {
             "user_id": user_id,
@@ -264,8 +264,8 @@ class AccountService:
             "user_id": user_id,
             "disk_used_bytes": used,
             "disk_quota_bytes": limit,
-            "running": self._db().count_sessions(user_id, "running"),
-            "queued": self._db().count_sessions(user_id, "queued"),
+            "running": self._db().sessions.count_sessions(user_id, "running"),
+            "queued": self._db().sessions.count_sessions(user_id, "queued"),
         }
 
 

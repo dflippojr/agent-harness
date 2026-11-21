@@ -98,7 +98,7 @@ def test_overflow_compacts_once_and_retries(tmp_path):
         turns_sent = [r for r in script.requests if r[0]["content"] != compaction.SUMMARY_SYSTEM]
         assert len(turns_sent) == 6                                        # four turns, the rejected call, the retry
         assert turns_sent[-1][2]["content"].startswith(compaction.SUMMARY_TAG)  # the retry got the compacted context
-        assert m.db.get_session(s["id"])["run"]["summary"] == "SUMMARY: did things"
+        assert m.db.sessions.get_session(s["id"])["run"]["summary"] == "SUMMARY: did things"
         assert not events(m, s["id"], "error")
         await m.stop()
     asyncio.run(body())

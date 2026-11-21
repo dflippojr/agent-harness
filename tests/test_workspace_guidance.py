@@ -176,7 +176,7 @@ def test_a_follow_up_message_does_not_reload_the_guidance(tmp_path):
         await m.start()
         s = await wait_status(m, m.create("task")["id"], "done")
         sid, root = s["id"], Path(s["workspace"])
-        base = m.db.get_session(sid)["context"][0]["content"]
+        base = m.db.sessions.get_session(sid)["context"][0]["content"]
         (root / "AGENTS.md").write_text("LATE", encoding="utf-8")
         await m.send(sid, "again")
         s = await wait_status(m, sid, "done")
