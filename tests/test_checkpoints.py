@@ -69,7 +69,7 @@ def test_checkpoint_per_mutating_turn_and_rewind(tmp_path):
     async def body():
         m, s = await started(tmp_path)
         sid, ws = s["id"], Path(s["workspace"])
-        assert [c["turn"] for c in m.db.checkpoints(sid)] == [1, 2]
+        assert [c["turn"] for c in m.db.sessions.checkpoints(sid)] == [1, 2]
         assert s["turn_seq"] == 2
         assert len(events(m, sid, "checkpoint")) == 2
         head_before = sh(ws, "rev-parse", "agent/" + sid)
@@ -82,8 +82,8 @@ def test_checkpoint_per_mutating_turn_and_rewind(tmp_path):
         assert (ws / "app.py").read_text() == "VALUE = 2\n"
         assert not (ws / "extra.txt").exists()
         assert len([x for x in rewound["context"] if x["role"] == "assistant"]) == 1
-        assert [c["turn"] for c in m.db.checkpoints(sid)] == [1]            # later ones hidden, not deleted
-        assert [c["turn"] for c in m.db.checkpoints(sid, hidden=True)] == [2]
+        assert [c["turn"] for c in m.db.sessions.checkpoints(sid)] == [1]            # later ones hidden, not deleted
+        assert [c["turn"] for c in m.db.sessions.checkpoints(sid, hidden=True)] == [2]
         assert events(m, sid, "rewound")[-1]["turn"] == 1
         assert len(events(m, sid, "tool_call")) >= 2                        # the event log keeps the history
 
@@ -92,7 +92,7 @@ def test_checkpoint_per_mutating_turn_and_rewind(tmp_path):
         again = await m.rewind(sid, 2)                                      # redo while still retained
         assert (ws / "extra.txt").exists() and len(again["context"]) > len(rewound["context"])
         assert [c["turn"] for c in m.checkpoints(sid)["checkpoints"]] == [1, 2]   # redo: turn 2 is listed again
-        assert not m.db.checkpoints(sid, hidden=True)
+        assert not m.db.sessions.checkpoints(sid, hidden=True)
         await m.rewind(sid, 1)                                              # and can be left again
         await m.rewind(sid, 2)
         fork = await m.fork(sid, 2, "from the redone turn")
@@ -110,8 +110,8 @@ def test_next_mutating_turn_replaces_hidden_checkpoints(tmp_path):
         await m.rewind(sid, 1)
         await m.send(sid, "again")
         s = await finished(m, sid)
-        turns = [c["turn"] for c in m.db.checkpoints(sid, hidden=None)]
-        assert turns == sorted(set(turns)) and not m.db.checkpoints(sid, hidden=True)
+        turns = [c["turn"] for c in m.db.sessions.checkpoints(sid, hidden=None)]
+        assert turns == sorted(set(turns)) and not m.db.sessions.checkpoints(sid, hidden=True)
         assert s["turn_seq"] == turns[-1]
 
     asyncio.run(body())
@@ -158,7 +158,7 @@ def test_scratch_session_checkpoints_and_rewinds(tmp_path):
         assert (ws / "a.txt").read_text() == "one\n"
         assert not (ws / ".git").exists()
         fork = await finished(m, (await m.fork(s["id"], 1, "next"))["id"])
-        first = m.db.checkpoints(fork["id"])[0]          # the fork's own copy of the checkpoint it started from
+        first = m.db.sessions.checkpoints(fork["id"])[0]          # the fork's own copy of the checkpoint it started from
         store = m.runner.checkpointer.store(fork)
         assert store._git(None, None, "show", f"{first['sha']}:a.txt").out == "one\n"
 
@@ -208,7 +208,7 @@ def test_cap_prunes_oldest(tmp_path, monkeypatch):
 
     async def body():
         m, s = await started(tmp_path)
-        assert [c["turn"] for c in m.db.checkpoints(s["id"])] == [2]
+        assert [c["turn"] for c in m.db.sessions.checkpoints(s["id"])] == [2]
         store = m.runner.checkpointer.store(s)
         assert not store._git(None, None, "rev-parse", "--verify", "-q",
                               checkpoints.ref_name(s["id"], 1), check=False).out.strip()
@@ -230,10 +230,10 @@ def test_over_quota_prunes_then_skips_without_failing_the_turn(shared, monkeypat
     usage["bytes"] = 150
     monkeypatch.setattr("harness.fileops.dir_size", lambda p: 100)
     monkeypatch.setattr(store, "reclaim", lambda: usage.update(bytes=50), raising=False)
-    before = [c["turn"] for c in m.db.checkpoints(sid, hidden=None)]
+    before = [c["turn"] for c in m.db.sessions.checkpoints(sid, hidden=None)]
     assert cp._within_quota(member, store, sid, keep=2) is True
     # Unreachable objects only a reclaim frees (it is deferred) must not cost a live checkpoint.
-    assert [c["turn"] for c in m.db.checkpoints(sid, hidden=None)] == before
+    assert [c["turn"] for c in m.db.sessions.checkpoints(sid, hidden=None)] == before
     # Even an empty store would not fit: skipped, never raises.
     monkeypatch.setattr("harness.fileops.dir_size", lambda p: 10)
     monkeypatch.setattr(store, "reclaim", lambda: None, raising=False)
@@ -253,7 +253,7 @@ def test_disk_view_and_usage_count_checkpoints_and_cleanup_removes_them(tmp_path
         measured = storage.account_usage_bytes(m.cfg, "owner")
         assert measured >= sum(p.stat().st_size for p in base.rglob("*") if p.is_file())
         m.maintenance.remove_workspace(sid)
-        assert not base.exists() and not m.db.checkpoints(sid, hidden=None)
+        assert not base.exists() and not m.db.sessions.checkpoints(sid, hidden=None)
 
     asyncio.run(body())
 
@@ -322,7 +322,7 @@ def test_fork_writes_through_the_writer_without_blocking_the_loop(tmp_path, monk
         fork = await m.fork(s["id"], 1, "carry on")
         monkeypatch.undo()
         assert blocking == []                                               # #294: awrite from async code
-        assert [c["turn"] for c in m.db.checkpoints(fork["id"])] == [1]
+        assert [c["turn"] for c in m.db.sessions.checkpoints(fork["id"])] == [1]
         assert events(m, fork["id"], "forked")[-1]["turn"] == 1
         await finished(m, fork["id"])
 
@@ -401,9 +401,9 @@ def test_a_turn_that_only_generates_an_image_is_checkpointed(tmp_path):
         await m.start(maintenance=False)
         sid = m.create("make an icon")["id"]
         await wait_status(m, sid, "done", timeout=20)
-        assert [c["turn"] for c in m.db.checkpoints(sid)] == [1]           # the PNG is in the workspace
+        assert [c["turn"] for c in m.db.sessions.checkpoints(sid)] == [1]           # the PNG is in the workspace
         store = m.runner.checkpointer.store(m.db.get_session(sid))
-        sha = m.db.checkpoints(sid)[0]["sha"]
+        sha = m.db.sessions.checkpoints(sid)[0]["sha"]
         assert "assets/icon.png" in store._git(None, None, "ls-tree", "-r", "--name-only", sha).out
         await m.stop()
 
@@ -428,7 +428,7 @@ async def later_work(tmp_path):
         row = m.db.get_session(sid)
         return (files, sh(ws, "symbolic-ref", "HEAD"), sh(ws, "rev-parse", "HEAD"),
                 sh(ws, "diff", "--cached", "--name-only"), sh(ws, "status", "--porcelain"), row["context"],
-                row["turn_seq"], [c["turn"] for c in m.db.checkpoints(sid)], len(events(m, sid, "rewound")))
+                row["turn_seq"], [c["turn"] for c in m.db.sessions.checkpoints(sid)], len(events(m, sid, "rewound")))
     return m, sid, ws, state
 
 
@@ -548,7 +548,7 @@ def test_fork_whose_record_fails_leaves_no_child(tmp_path, monkeypatch):
 
         def failing_add(*args):
             raise sqlite3.OperationalError("disk I/O error")
-        monkeypatch.setattr(m.db, "add_checkpoint", failing_add)
+        monkeypatch.setattr(m.db.sessions, "add_checkpoint", failing_add)
         sessions = {x["id"] for x in m.db.list_sessions()}
 
         with pytest.raises(sqlite3.OperationalError):
@@ -637,7 +637,7 @@ def assert_not_checkpointed(m, s):
     sid = s["id"]
     assert s["status"] == "done"
     assert [e.get("status") for e in events(m, sid, "checkpoint")] == ["skipped", "skipped"]
-    assert m.db.checkpoints(sid, hidden=None) == [] and not s["turn_seq"]
+    assert m.db.sessions.checkpoints(sid, hidden=None) == [] and not s["turn_seq"]
     store = m.runner.checkpointer.store(s)
     assert checkpoints.REF_PREFIX not in store._git(None, None, "for-each-ref").out
     assert not any(store.contexts.iterdir())
@@ -684,7 +684,7 @@ def test_a_failed_quota_check_after_keeping_keeps_the_turn(tmp_path, monkeypatch
         sid = s["id"]
         assert s["status"] == "done"
         assert [e.get("turn") for e in events(m, sid, "checkpoint")] == [1, 2]
-        assert [c["turn"] for c in m.db.checkpoints(sid, hidden=None)] == [1, 2]
+        assert [c["turn"] for c in m.db.sessions.checkpoints(sid, hidden=None)] == [1, 2]
         refs = m.runner.checkpointer.store(s)._git(None, None, "for-each-ref", "--format=%(refname)").out
         assert "/staged/" not in refs and "/replaced/" not in refs
         await m.rewind(sid, 1)
@@ -707,9 +707,9 @@ def test_a_write_that_trips_the_quota_stop_is_still_checkpointed(tmp_path, monke
         m, s = await started(tmp_path, script=script)
         sid = s["id"]
         assert s["status"] == "failed" and (Path(s["workspace"]) / "big.bin").exists()
-        assert [c["turn"] for c in m.db.checkpoints(sid)] == [1]
+        assert [c["turn"] for c in m.db.sessions.checkpoints(sid)] == [1]
         assert [e.get("turn") for e in events(m, sid, "checkpoint")] == [1]
-        sha = m.db.checkpoints(sid)[0]["sha"]
+        sha = m.db.sessions.checkpoints(sid)[0]["sha"]
         store = m.runner.checkpointer.store(s)
         assert "big.bin" in store._git(None, None, "ls-tree", "-r", "--name-only", sha).out
 
@@ -727,7 +727,7 @@ def test_a_mutating_call_the_policy_blocked_is_not_checkpointed(tmp_path, monkey
     async def body():
         m, s = await started(tmp_path, script=script)
         assert s["status"] == "done"
-        assert m.db.checkpoints(s["id"], hidden=None) == [] and events(m, s["id"], "checkpoint") == []
+        assert m.db.sessions.checkpoints(s["id"], hidden=None) == [] and events(m, s["id"], "checkpoint") == []
 
     asyncio.run(body())
 
@@ -755,7 +755,7 @@ def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoabl
     cp = m.runner.checkpointer
     cp._unreclaimed.clear()
     store = cp.store(s)
-    hidden = m.db.checkpoints(sid, hidden=True)
+    hidden = m.db.sessions.checkpoints(sid, hidden=True)
     assert [c["turn"] for c in hidden] == [2]
     try:
         (ws / "after-rewind.txt").write_text("new work\n")
@@ -774,7 +774,7 @@ def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoabl
         assert event["status"] == "skipped"
         if failing == "quota":
             assert "quota" in event["reason"]
-        assert m.db.checkpoints(sid, hidden=True) == hidden and m.db.get_session(sid)["turn_seq"] == 1
+        assert m.db.sessions.checkpoints(sid, hidden=True) == hidden and m.db.get_session(sid)["turn_seq"] == 1
         refs = store._git(None, None, "for-each-ref", "--format=%(refname) %(objectname)").out.split("\n")
         assert f"{checkpoints.ref_name(sid, 2)} {hidden[0]['sha']}" in refs
         assert not [r for r in refs if "/staged/" in r or "/replaced/" in r]
@@ -799,11 +799,11 @@ def test_a_take_after_a_rewind_replaces_the_rewound_past_checkpoint_of_its_turn(
         cp._unreclaimed.clear()
         store = cp.store(s)
         await m.rewind(sid, 1)
-        hidden = m.db.checkpoints(sid, hidden=True)
+        hidden = m.db.sessions.checkpoints(sid, hidden=True)
         (ws / "after-rewind.txt").write_text("new work\n")
         event = await asyncio.to_thread(cp.take, sid)
-        assert event["turn"] == 2 and not m.db.checkpoints(sid, hidden=True)
-        new = m.db.checkpoints(sid, hidden=False)[-1]
+        assert event["turn"] == 2 and not m.db.sessions.checkpoints(sid, hidden=True)
+        new = m.db.sessions.checkpoints(sid, hidden=False)[-1]
         assert new["turn"] == 2 and new["sha"] != hidden[0]["sha"]
         refs = store._git(None, None, "for-each-ref", "--format=%(refname) %(objectname)").out.split("\n")
         assert f"{checkpoints.ref_name(sid, 2)} {new['sha']}" in refs
@@ -971,8 +971,8 @@ def test_the_next_model_call_does_not_wait_for_the_checkpoint(tmp_path, monkeypa
         sid = s["id"]
         assert seen_second_call == [True]            # the second model call began while the first snapshot ran
         assert steps == ["take", "taken", "take", "taken"]   # one at a time, in turn order
-        assert [c["turn"] for c in m.db.checkpoints(sid)] == [1, 2]       # all there once the session reads as done
-        seqs = [c["event_seq"] for c in m.db.checkpoints(sid)]
+        assert [c["turn"] for c in m.db.sessions.checkpoints(sid)] == [1, 2]       # all there once the session reads as done
+        seqs = [c["event_seq"] for c in m.db.sessions.checkpoints(sid)]
         first_reply = [e["seq"] for e in m.db.events(sid) if e["type"] == "tool_result"][0]
         assert seqs[0] >= first_reply and seqs[0] < [e["seq"] for e in m.db.events(sid) if e["type"] == "assistant"][1]
         await m.rewind(sid, 1)                                              # rewind right after a mutating turn

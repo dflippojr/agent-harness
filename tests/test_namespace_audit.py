@@ -97,7 +97,7 @@ def test_message_context_approval_cancel_and_rerun_scoping(setup):
     assert client.post(f"/api/v1/sessions/{sid}/messages", headers=auth, json={"content": PRIVATE}).status_code == 200
     assert client.post(f"/api/v1/sessions/{sid}/context", headers=auth,
                        json={"context": [{"title": "ctx", "content": PRIVATE}]}).status_code == 200
-    m.db.insert_approval({"id": "approval-a", "session_id": sid, "tool_call_id": "call-a", "tool": "shell",
+    m.db.sessions.insert_approval({"id": "approval-a", "session_id": sid, "tool_call_id": "call-a", "tool": "shell",
                           "args": {"command": PRIVATE}, "reason": PRIVATE, "detail": PRIVATE, "status": "pending"})
     assert client.post(f"/api/v1/sessions/{sid}/approvals/approval-a", headers=auth,
                        json={"decision": "deny", "note": PRIVATE}).status_code == 200
@@ -434,7 +434,7 @@ def test_partial_provider_erase_does_not_replay_or_leak_exception(setup, monkeyp
 def test_failed_approval_uses_verified_approval_target_and_drops_guesses(setup):
     m, client, _, _, headers = setup
     sid = create(client, headers[0])
-    m.db.insert_approval({"id": "known-approval", "session_id": sid, "tool_call_id": "call", "tool": "shell",
+    m.db.sessions.insert_approval({"id": "known-approval", "session_id": sid, "tool_call_id": "call", "tool": "shell",
                           "args": {}, "reason": PRIVATE, "detail": PRIVATE, "status": "pending"})
     url = f"/api/v1/sessions/{sid}/approvals/known-approval"
     assert client.post(url, headers=headers[0], json={"decision": "deny"}).status_code == 200

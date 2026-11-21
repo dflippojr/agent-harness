@@ -232,10 +232,10 @@ def test_native_loop_approval_events_taint_metrics_and_cleanup(tmp_path, fake_tr
             sid = s["id"]
             # wait_status waits for the run task for terminal states, so use the pending approval as the checkpoint.
             for _ in range(500):
-                if m.db.pending_approvals(sid):
+                if m.db.sessions.pending_approvals(sid):
                     break
                 await asyncio.sleep(0.01)
-            assert m.db.pending_approvals(sid), m.db.get_session(sid)
+            assert m.db.sessions.pending_approvals(sid), m.db.get_session(sid)
             assert not events(m, sid, "tool_result")
             m.decide(sid, None, approve=approve)
             final = await wait_status(m, sid, "done", "failed")
@@ -281,7 +281,7 @@ def test_result_banner_is_context_only_and_survives_read_artifact(tmp_path, fake
             assert final["status"] == "done", final["stop_reason"]
             first, recovered = events(m, sid, "tool_result")
             assert first["output"] == plain and first["artifact_id"] == digest
-            assert m.db.full_artifact(sid, digest) == plain
+            assert m.db.sessions.full_artifact(sid, digest) == plain
             assert script.requests[1][-1]["content"] == banner + plain
             assert recovered["ok"] and recovered["output"] == plain[:60]
             assert script.requests[2][-1]["content"] == banner + plain[:60]
@@ -313,7 +313,7 @@ def test_a_large_mcp_result_is_bounded_after_its_banner_and_recovered_whole(tmp_
             assert final["status"] == "done", final["stop_reason"]
             first, recovered = events(m, sid, "tool_result")
             assert len(plain) > 1000 and first["artifact_id"] == digest
-            assert m.db.full_artifact(sid, digest) == plain
+            assert m.db.sessions.full_artifact(sid, digest) == plain
             assert script.requests[1][-1]["content"] == banner + bound_shell_text(plain, 1000, digest)
             assert first["output"] == bound_shell_text(plain, 1000, digest)
             assert recovered["output"] == plain and recovered["artifact_id"] is None
@@ -344,7 +344,7 @@ def test_a_lone_surrogate_in_a_bounded_result_is_recorded_and_shown(tmp_path, fa
             assert final["status"] == "done", final["stop_reason"]
             (result,) = events(m, sid, "tool_result")
             assert result["ok"] and result["artifact_id"] == digest
-            assert m.db.full_artifact(sid, digest) == clean
+            assert m.db.sessions.full_artifact(sid, digest) == clean
             assert result["output"] == bound_shell_text(clean, 1000, digest)
             assert script.requests[1][-1]["content"] == banner + bound_shell_text(clean, 1000, digest)
             assert "\ufffd tail" in script.requests[1][-1]["content"]
@@ -381,10 +381,10 @@ def test_session_isolation_rule_overrides_and_cancellation(tmp_path, fake_transp
         try:
             s = m.create("echo")
             for _ in range(500):
-                if m.db.pending_approvals(s["id"]):
+                if m.db.sessions.pending_approvals(s["id"]):
                     break
                 await asyncio.sleep(0.01)
-            assert m.db.pending_approvals(s["id"])
+            assert m.db.sessions.pending_approvals(s["id"])
             m.tasks[s["id"]].cancel()
             await asyncio.gather(m.tasks[s["id"]], return_exceptions=True)
             assert not m.modules.get("mcp_client").sessions
@@ -577,11 +577,11 @@ def test_rw_tools_checkpoint_rewind_and_quota(tmp_path, fake_transport, mode):
                 assert final["status"] == "failed"
                 assert final["stop_reason"].startswith("quota_exceeded:")
                 assert len(events(m, sid, "tool_call")) == 1
-                assert [c["turn"] for c in m.db.checkpoints(sid)] == [1]
+                assert [c["turn"] for c in m.db.sessions.checkpoints(sid)] == [1]
                 assert path.stat().st_size == 2**21
             else:
                 assert final["status"] == "done", final["stop_reason"]
-                assert [c["turn"] for c in m.db.checkpoints(sid)] == [1, 2]
+                assert [c["turn"] for c in m.db.sessions.checkpoints(sid)] == [1, 2]
                 assert path.read_text() == "second"
                 await m.rewind(sid, 1)
                 assert path.read_text() == "first"

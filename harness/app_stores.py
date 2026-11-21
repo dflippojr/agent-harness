@@ -424,8 +424,9 @@ class SessionStores:
             self._release(app_id)
 
     def _call(self, app_id: str, name: str, /, *args, **kwargs):
-        with self._using(app_id, write=_kind(name) == "write") as db:
-            return getattr(db, name)(*args, **kwargs)
+        """SessionStore method `name` on App `app_id`'s store, held for the call (as a write for a writing one)."""
+        with self._using(app_id, write=_session_kind(name) == "write") as db:
+            return getattr(db.sessions, name)(*args, **kwargs)
 
     def _writer_here(self) -> Database | None:
         """The store whose writer thread this is, if any."""
@@ -856,10 +857,10 @@ class SessionStores:
         self._refuse_erased(a["session_id"])
         app_id = self.app_of(a["session_id"])
         if not app_id:
-            return self.web.insert_approval(a)
+            return self.web.sessions.insert_approval(a)
         def insert(db: Database) -> None:
-            db.insert_approval(a)
-            token = (db.get_approval(a["id"]) or {}).get("token")
+            db.sessions.insert_approval(a)
+            token = (db.sessions.get_approval(a["id"]) or {}).get("token")
             with self._lock:  # routes from here on, like a new session's id; dropped if the insert rolls back
                 self._approvals[a["id"]] = app_id
                 if token:
@@ -874,29 +875,29 @@ class SessionStores:
             self._tokens.pop(token, None)
 
     def insert_smart_review(self, rid: str, sid: str, approval_id: str, record: dict) -> None:
-        return self.for_session(sid).insert_smart_review(rid, sid, approval_id, record)
+        return self.for_session(sid).sessions.insert_smart_review(rid, sid, approval_id, record)
 
     def get_approval(self, aid: str) -> dict | None:
         with self._lock:
             app_id = self._approvals.get(aid)
-        return self._call(app_id, "get_approval", aid) if app_id else self.web.get_approval(aid)
+        return self._call(app_id, "get_approval", aid) if app_id else self.web.sessions.get_approval(aid)
 
     def approval_by_token(self, token: str) -> dict | None:
         with self._lock:
             app_id = self._tokens.get(token) if token else None
-        return self._call(app_id, "approval_by_token", token) if app_id else self.web.approval_by_token(token)
+        return self._call(app_id, "approval_by_token", token) if app_id else self.web.sessions.approval_by_token(token)
 
     def decide_approval(self, aid: str, status: str, note: str = "") -> bool:
         with self._lock:
             app_id = self._approvals.get(aid)
         return self._call(app_id, "decide_approval", aid, status, note) if app_id else \
-            self.web.decide_approval(aid, status, note)
+            self.web.sessions.decide_approval(aid, status, note)
 
     def pending_approvals(self, sid: str | None = None, user_id: str | None = None,
                           with_app: str | None = None) -> list[dict]:
         if sid:
-            return self.for_session(sid).pending_approvals(sid, user_id=user_id)
-        rows = self.web.pending_approvals(user_id=user_id)
+            return self.for_session(sid).sessions.pending_approvals(sid, user_id=user_id)
+        rows = self.web.sessions.pending_approvals(user_id=user_id)
         apps = self._reach(None, with_app, lambda e: e["status"] not in _ENDED
                            and (user_id is None or e["owner_id"] == user_id))
         if not apps:

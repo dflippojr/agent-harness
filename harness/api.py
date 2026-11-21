@@ -970,7 +970,7 @@ async def canary_alert_test(request: Request, body: CanaryAlertTest | None = Non
 async def approvals(ref: str, request: Request, all: bool = False):
     """Pending approvals for the session, or every approval when `all` is true."""
     m, sid, _ = owned_session(request, ref)
-    rows = m.db.approvals(sid) if all else m.db.pending_approvals(sid)
+    rows = m.db.sessions.approvals(sid) if all else m.db.sessions.pending_approvals(sid)
     return [public_approval(a) for a in rows]
 
 

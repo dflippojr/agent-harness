@@ -100,7 +100,7 @@ def test_local_session_sends_only_app_tools_and_denies_a_builtin_the_model_tries
         decided = {e["name"]: e for e in events(m, sid, "tool_call")}
         assert decided["run_shell"]["decision"] == DENY
         assert decided["get_balance"]["decision"] == ALLOW
-        assert ran == [] and m.db.pending_approvals(sid) == []
+        assert ran == [] and m.db.sessions.pending_approvals(sid) == []
         denied = next(c for c in m.db.get_session(sid)["context"] if c.get("tool_call_id") == "c0-run_shell")
         assert "App-tools-only" in denied["content"]
         final = m.db.get_session(sid)
@@ -310,7 +310,7 @@ def test_hosted_claude_reaches_only_app_tools_and_builtins_are_denied(tmp_path):
         assert calls[2] == ["get_balance", False, "$900"]
         decided = [(e["name"], e["decision"]) for e in events(m, sid, "tool_call")]
         assert decided == [("Bash", DENY), ("mcp__harness__web_search", DENY), ("mcp__harness__get_balance", ALLOW)]
-        assert m.db.pending_approvals(sid) == []
+        assert m.db.sessions.pending_approvals(sid) == []
         assert not Path(m.db.get_session(sid)["workspace"]).exists()
         await m.stop()
     asyncio.run(body())

@@ -214,7 +214,7 @@ def test_below_the_threshold_nothing_is_rewritten_then_everything_eligible_is(tm
         assert mask["characters_saved"] > 4 * 14000
         for i in (1, 4):  # recoverable like any receipt
             digest = hashlib.sha256(f"{i} {RESULT}".encode("utf-8")).hexdigest()
-            assert m.db.full_artifact(sid, digest) == f"{i} {RESULT}"
+            assert m.db.sessions.full_artifact(sid, digest) == f"{i} {RESULT}"
         await m.stop()
     asyncio.run(body())
 
@@ -281,7 +281,7 @@ def test_an_overflow_masks_what_a_batch_had_not_reached_before_it_summarizes(tmp
         summary_request = next(r for r in script.requests if r[0]["content"] == compaction.SUMMARY_SYSTEM)
         assert (compaction.RECEIPT_PREFIX in summary_request[1]["content"]) is masked
         digest = hashlib.sha256(f"1 {'z' * 3000}".encode("utf-8")).hexdigest()
-        assert (m.db.full_artifact(sid, digest) is not None) is masked
+        assert (m.db.sessions.full_artifact(sid, digest) is not None) is masked
         await m.stop()
     asyncio.run(body())
 

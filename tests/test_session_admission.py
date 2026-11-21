@@ -332,7 +332,7 @@ def test_a_parked_hosted_run_saved_before_places_were_recorded_recovers_parked(t
         await m.start()
         _insert(m, "oldpark001", "waiting_approval", app_id=key["id"], holds=False)
         m.db.update_session("oldpark001", backend="claude")
-        m.db.insert_approval({"id": "a-oldpark1", "session_id": "oldpark001", "tool_call_id": "old-call",
+        m.db.sessions.insert_approval({"id": "a-oldpark1", "session_id": "oldpark001", "tool_call_id": "old-call",
                               "tool": "Bash", "args": {"command": "python build.py"}, "reason": "test"})
         await m.runner.mark_recovered_place(m.db.get_session("oldpark001"))  # as the daemon's start does
         m._spawn("oldpark001", recovered=True)
@@ -340,7 +340,7 @@ def test_a_parked_hosted_run_saved_before_places_were_recorded_recovers_parked(t
         await asyncio.sleep(0.5)
         s = m.get("oldpark001")
         assert s["status"] == "waiting_approval" and s["run"].get(HOLDS_PLACE)
-        assert [a["id"] for a in m.db.approvals("oldpark001")] == ["a-oldpark1"]
+        assert [a["id"] for a in m.db.sessions.approvals("oldpark001")] == ["a-oldpark1"]
         m.decide("oldpark001", None, approve=True)
         await wait_status(m, "oldpark001", "done", timeout=15)
         await m.stop()
@@ -397,7 +397,7 @@ def test_runs_saved_before_places_were_recorded_get_them_before_any_run_resumes(
         pending = call("write_file", 0, path="a.txt", content="x")
         m.db.update_session("oldpark002", context=[
             {"role": "user", "content": "write it"}, {"role": "assistant", "content": "", "tool_calls": [pending]}])
-        m.db.insert_approval({"id": "a-oldpark2", "session_id": "oldpark002", "tool_call_id": pending["id"],
+        m.db.sessions.insert_approval({"id": "a-oldpark2", "session_id": "oldpark002", "tool_call_id": pending["id"],
                               "tool": "write_file", "args": {"path": "a.txt", "content": "x"}, "reason": "test"})
         _insert(m, "queued0006", "queued", app_id=app_id)
         await m.start(maintenance=False)
@@ -790,7 +790,7 @@ def test_a_hosted_approval_past_its_deadline_is_denied_and_the_run_ends(tmp_path
         sid = m.create("run it", backend="claude")["id"]
         s = await wait_status(m, sid, "done", "failed", timeout=30)
         assert (s["status"], s["stop_reason"]) == ("done", "approval_expired")
-        approval = m.db.approvals(sid)[0]
+        approval = m.db.sessions.approvals(sid)[0]
         assert approval["status"] == "denied" and "Expired" in approval["note"]
         await asyncio.gather(*m.tasks.values())
         # The slot is free for the next session.
@@ -815,7 +815,7 @@ def test_a_local_approval_past_its_deadline_is_denied_and_the_run_ends(tmp_path)
         s = m.create("try", project="guarded")
         s = await wait_status(m, s["id"], "done", "failed")
         assert (s["status"], s["stop_reason"]) == ("done", "approval_expired")
-        assert m.db.approvals(s["id"])[0]["status"] == "denied"
+        assert m.db.sessions.approvals(s["id"])[0]["status"] == "denied"
         assert unresolved_calls(s["context"]) == []
         assert any(e["data"].get("expired") for e in m.db.events(s["id"]) if e["type"] == "approval_decided")
         assert m.scheduler.holder is None
@@ -836,12 +836,12 @@ def test_an_approval_expires_while_its_recovered_run_waits_for_an_offline_mac(tm
         pending = call("write_file", 0, path="a.txt", content="x")
         m.db.update_session("macpark001", target="macbook", context=[
             {"role": "user", "content": "write it"}, {"role": "assistant", "content": "", "tool_calls": [pending]}])
-        m.db.insert_approval({"id": "a-mac00001", "session_id": "macpark001", "tool_call_id": pending["id"],
+        m.db.sessions.insert_approval({"id": "a-mac00001", "session_id": "macpark001", "tool_call_id": pending["id"],
                               "tool": "write_file", "args": {"path": "a.txt", "content": "x"}, "reason": "test"})
         await m.start(maintenance=False)
         s = await wait_status(m, "macpark001", "done", "failed", "cancelled", timeout=15)
         assert (s["status"], s["stop_reason"]) == ("done", "approval_expired")
-        assert m.db.get_approval("a-mac00001")["status"] == "denied"
+        assert m.db.sessions.get_approval("a-mac00001")["status"] == "denied"
         assert unresolved_calls(s["context"]) == []
         await m.stop()
     asyncio.run(body())
@@ -1142,7 +1142,7 @@ def test_an_app_reply_does_not_restart_the_clock_while_an_approval_is_pending(tm
         app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
         _insert(m, "hosted0004", "waiting_approval", app_id=app_id)
         m.db.update_session("hosted0004", backend="claude")
-        m.db.insert_approval({"id": "a-host0004", "session_id": "hosted0004", "tool_call_id": "t1", "tool": "Bash",
+        m.db.sessions.insert_approval({"id": "a-host0004", "session_id": "hosted0004", "tool_call_id": "t1", "tool": "Bash",
                               "args": {"command": "make"}, "reason": "test"})
 
         class Lookup:
@@ -1157,7 +1157,7 @@ def test_an_app_reply_does_not_restart_the_clock_while_an_approval_is_pending(tm
         await m.runner._dispatch_mcp(m.db.get_session("hosted0004"), "c1", "lookup", {})
         assert m.db.get_session("hosted0004")["status"] == "waiting_approval"  # its clock stays stopped
         m.runner._app_waits["hosted0004"] = 1  # an App call still out when the approval is decided
-        m.db.decide_approval("a-host0004", "approved", "")
+        m.db.sessions.decide_approval("a-host0004", "approved", "")
         assert m.runner._hosted_status("hosted0004") == "waiting_app"
     asyncio.run(body())
 
@@ -1207,7 +1207,7 @@ def test_a_run_ended_on_its_budget_while_parked_leaves_no_approval_pending(tmp_p
         m.settings.patch_admin({"sessions.max_run_seconds": 0.1}, m.settings.admin_view()["revision"])
         s = await wait_status(m, sid, "done", "failed", timeout=8)
         assert (s["status"], s["stop_reason"]) == ("done", "budget_time")
-        assert m.db.pending_approvals(sid) == []
+        assert m.db.sessions.pending_approvals(sid) == []
         assert unresolved_calls(s["context"]) == []
         await m.stop()
     asyncio.run(body())

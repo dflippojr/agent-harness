@@ -110,7 +110,7 @@ class Checkpointer:
         store.stage(sid, turn, sha, context)
         made["published"] = set()
         store.publish(sid, turn, sha, made["published"])
-        stale = [c["turn"] for c in self.db.checkpoints(sid, hidden=True)]   # rewound past: replaced now
+        stale = [c["turn"] for c in self.db.sessions.checkpoints(sid, hidden=True)]   # rewound past: replaced now
         capped = self.db.for_session(sid).write(self._record, sid, turn, sha, head, branch, stale, event_seq)
         self._tidy(s, store, sid, turn, [t for t in stale + capped if t != turn], only_if_changed)
         return {"turn": turn, "head": head[:12]}
@@ -154,19 +154,19 @@ class Checkpointer:
 
     def _last_tree(self, store: Store, sid: str) -> str:
         """The tree of the session's latest checkpoint; "" when there is none (or git cannot tell)."""
-        known = self.db.checkpoints(sid, hidden=None)
+        known = self.db.sessions.checkpoints(sid, hidden=None)
         return store.tree_of_commit(known[-1]["sha"]) if known else ""
 
     def _record(self, sid: str, turn: int, sha: str, head: str, branch: str, stale: list[int],
                 event_seq: int | None = None) -> list[int]:
         """One transaction (pass to `db.write`): the new checkpoint replaces the rewound-past ones and the oldest
         beyond the cap. Returns the capped turns; the caller deletes their refs once this has committed."""
-        self.db.delete_checkpoints(sid, stale)
-        self.db.add_checkpoint(sid, turn, sha, head, branch, event_seq)
+        self.db.sessions.delete_checkpoints(sid, stale)
+        self.db.sessions.add_checkpoint(sid, turn, sha, head, branch, event_seq)
         self.db.update_session(sid, turn_seq=turn)
-        visible = self.db.checkpoints(sid, hidden=False)
+        visible = self.db.sessions.checkpoints(sid, hidden=False)
         capped = [c["turn"] for c in visible[:max(0, len(visible) - CAP)]]
-        self.db.delete_checkpoints(sid, capped)
+        self.db.sessions.delete_checkpoints(sid, capped)
         return capped
 
     def _quota(self, s: dict) -> tuple[str, int] | None:
@@ -205,11 +205,11 @@ class Checkpointer:
             return True
         if used - dir_size(store.base) >= limit:    # even an empty store would not fit
             return False
-        for c in self.db.checkpoints(sid, hidden=None):
+        for c in self.db.sessions.checkpoints(sid, hidden=None):
             if c["turn"] == keep:
                 continue
             store.delete(sid, [c["turn"]])
-            self.db.delete_checkpoints(sid, [c["turn"]])
+            self.db.sessions.delete_checkpoints(sid, [c["turn"]])
             store.reclaim()
             if account_usage_bytes(self.cfg, uid) < limit:
                 return True
@@ -229,7 +229,7 @@ class Checkpointer:
             projects.require_host_git()
 
     def checkpoint(self, sid: str, turn: int) -> dict:
-        for c in self.db.checkpoints(sid, hidden=None):
+        for c in self.db.sessions.checkpoints(sid, hidden=None):
             if c["turn"] == turn:
                 return c
         raise GitError(f"session {sid} has no checkpoint {turn}", 404)
@@ -313,7 +313,7 @@ class Checkpointer:
         self.db.patch_run(sid, **carried)
         self.db.update_session(sid, context=context, inbox=[], turn_seq=turn, review="", review_detail="", answer="",
                                stop_reason="")
-        self.db.show_checkpoints_through(sid, turn)
+        self.db.sessions.show_checkpoints_through(sid, turn)
         self.bus.emit(sid, "rewound", {"turn": turn, "head": ckpt["head"][:12]})
 
     # fork -------------------------------------------------------------------------------------------------------
@@ -358,7 +358,7 @@ class Checkpointer:
         A skipped snapshot since means the files did change, so then it stops at the checkpoint."""
         ckpt = self.checkpoint(parent["id"], turn)
         events = self.db.events(parent["id"])
-        visible = self.db.checkpoints(parent["id"])
+        visible = self.db.sessions.checkpoints(parent["id"])
         later = [e for e in events if e["seq"] > ckpt["event_seq"]]
         to_end = bool(visible) and visible[-1]["turn"] == turn and not any(
             e["type"] == "checkpoint" and e["data"].get("status") == "skipped" for e in later)

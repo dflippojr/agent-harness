@@ -46,7 +46,7 @@ def test_first_page_holds_every_active_session_once(db):
     db.insert_session(_session("other", owner_id="u-ann", status="running", created_at=BASE - 5))
     db.insert_session(_session("chat1", kind="chat", status="running", created_at=BASE - 4))
     db.insert_session(_session("asks", status="done", created_at=BASE - 3))
-    db.insert_approval({"id": "ap1", "session_id": "asks", "tool_call_id": "c1", "tool": "write_file",
+    db.sessions.insert_approval({"id": "ap1", "session_id": "asks", "tool_call_id": "c1", "tool": "write_file",
                         "args": {"path": "x"}, "reason": "ask"})
 
     ids = [s["id"] for s in db.list_sessions(50, owner_id="owner", include_active=True)]

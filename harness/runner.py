@@ -638,7 +638,7 @@ class Runner(HostedRuns):
             public["smart"] = existing["smart"]
 
         def persist_ask() -> None:
-            self.db.insert_approval(existing)
+            self.db.sessions.insert_approval(existing)
             if record is not None:
                 persist_review(self.db, sid, existing["id"], record)
                 self.bus.emit(sid, "smart_review", record)
@@ -1032,7 +1032,7 @@ class Runner(HostedRuns):
                     self._stop_on_deadline(sid, run, "budget_time")
                     return
                 waits.append(left)
-            for approval in self.db.pending_approvals(sid):
+            for approval in self.db.sessions.pending_approvals(sid):
                 approval_left = self._approval_time_left(approval)
                 if approval_left is None or approval["id"] in self.approval_events:
                     continue
@@ -1103,8 +1103,8 @@ class Runner(HostedRuns):
                                              "Stopped: the task reached its time budget while this ran.")
             else:
                 await self._close_unresolved(sid, "Not run: nobody decided its approval in time.")
-            for approval in self.db.pending_approvals(sid):  # nothing is left to decide, as on a cancel
-                self.db.decide_approval(approval["id"], "cancelled")
+            for approval in self.db.sessions.pending_approvals(sid):  # nothing is left to decide, as on a cancel
+                self.db.sessions.decide_approval(approval["id"], "cancelled")
             await self.aset_status(sid, "done", stop_reason=reason)
         if sid in self._unended:
             await self._end_run(sid)
@@ -1144,8 +1144,8 @@ class Runner(HostedRuns):
         try:
             await self._close_unresolved(sid, "Not run: the run failed.",
                                          "Stopped: the run failed while this ran; its effects are unknown.")
-            for approval in self.db.pending_approvals(sid):
-                self.db.decide_approval(approval["id"], "cancelled")
+            for approval in self.db.sessions.pending_approvals(sid):
+                self.db.sessions.decide_approval(approval["id"], "cancelled")
         except Exception:  # noqa: BLE001 - whatever broke the run may break this too: it must still end failed
             log.exception("session %s: could not answer the failed run's open tool calls", sid)
         self._record_failure(sid, code, message, retryable, stop_reason)
@@ -1727,7 +1727,7 @@ class Runner(HostedRuns):
     async def _authorize(self, s: dict, call: dict, name: str, args: dict, ws: Workspace) -> str | None:
         """Apply the policy. Returns None to proceed, or the tool result to record instead of running it."""
         sid = s["id"]
-        existing = self.db.approval_for_call(sid, call["id"])
+        existing = self.db.sessions.approval_for_call(sid, call["id"])
         if existing is None:
             decision = self._decide(s, name, args)
             telemetry.annotate({"harness.policy_decision": decision.action})
@@ -1871,7 +1871,7 @@ class Runner(HostedRuns):
         event = self.approval_events.setdefault(aid, asyncio.Event())
         try:
             while True:
-                approval = self.db.get_approval(aid)
+                approval = self.db.sessions.get_approval(aid)
                 if approval["status"] != "pending":
                     return approval
                 left = self._approval_time_left(approval)
@@ -1903,7 +1903,7 @@ class Runner(HostedRuns):
         note = "Expired: nobody decided it in time."
 
         def expire() -> bool:
-            if not self.db.decide_approval(aid, "denied", note):
+            if not self.db.sessions.decide_approval(aid, "denied", note):
                 return False
             self.bus.emit(sid, "approval_decided", {"id": aid, "status": "denied", "note": note, "expired": True})
             return True
@@ -2159,7 +2159,7 @@ class Runner(HostedRuns):
         if (len(artifact_id) != 64 or any(c not in "0123456789abcdef" for c in artifact_id) or start < 0
                 or (end is not None and end < start)):
             raise ToolError("invalid artifact range or id")
-        recovered = self.db.read_artifact(sid, artifact_id, start, end)
+        recovered = self.db.sessions.read_artifact(sid, artifact_id, start, end)
         if recovered is None:
             raise ToolError("artifact not found")
         output, truncated = recovered
@@ -2207,7 +2207,7 @@ class Runner(HostedRuns):
             if artifact_content is not None:
                 artifact_id = hashlib.sha256(artifact_content.encode("utf-8")).hexdigest()
                 try:
-                    self.db.put_artifact(sid, artifact_id, artifact_content)
+                    self.db.sessions.put_artifact(sid, artifact_id, artifact_content)
                 except Exception:
                     output = _without_unstored_artifact(output, artifact_id)
                     context[-1]["content"] = banner + output
@@ -2416,7 +2416,7 @@ class Runner(HostedRuns):
 
         def mask_results() -> None:
             for digest, content in artifacts.items():
-                self.db.put_artifact(sid, digest, content)
+                self.db.sessions.put_artifact(sid, digest, content)
             self.db.update_session(sid, context=context)
             if masked_chars > 0:
                 self.bus.emit(sid, "compaction", {"tier": "mask", "tokens_saved": int(masked_chars / cpt),
@@ -2492,7 +2492,7 @@ class Runner(HostedRuns):
         for call_id, outcome in outcomes.items():
             artifact_id = outcome.get("artifact_id")
             if artifact_id and call_id not in masked:
-                recovered = self.db.full_artifact(sid, artifact_id)
+                recovered = self.db.sessions.full_artifact(sid, artifact_id)
                 if recovered is not None:
                     full_outputs[call_id] = recovered
         return compaction.mask_used_results(s["context"], outcomes, self.cfg.mask_min_chars, full_outputs)
@@ -2591,8 +2591,8 @@ class Runner(HostedRuns):
     async def _record_cancel(self, sid: str) -> None:
         await self._close_unresolved(sid, "Not run: the user cancelled the task.",
                                      "Cancelled by the user while running.")
-        for approval in self.db.pending_approvals(sid):
-            self.db.decide_approval(approval["id"], "cancelled")
+        for approval in self.db.sessions.pending_approvals(sid):
+            self.db.sessions.decide_approval(approval["id"], "cancelled")
         await self.aset_status(sid, "cancelled", stop_reason="cancelled")
 
     async def _end_run(self, sid: str) -> None:

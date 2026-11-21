@@ -311,7 +311,7 @@ def test_scripted_session_produces_one_covering_trace(tmp_path, work_clock):
         m.scheduler.release("blocker")
         s = await wait_status(m, s["id"], "waiting_approval")
         work_clock.advance()  # time parked on the approval
-        approval = m.db.pending_approvals(s["id"])[0]
+        approval = m.db.sessions.pending_approvals(s["id"])[0]
         m.decide(s["id"], approval["id"], True)
         await wait_status(m, s["id"], "done")
         work_clock.advance()  # idle between runs

@@ -41,8 +41,8 @@ def _seed(path: Path) -> None:
         _fill(db, sid, word)
     db.insert_session(_session("app1", "k-aaaa"))
     _fill(db, "app1", "pelican")
-    db.add_checkpoint("own1", 1, "abc123", "abc123", "main")
-    db.add_review_comment("own1", {"repo": "", "path": "x", "side": "new", "start_line": 1, "end_line": 1,
+    db.sessions.add_checkpoint("own1", 1, "abc123", "abc123", "main")
+    db.sessions.add_review_comment("own1", {"repo": "", "path": "x", "side": "new", "start_line": 1, "end_line": 1,
                                    "quoted": [], "comment": "c", "base": "", "head": ""})
     db.usage.record_usage("fake", "own1", "", 10, 5, 0.0, "subscription")
     db.set_meta("profile_emoji", "🦉")
@@ -110,9 +110,9 @@ def test_the_migration_moves_every_owner_and_member_session_with_a_backup_once(t
     # Reads route there: the routing wrapper finds each session, its events, approvals and artifacts.
     assert stores.get_session("own1")["owner_id"] == "owner"
     assert [e["data"]["content"] for e in stores.events("mem2")] == ["find the merlin"]
-    assert stores.get_approval("ap-own2")["session_id"] == "own2"
-    assert stores.full_artifact("own3", "h1") == "artifact body"
-    assert stores.checkpoints("own1")
+    assert stores.sessions.get_approval("ap-own2")["session_id"] == "own2"
+    assert stores.sessions.full_artifact("own3", "h1") == "artifact body"
+    assert stores.sessions.checkpoints("own1")
     stores.close()
 
     # A restart finds nothing to move: no new backup, no store changes.
@@ -197,7 +197,7 @@ def test_owner_surfaces_read_webs_store(tmp_path):
         from harness.metrics import render
         assert 'harness_sessions{status="done"} 5' in render(m)
         assert m.db.count_sessions("owner", "done") == 3 + 1        # the App's counted by owner id, as before
-        assert m.db.smart_review_stats() is not None
+        assert m.db.sessions.smart_review_stats() is not None
         # Web's store can't be revoked, erased or given a retention through the App paths.
         assert client.delete(f"/keys/{WEB_APP_ID}").status_code == 404
         with pytest.raises(ValueError):

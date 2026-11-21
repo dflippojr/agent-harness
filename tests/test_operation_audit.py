@@ -48,7 +48,7 @@ def pair(m, action, context=CTX):
 
 
 def approval(m, aid="a-test", sid="session1"):
-    m.db.insert_approval({"id": aid, "session_id": sid, "tool_call_id": "call1", "tool": "shell",
+    m.db.sessions.insert_approval({"id": aid, "session_id": sid, "tool_call_id": "call1", "tool": "shell",
                           "args": {"command": SENTINEL}, "reason": SENTINEL, "detail": SENTINEL,
                           "status": "pending"})
 
@@ -81,7 +81,7 @@ def test_approval_aliases(manager, path, source, approve):
 
 def test_notification_identity_and_idempotency(manager):
     approval(manager)
-    token = manager.db.get_approval("a-test")["token"]
+    token = manager.db.sessions.get_approval("a-test")["token"]
     manager.decide_by_token(token, True)
     manager.decide_by_token(token, False)
     ctx = audit_context.AuditContext("owner", "owner", "", "notification_link")
@@ -125,7 +125,7 @@ def test_rejected_approval_audit_failure_preserves_conflict(manager, monkeypatch
         response = client.post(path + "/sessions/session1/approvals/a-test", json={"decision": "deny"},
                                headers={"Authorization": "Bearer " + secret})
         assert response.status_code == 409, response.text
-    assert manager.db.get_approval("a-test")["status"] == "approved"
+    assert manager.db.sessions.get_approval("a-test")["status"] == "approved"
     pair(manager, "approval.decide")
     assert "audit record unavailable for an already-decided approval" in caplog.text
     assert SENTINEL not in caplog.text
@@ -184,7 +184,7 @@ def test_approval_terminal_failure_wakes_agent(manager, monkeypatch):
     with pytest.raises(HarnessError, match="may have completed"):
         manager.decide("session1", "a-test", True, context=CTX)
     assert event.is_set()
-    assert manager.db.get_approval("a-test")["status"] == "approved"
+    assert manager.db.sessions.get_approval("a-test")["status"] == "approved"
 
 
 def test_cancel_and_reopen_leave_unresolved_start(tmp_path):

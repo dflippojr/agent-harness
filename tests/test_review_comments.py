@@ -100,7 +100,7 @@ def test_draft_survives_restart_and_sends_one_followup(tmp_path):
 
         from harness.app_stores import APP_STORE_FILE, WEB_APP_ID
         from harness.db import Database
-        assert Database(Path(m.cfg.data_dir) / "apps" / WEB_APP_ID / APP_STORE_FILE).list_review_comments(s["id"])
+        assert Database(Path(m.cfg.data_dir) / "apps" / WEB_APP_ID / APP_STORE_FILE).sessions.list_review_comments(s["id"])
         sent = client.post(url + "/send")
         assert sent.status_code == 200
         wait_for(lambda: m.db.get_session(s["id"])["status"] == "done")

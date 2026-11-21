@@ -1042,7 +1042,7 @@ class Manager:
     def checkpoints(self, ref: str) -> dict:
         s = self.get(ref)
         items = [{"turn": c["turn"], "head": c["head"][:12], "created_at": c["created_at"]}
-                 for c in self.db.checkpoints(s["id"], hidden=False)]
+                 for c in self.db.sessions.checkpoints(s["id"], hidden=False)]
         hosted = s.get("backend", "local") != "local"
         # Mac Runner sessions are out of scope (the runner protocol has no snapshot ops), so they have none.
         supported = s["target"] == "tower" and s.get("kind", "agent") == "agent" and not s["workspace_removed"]
@@ -1279,7 +1279,7 @@ class Manager:
         def insert_fork() -> None:     # one transaction on the writer thread (#294): the row, its checkpoint, events
             self._insert_created(session, None, [], "", prompt)
             ckpt = cp.checkpoint(sid, int(turn))
-            self.db.add_checkpoint(new_sid, int(turn), ckpt["sha"], ckpt["head"], session["branch"])
+            self.db.sessions.add_checkpoint(new_sid, int(turn), ckpt["sha"], ckpt["head"], session["branch"])
             self.bus.emit(new_sid, "forked", forked)
         try:
             await asyncio.to_thread(cp.store(session).save_context, int(turn), base_context, carried)
@@ -1439,7 +1439,7 @@ class Manager:
 
     def _public_scan(self, sid: str, result: dict) -> dict:
         """A scan result for the API: no diff positions, each finding marked dismissed or not."""
-        dismissed = self.db.secret_dismissals(sid)
+        dismissed = self.db.sessions.secret_dismissals(sid)
         out = secret_scan.public(result)
         for f in out["findings"]:
             d = dismissed.get(f["fingerprint"])
@@ -1493,7 +1493,7 @@ class Manager:
         scan = data.get("secret_scan")
         if not scan or scan["status"] != "ok":
             raise HarnessError(409, "there is no secret scan result for this session")
-        drafts = self.db.list_review_comments(sid)
+        drafts = self.db.sessions.list_review_comments(sid)
         made, rewrite, pushed, already = [], [], [], 0
         for f in scan["findings"]:
             if f["dismissed"]:
@@ -1531,7 +1531,7 @@ class Manager:
         finding = next((f for f in (scan or {}).get("findings", []) if f["fingerprint"] == fingerprint), None)
         if finding is None:
             raise HarnessError(404, "no current secret-scan finding has that fingerprint")
-        self.db.add_secret_dismissal(sid, {
+        self.db.sessions.add_secret_dismissal(sid, {
             "fingerprint": fingerprint, "rule": finding["rule"], "repo": finding["repo"], "path": finding["file"],
             "line": finding["line"], "reason": reason, "actor_id": actor_id})
         self.db.accounts.insert_audit(actor_id, sid, "secret_finding_dismiss", "ok", json.dumps(
@@ -1714,7 +1714,7 @@ class Manager:
 
     # draft line comments on the Changes diff
     def review_comments(self, ref: str) -> list[dict]:
-        return self.db.list_review_comments(self.resolve_id(ref))
+        return self.db.sessions.list_review_comments(self.resolve_id(ref))
 
     def add_review_comment(self, ref: str, body: dict) -> dict:
         sid = self.resolve_id(ref)
@@ -1722,23 +1722,23 @@ class Manager:
             comment = review_comments.validate(body)
         except ValueError as e:
             raise HarnessError(400, str(e)) from None
-        return self.db.add_review_comment(sid, comment)
+        return self.db.sessions.add_review_comment(sid, comment)
 
     def delete_review_comment(self, ref: str, comment_id: str) -> None:
         sid = self.resolve_id(ref)
-        if not self.db.delete_review_comments(sid, [comment_id]):
+        if not self.db.sessions.delete_review_comments(sid, [comment_id]):
             raise HarnessError(404, "no draft comment matches that id")
 
     async def send_review_comments(self, ref: str) -> dict:
         """Turn the draft into one follow-up on the same session through the ordinary send path."""
         sid = self.resolve_id(ref)
-        drafts = self.db.list_review_comments(sid)
+        drafts = self.db.sessions.list_review_comments(sid)
         if not drafts:
             raise HarnessError(400, "no draft comments to send")
         data = await self.changes(sid)
         content = review_comments.format_message(drafts, data.get("repos", []))
         result = await self.send(sid, content)
-        self.db.delete_review_comments(sid, [d["id"] for d in drafts])
+        self.db.sessions.delete_review_comments(sid, [d["id"] for d in drafts])
         return result
 
     # review of a git project's session branch
@@ -1861,7 +1861,7 @@ class Manager:
         return self.db.get_session(sid)
 
     def decide_by_token(self, token: str, approve: bool) -> dict:
-        approval = self.db.approval_by_token(token)
+        approval = self.db.sessions.approval_by_token(token)
         session = self.db.get_session(approval["session_id"]) if approval else None
         if approval is None or (session and session.get("app_id")):
             # The link is the owner's credential from an owner notification; an App decides its own approvals (#330).
@@ -1874,13 +1874,13 @@ class Manager:
     @namespace_audit.failures("approval.decide")
     def decide(self, ref: str, approval_id: str | None, approve: bool, note: str = "", *, context=None) -> dict:
         sid = self.resolve_id(ref)
-        pending = self.db.pending_approvals(sid)
+        pending = self.db.sessions.pending_approvals(sid)
         if approval_id is None:
             if len(pending) != 1:
                 raise HarnessError(400 if pending else 404,
                                    f"{len(pending)} pending approvals; pass an approval id")
-            approval_id = pending[0]["id"]
-        approval = self.db.get_approval(approval_id)
+            approval_id = str(pending[0]["id"])
+        approval = self.db.sessions.get_approval(approval_id)
         if approval is None or approval["session_id"] != sid:
             raise HarnessError(404, f"no approval {approval_id} in session {sid}")
         if approval["status"] != "pending":
@@ -1895,8 +1895,8 @@ class Manager:
         status = "approved" if approve else "denied"
 
         def decide() -> None:
-            if not self.db.decide_approval(approval_id, status, note):
-                raise HarnessError(409, f"approval is already {self.db.get_approval(approval_id)['status']}")
+            if not self.db.sessions.decide_approval(approval_id, status, note):
+                raise HarnessError(409, f"approval is already {self.db.sessions.get_approval(approval_id)['status']}")
             self.bus.emit(sid, "approval_decided", {"id": approval_id, "status": status, "note": note})
             namespace_audit.record(self.db, self.db.get_session(sid), context, "approval.decide",
                                    target=approval_id, kind="approval", metadata={"decision": status})
@@ -1907,7 +1907,7 @@ class Manager:
             event = self.runner.approval_events.get(approval_id)
             if event:
                 event.set()
-        return public_approval(self.db.get_approval(approval_id))
+        return public_approval(self.db.sessions.get_approval(approval_id))
 
     def clear_taint(self, ref: str, *, context=None) -> dict:
         """Owner action: forget the untrusted sources this session has read, and record that it happened."""
@@ -2162,7 +2162,7 @@ class Manager:
         if s["target"] != "tower":
             out["target_online"] = self.hub.online(s["target"])
         if s["status"] == "waiting_approval":
-            out["pending_approvals"] = [public_approval(a) for a in self.db.pending_approvals(s["id"])]
+            out["pending_approvals"] = [public_approval(a) for a in self.db.sessions.pending_approvals(s["id"])]
         return out
 
     @staticmethod
@@ -2223,7 +2223,7 @@ class Manager:
     def smart_approvals_status(self) -> dict:
         from .smart_approvals import public_status
         view = public_status(self)
-        view["recent"] = self.db.smart_reviews(20)
+        view["recent"] = self.db.sessions.smart_reviews(20)
         return view
 
     def set_smart_approvals_mode(self, mode: str) -> dict:

@@ -227,7 +227,7 @@ def test_memory_edit_needs_approval_then_commits_and_pushes(tmp_path):
         s = m.create("remember that I started Sunday league play")
         assert "memory_edit" in m.db.get_session(s["id"])["context"][0]["content"]
         await wait_status(m, s["id"], "waiting_approval")
-        approval = m.db.pending_approvals(s["id"])[0]
+        approval = m.db.sessions.pending_approvals(s["id"])[0]
         assert approval["reason"] == "changes your memory library"
         assert approval["detail"].startswith("Note Sunday league play\n\n")
         assert "+- Started league play" in approval["detail"]
@@ -242,7 +242,7 @@ def test_memory_edit_needs_approval_then_commits_and_pushes(tmp_path):
         assert "categories/health/memory.md isn't a" in results[1]["output"]
         assert not results[2]["ok"]
         assert "limit is 300" in results[2]["output"]
-        assert len(m.db.approvals(s["id"])) == 1
+        assert len(m.db.sessions.approvals(s["id"])) == 1
         text, message = remote_file(tmp_path, bare, "categories/sport/memory.md")
         assert "Started league play on Sundays." in text
         assert message.startswith("Note Sunday league play")
@@ -258,6 +258,7 @@ def test_memory_write_denied_or_stale_is_not_saved(tmp_path):
     class Approvals:
         def __init__(self):
             self.rows = {}
+            self.sessions = self  # the store's `sessions`, where approvals are read
 
         def approval_for_call(self, sid, call_id):
             return self.rows.get(call_id)

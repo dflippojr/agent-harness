@@ -74,7 +74,7 @@ def test_masking_and_recovery_through_a_scripted_session(tmp_path):
         sid = m.create("read the big file")["id"]
         live.update(m=m, sid=sid)
         await wait_status(m, sid, "done")
-        full = m.db.full_artifact(sid, digest())
+        full = m.db.sessions.full_artifact(sid, digest())
         assert full and len(full) > 20000  # over the 20,000-character read_artifact cap
 
         big, small = _ctx_text(m, sid, "c2-read_file"), _ctx_text(m, sid, "c3-read_file")
@@ -116,8 +116,8 @@ def test_read_artifact_tool_ranges_missing_and_other_session(tmp_path):
         other = m.create("other")["id"]
         await wait_status(m, other, "done")
         digest = _digest(BIG)
-        m.db.put_artifact(sid, digest, BIG)
-        m.db.put_artifact(other, _digest("secret"), "secret")
+        m.db.sessions.put_artifact(sid, digest, BIG)
+        m.db.sessions.put_artifact(other, _digest("secret"), "secret")
 
         out, ok = await read(m, sid, 1, artifact_id=digest)  # no range: capped, flagged as truncated
         assert ok and out.startswith(BIG[:20000]) and "[truncated; request a smaller range" in out
@@ -161,7 +161,7 @@ def test_parallel_read_artifact_calls_share_the_turn_budget(tmp_path):
         s = await _session(m)
         sid = s["id"]
         digest = _digest(BIG)
-        m.db.put_artifact(sid, digest, BIG)
+        m.db.sessions.put_artifact(sid, digest, BIG)
         calls = [call("read_artifact", i, artifact_id=digest) for i in range(1, 4)]
         assert await m.runner._resolve_calls(s, calls) is False
         first, second, third = (_ctx_text(m, sid, c["id"]) for c in calls)
@@ -183,7 +183,7 @@ def test_read_artifact_goes_through_policy_and_emits_tool_call(tmp_path):
         s = await _session(m)
         sid = s["id"]
         digest = _digest(BIG)
-        m.db.put_artifact(sid, digest, BIG)
+        m.db.sessions.put_artifact(sid, digest, BIG)
         allowed = call("read_artifact", 1, artifact_id=digest, start=0, end=5)
         await m.runner._resolve_calls(s, [allowed])
         decision = next(e["data"] for e in m.db.events(sid) if e["type"] == "tool_call" and e["data"]["id"] == allowed["id"])
@@ -223,7 +223,7 @@ def test_read_artifact_is_only_available_where_it_is_offered(tmp_path):
         s = await _session(m)
         sid = s["id"]
         digest = _digest("abc")
-        m.db.put_artifact(sid, digest, "abc")
+        m.db.sessions.put_artifact(sid, digest, "abc")
         m.db.update_session(sid, kind="chat")  # chat sessions are not offered the tool, so they cannot call it
         c = call("read_artifact", 1, artifact_id=digest)
         await m.runner._resolve_calls(m.db.get_session(sid), [c])
@@ -255,7 +255,7 @@ def _assert_nothing_masked(m: Manager, sid: str, call_id: str) -> None:
     assert _ctx_text(m, sid, call_id) == PAGE
     assert _result_event(m, sid, call_id)["artifact_id"] is None
     assert not [e for e in events(m, sid, "compaction") if e["tier"] == "mask"]
-    assert m.db.full_artifact(sid, _digest(PAGE)) is None
+    assert m.db.sessions.full_artifact(sid, _digest(PAGE)) is None
 
 
 def test_chat_session_fetching_a_long_page_is_never_masked(tmp_path):
@@ -301,7 +301,7 @@ def test_denied_by_project_policy_removes_the_tool_and_disables_masking(tmp_path
         assert not m.runner.artifact_tool_available(s)
         assert "read_artifact" not in {t["function"]["name"] for t in m.runner.tool_schemas(s, m.runner.workspace(s))}
         # A stale call (e.g. a model that remembers the tool) can neither run nor read stored artifacts.
-        m.db.put_artifact(sid, _digest(PAGE), PAGE)
+        m.db.sessions.put_artifact(sid, _digest(PAGE), PAGE)
         stale = call("read_artifact", 9, artifact_id=_digest(PAGE))
         await m.runner._resolve_calls(s, [stale])
         assert "unknown tool 'read_artifact'" in _ctx_text(m, sid, stale["id"])

@@ -129,7 +129,7 @@ def test_tainted_session_is_never_smart_approved_and_cli_web_taints(tmp_path):
         cli = Cli()
         req = {"tool_name": "WebFetch", "input": {"url": "https://other.example/x"}, "tool_use_id": "c1"}
         task = asyncio.create_task(m.runner._authorize_cli(s2["id"], cli, "r1", req))
-        while not task.done() and not m.db.pending_approvals(s2["id"]):
+        while not task.done() and not m.db.sessions.pending_approvals(s2["id"]):
             await asyncio.sleep(0.01)
         if not task.done():
             m.decide(s2["id"], None, approve=True)
@@ -561,7 +561,7 @@ def test_a_read_artifact_range_of_a_tainted_session_search_opens_with_the_banner
         state["seen"].append(tools[-1])  # each result as the model first got it, before masking
         if len(tools) == 1:
             digest = re.search(r"read_artifact\(artifact_id=([0-9a-f]{64})", tools[0]).group(1)
-            full, _ = state["m"].db.read_artifact(state["sid"], digest, 0, None)
+            full, _ = state["m"].db.sessions.read_artifact(state["sid"], digest, 0, None)
             start = full.index(f"{second} · ") + 15  # inside the second hit, past any banner opening it
             return Completion(tool_calls=[call("read_artifact", 1, artifact_id=digest, start=start)])
         return Completion(content="noted")

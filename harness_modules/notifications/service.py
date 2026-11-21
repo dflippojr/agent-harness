@@ -172,7 +172,7 @@ class Notifier:
         return handler(self, sid, title, d, base, session) if handler else None
 
     def _approval_requested(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
-        approval = self.db.get_approval(d["id"])
+        approval = self.db.sessions.get_approval(d["id"])
         if approval is None or approval["status"] != "pending":
             return None
         payload = {
@@ -241,7 +241,7 @@ class Notifier:
                 "message": f"Memory recovered after {waited}; the task continues."}
 
     def _approval_decided(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
-        approval = self.db.get_approval(d["id"])
+        approval = self.db.sessions.get_approval(d["id"])
         if approval is None:
             return None
         mark = "✅ Approved" if d["status"] == "approved" else "🚫 Denied"

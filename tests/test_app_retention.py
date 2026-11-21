@@ -148,8 +148,8 @@ def test_an_app_deletes_its_session_and_everything_tied_to_it(tmp_path):
         wait_for(answer, timeout=60)
         wait_for(lambda: _done(client, kept, a))
         wait_for(lambda: client.get(f"/api/v1/sessions/{running}/tool_calls", headers=a).json())
-        m.db.put_artifact(sid, "h1", "artifact body")
-        m.db.insert_approval({"id": f"ap-{sid}", "session_id": sid, "tool_call_id": "c9", "tool": "write_file",
+        m.db.sessions.put_artifact(sid, "h1", "artifact body")
+        m.db.sessions.insert_approval({"id": f"ap-{sid}", "session_id": sid, "tool_call_id": "c9", "tool": "write_file",
                               "args": {"path": "x"}, "reason": "ask"})
         s = m.db.get_session(sid)
         transcript = storage.session_dirs(cfg, s)["transcripts"] / f"{sid}.md"
@@ -158,7 +158,7 @@ def test_an_app_deletes_its_session_and_everything_tied_to_it(tmp_path):
         held = rows_of(store, {sid})
         assert held["events"] and held["app_tool_calls"] and held["search_index"] and held["artifacts"]
         assert Path(s["workspace"]).is_dir()
-        token = m.db.get_approval(f"ap-{sid}")["token"]
+        token = m.db.sessions.get_approval(f"ap-{sid}")["token"]
 
         # Another App (sessions:all too), the owner (token or Web) and the owner's admin route get a 404.
         assert client.delete(f"/api/v1/sessions/{sid}", headers=b).status_code == 404
@@ -171,7 +171,7 @@ def test_an_app_deletes_its_session_and_everything_tied_to_it(tmp_path):
         assert client.get(f"/api/v1/sessions/{sid}", headers=a).status_code == 404
         assert not any(rows_of(store, {sid}).values())
         assert not any(p.exists() for p in _files(cfg, s))
-        assert m.db.get_approval(f"ap-{sid}") is None and m.db.approval_by_token(token) is None
+        assert m.db.sessions.get_approval(f"ap-{sid}") is None and m.db.sessions.approval_by_token(token) is None
         assert m.db.app_of(sid) == ""
         found = client.get("/api/v1/search?q=pelican", headers=a).json()["results"]
         assert [r["id"] for r in found] == [kept]
@@ -314,9 +314,9 @@ def test_nothing_about_an_erased_app_session_is_written_to_the_owners_files_or_s
         client.portal.call(m.runner._end_run, sid)
         client.portal.call(m.runner.save_branch, sid)
         for write in (lambda: m.db.insert_event(sid, "error", {"message": "pelican"}),
-                      lambda: m.db.put_artifact(sid, "h1", "pelican"),
+                      lambda: m.db.sessions.put_artifact(sid, "h1", "pelican"),
                       lambda: m.db.update_session(sid, title="pelican"),
-                      lambda: m.db.insert_approval({"id": "ap-x", "session_id": sid, "tool_call_id": "c1",
+                      lambda: m.db.sessions.insert_approval({"id": "ap-x", "session_id": sid, "tool_call_id": "c1",
                                                     "tool": "write_file", "args": {}, "reason": "ask"})):
             with pytest.raises(sqlite3.ProgrammingError, match="was erased"):
                 write()

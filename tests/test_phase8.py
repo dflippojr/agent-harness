@@ -519,7 +519,7 @@ def _seed_unresolved_cancel_work(manager, sid):
     manager.db.update_session(sid, context=session["context"] + [
         {"role": "assistant", "content": "", "tool_calls": [running, queued]},
     ], run={**session["run"], "executing": {"id": "tool-running", "name": "Bash"}})
-    manager.db.insert_approval({"id": f"a-pending-{sid[:8]}", "session_id": sid,
+    manager.db.sessions.insert_approval({"id": f"a-pending-{sid[:8]}", "session_id": sid,
                                 "tool_call_id": "tool-queued", "tool": "Read",
                                 "args": {"file_path": "/workspace/a.txt"}, "reason": "ask"})
 
@@ -639,7 +639,7 @@ def test_claude_cli_ask_and_deny(tmp_path):
         await m.start()
         sid = m.create("run it", backend="claude")["id"]
         await wait_status(m, sid, "waiting_approval")
-        pending = m.db.pending_approvals(sid)
+        pending = m.db.sessions.pending_approvals(sid)
         assert len(pending) == 1
         assert pending[0]["tool"] == "Bash"
         m.decide(sid, pending[0]["id"], approve=False, note="not today")
@@ -730,8 +730,8 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         results = {msg["tool_call_id"]: msg["content"] for msg in s["context"] if msg.get("role") == "tool"}
         assert results["tool-running"] == "Cancelled by the user while running."
         assert results["tool-queued"] == "Not run: the user cancelled the task."
-        assert m.db.pending_approvals(sid) == []
-        assert m.db.approvals(sid)[0]["status"] == "cancelled"
+        assert m.db.sessions.pending_approvals(sid) == []
+        assert m.db.sessions.approvals(sid)[0]["status"] == "cancelled"
         await m.stop()
 
     async def no_cancel_pending_leaves_failed():
@@ -760,8 +760,8 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         results = {msg["tool_call_id"]: msg["content"] for msg in s["context"] if msg.get("role") == "tool"}
         assert results == {"tool-running": "Stopped: the run failed while this ran; its effects are unknown.",
                            "tool-queued": "Not run: the run failed."}
-        assert m.db.pending_approvals(sid) == []
-        assert m.db.approvals(sid)[0]["status"] == "cancelled"
+        assert m.db.sessions.pending_approvals(sid) == []
+        assert m.db.sessions.approvals(sid)[0]["status"] == "cancelled"
         await m.stop()
 
     async def already_cancelled_does_not_record_again():
@@ -894,7 +894,7 @@ def test_claude_cli_restart_resumes_and_keeps_pending_approval(tmp_path):
         await m1.start()
         sid = m1.create("run it", backend="claude")["id"]
         await wait_status(m1, sid, "waiting_approval")
-        aid = m1.db.pending_approvals(sid)[0]["id"]
+        aid = m1.db.sessions.pending_approvals(sid)[0]["id"]
         await m1.stop()
         m1.db.close()
 
@@ -906,12 +906,12 @@ def test_claude_cli_restart_resumes_and_keeps_pending_approval(tmp_path):
             await asyncio.sleep(0.02)
         assert made
         await wait_status(m2, sid, "waiting_approval")
-        assert m2.db.pending_approvals(sid)[0]["id"] == aid
+        assert m2.db.sessions.pending_approvals(sid)[0]["id"] == aid
         assert made[0]["backend_session_id"] == "claude-session-1"
         m2.decide(sid, aid, approve=True)
         s = await wait_status(m2, sid, "done")
         assert s["answer"] == "allow"
-        approvals = m2.db.approvals(sid)
+        approvals = m2.db.sessions.approvals(sid)
         assert len(approvals) == 1
         assert approvals[0]["tool_call_id"] == "tool-1"
         sent = state.read_text(encoding="utf-8")
@@ -927,8 +927,8 @@ def test_claude_restart_binds_to_pending_approval_despite_decided_twin(tmp_path)
         await m1.start()
         sid = m1.create("run it", backend="claude")["id"]
         await wait_status(m1, sid, "waiting_approval")
-        aid = m1.db.pending_approvals(sid)[0]["id"]
-        m1.db.insert_approval({"id": "a-earlier1", "session_id": sid, "tool_call_id": "tool-0", "tool": "Bash",
+        aid = m1.db.sessions.pending_approvals(sid)[0]["id"]
+        m1.db.sessions.insert_approval({"id": "a-earlier1", "session_id": sid, "tool_call_id": "tool-0", "tool": "Bash",
                                "args": {"command": "python build.py"}, "reason": "runs a Claude Code shell command",
                                "status": "denied"})
         await m1.stop()
@@ -947,12 +947,12 @@ def test_claude_restart_binds_to_pending_approval_despite_decided_twin(tmp_path)
                 break
             await asyncio.sleep(0.02)
         assert m2.runner.approval_events
-        pending = [a["id"] for a in m2.db.pending_approvals(sid)]
+        pending = [a["id"] for a in m2.db.sessions.pending_approvals(sid)]
         assert pending == [aid], f"pending approvals after the restart: {pending} (expected only {aid})"
         m2.decide(sid, aid, approve=True)
         s = await wait_status(m2, sid, "done")
         assert s["answer"] == "allow"
-        assert [a["id"] for a in m2.db.approvals(sid) if a["status"] == "pending"] == []
+        assert [a["id"] for a in m2.db.sessions.approvals(sid) if a["status"] == "pending"] == []
         await m2.stop()
     asyncio.run(body())
 
@@ -1283,7 +1283,7 @@ def test_codex_command_approval_and_restart_recovery(tmp_path):
         await m1.start()
         sid = m1.create("test it", backend="codex")["id"]
         await wait_status(m1, sid, "waiting_approval")
-        pending = m1.db.pending_approvals(sid)
+        pending = m1.db.sessions.pending_approvals(sid)
         assert len(pending) == 1
         assert pending[0]["tool"] == "exec_command"
         aid = pending[0]["id"]
@@ -1299,11 +1299,11 @@ def test_codex_command_approval_and_restart_recovery(tmp_path):
         assert made
         await wait_status(m2, sid, "waiting_approval")
         assert made[0]["backend_session_id"] == "codex-thread-1"
-        assert m2.db.pending_approvals(sid)[0]["id"] == aid
+        assert m2.db.sessions.pending_approvals(sid)[0]["id"] == aid
         m2.decide(sid, aid, approve=True)
         s = await wait_status(m2, sid, "done")
         assert s["answer"] == "accept"
-        assert len(m2.db.approvals(sid)) == 1
+        assert len(m2.db.sessions.approvals(sid)) == 1
         sent = state.read_text(encoding="utf-8")
         assert '"method": "thread/resume"' in sent
         assert "The harness restarted; continue the task." in sent
@@ -1317,12 +1317,12 @@ def test_codex_command_denial_reaches_app_server(tmp_path):
         await m.start()
         sid = m.create("test it", backend="codex")["id"]
         await wait_status(m, sid, "waiting_approval")
-        approval = m.db.pending_approvals(sid)[0]
+        approval = m.db.sessions.pending_approvals(sid)[0]
         m.decide(sid, approval["id"], approve=False, note="skip tests")
         s = await wait_status(m, sid, "done")
         assert s["answer"] == "decline"
         assert '"decision": "decline"' in state.read_text(encoding="utf-8")
-        assert m.db.approvals(sid)[0]["note"] == "skip tests"
+        assert m.db.sessions.approvals(sid)[0]["note"] == "skip tests"
         await m.stop()
     asyncio.run(body())
 
@@ -1472,7 +1472,7 @@ def test_cursor_maps_stream_events_and_usage(tmp_path):
         assert "demo" in tool["output"]
         assert "User task:\\ninspect it" in state.read_text(encoding="utf-8")
         assert made[0]["model"] == "cursor-grok-4.6-high"
-        assert m.db.approvals(s["id"]) == []
+        assert m.db.sessions.approvals(s["id"]) == []
         await m.stop()
     asyncio.run(body())
 

@@ -1268,7 +1268,7 @@ async def approvals(ref: str, request: Request):
     """Approvals in this session that still await a decision."""
     m = mgr(request)
     s = visible_session(request, auth(request, "sessions"), ref)
-    return [public_approval(a) for a in m.db.pending_approvals(s["id"])]
+    return [public_approval(a) for a in m.db.sessions.pending_approvals(s["id"])]
 
 
 @route_table.post("/api/v1/sessions/{ref}/approvals/{approval_id}", response_model=ApprovalResponse)
