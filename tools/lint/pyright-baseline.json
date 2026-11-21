@@ -333,7 +333,7 @@
     "file": "harness/db.py",
     "rule": "reportReturnType",
     "message": "Type \"list[dict[Unknown, Unknown] | None]\" is not assignable to return type \"list[dict[Unknown, Unknown]]\"",
-    "count": 10
+    "count": 9
   },
   {
     "file": "harness/disk_watch.py",

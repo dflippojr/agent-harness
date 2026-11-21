@@ -292,7 +292,7 @@ def test_hosted_claude_reaches_only_app_tools_and_builtins_are_denied(tmp_path):
         sid = m.create("savings?", backend="claude", app=app, app_tools=[AppTool(**BALANCE)], kind=TOOLS_ONLY)["id"]
         pending = []
         for _ in range(600):
-            pending = m.db.app_tool_calls(sid, "pending")
+            pending = m.db.sessions.app_tool_calls(sid, "pending")
             if pending:
                 break
             await asyncio.sleep(0.05)
@@ -362,7 +362,7 @@ def _tools_only_codex(tmp_path, plan):
         if any(step.get("tool") == "get_balance" for step in plan):
             pending = []
             for _ in range(600):
-                pending = m.db.app_tool_calls(sid, "pending")
+                pending = m.db.sessions.app_tool_calls(sid, "pending")
                 if pending:
                     break
                 await asyncio.sleep(0.05)

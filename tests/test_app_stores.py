@@ -137,7 +137,7 @@ def _fill(db: Database, sid: str, word: str) -> None:
     db.insert_event(sid, "user_message", {"content": f"find the {word}"})
     db.insert_approval({"id": f"ap-{sid}", "session_id": sid, "tool_call_id": "c1", "tool": "write_file",
                         "args": {"path": "x"}, "reason": "ask"})
-    db.insert_app_tool_call(sid, "c2", "get_balance", {"account": "checking"})
+    db.sessions.insert_app_tool_call(sid, "c2", "get_balance", {"account": "checking"})
     db.put_artifact(sid, "h1", "artifact body")
 
 
@@ -161,7 +161,7 @@ def test_startup_migration_moves_app_sessions_with_a_backup_once(tmp_path):
     assert [e["data"]["content"] for e in stores.events("b1")] == ["find the walrus"]
     assert stores.get_approval("ap-a2")["session_id"] == "a2"
     assert stores.full_artifact("a1", "h1") == "artifact body"
-    assert stores.get_app_tool_call("b1", "c2")["name"] == "get_balance"
+    assert stores.sessions.get_app_tool_call("b1", "c2")["name"] == "get_balance"
     found = stores.search_events("osprey", app_id="k-aaaa")
     assert [r["session_id"] for r in found] == ["a2"]
     stores.close()

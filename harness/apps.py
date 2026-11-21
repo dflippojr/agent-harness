@@ -333,12 +333,12 @@ class AppToolBroker:
     async def call(self, s: dict, call_id: str, name: str, args: dict, on_wait=None, on_resume=None) -> str:
         sid = s["id"]
         tool = next(t for t in s["app_tools"] if t["name"] == name)
-        row = self.db.get_app_tool_call(sid, call_id)
+        row = self.db.sessions.get_app_tool_call(sid, call_id)
         if row is None:
-            self.db.insert_app_tool_call(sid, call_id, name, args)
+            self.db.sessions.insert_app_tool_call(sid, call_id, name, args)
             self.bus.emit(sid, "app_tool_call", {"call_id": call_id, "name": name, "args": args,
                                                  "timeout_seconds": tool["timeout_seconds"]})
-            row = self.db.get_app_tool_call(sid, call_id)
+            row = self.db.sessions.get_app_tool_call(sid, call_id)
         key = f"{sid}:{call_id}"
         event = self._events.setdefault(key, asyncio.Event())
         deadline = row["created_at"] + tool["timeout_seconds"]
@@ -348,7 +348,7 @@ class AppToolBroker:
             while row["status"] == "pending":
                 remaining = deadline - time.time()
                 if remaining <= 0:
-                    self.db.finish_app_tool_call(sid, call_id, "expired", "", False)
+                    self.db.sessions.finish_app_tool_call(sid, call_id, "expired", "", False)
                     raise ToolError(f"the app didn't return a result for {name} within {tool['timeout_seconds']} s")
                 # Quick answers keep the GPU slot (and llama-server's prompt cache); slow ones give it up.
                 if not waited and on_wait and time.monotonic() - started >= HOLD_SLOT_SECONDS:
@@ -359,7 +359,7 @@ class AppToolBroker:
                 except asyncio.TimeoutError:
                     pass
                 event.clear()
-                row = self.db.get_app_tool_call(sid, call_id)
+                row = self.db.sessions.get_app_tool_call(sid, call_id)
         except asyncio.CancelledError:
             cancelled = True  # the run is ending (a cancel, a deadline): it does not wait for its GPU slot again
             raise
@@ -373,7 +373,7 @@ class AppToolBroker:
 
     def submit(self, sid: str, call_id: str, output: str, ok: bool, *, context=None) -> bool:
         def commit():
-            if not self.db.finish_app_tool_call(sid, call_id, "done", output, ok):
+            if not self.db.sessions.finish_app_tool_call(sid, call_id, "done", output, ok):
                 return False
             namespace_audit.record(self.db, self.db.get_session(sid), context, "tool_result.submit", target=call_id,
                                    kind="call", metadata={"fields": ["output", "ok"]})
@@ -1160,10 +1160,10 @@ async def scoped_audit(request: Request, limit: int = 200, before_id: int | None
         store, scope = m.db.for_app(""), key["user_id"]
     else:
         raise HarnessError(403, "private audit is available only to its App or member")
-    return await store.aio.namespace_audit_page(scope, limit, before_id, target_id=target_id, action=action,
-                                                actor_id=actor_id, key_id=key_id,
-                                                login_days=key.get("retention_days") or 30,
-                                                outcome=outcome, since=since, until=until)
+    return await store.sessions.aio.namespace_audit_page(scope, limit, before_id, target_id=target_id, action=action,
+                                                         actor_id=actor_id, key_id=key_id,
+                                                         login_days=key.get("retention_days") or 30,
+                                                         outcome=outcome, since=since, until=until)
 
 
 @route_table.get("/api/v1/sessions", response_model=list[SessionResponse], response_model_exclude_unset=True)
@@ -1245,7 +1245,7 @@ async def tool_calls(ref: str, request: Request, status: str = "pending"):
     """Tool calls the agent made to this session's app tools, filtered by status (default pending), oldest first; an empty status lists all."""
     m = mgr(request)
     s = visible_session(request, auth(request, "sessions"), ref)
-    return m.db.app_tool_calls(s["id"], status or None)
+    return m.db.sessions.app_tool_calls(s["id"], status or None)
 
 
 @route_table.post("/api/v1/sessions/{ref}/tool_calls/{call_id}", response_model=AcceptedResponse)
