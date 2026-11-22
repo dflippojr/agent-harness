@@ -8,6 +8,8 @@ With Docker, `docker build -t agent-harness-server .` builds the Server image an
 
 Stables, the browser client, lives in its own repository, dflippojr/stables (#334). After changing API routes or models, regenerate the document with `python tools/openapi/export_schema.py --write` and commit it; Stables pins a copy. This repository pins a Stables release in `tools/stables/pin.json` (see `tools/stables/README.md`): the tower deploys it, the Playwright journeys in `tools/ui-tests` run against it, and the management-parity tests read its API calls from `tools/stables/api-calls.json`. The Server's own tests serve a stand-in shell (`tests/fixtures/stables_shell`).
 
+The Server core also has a repository of its own, dflippojr/agent-harness-server (#334, stage f; private for now). It is a `git filter-repo` copy of this repository at `9b6b103a`: everything except `harness_modules/`, `macrunner/`, the workflows and the old web-client paths, with history. The add-on modules stay here, and that repository's tests run against them at the commit pinned in its `tools/modules/pin.json`. Until the tower cutover (#334, stage g) this repository is still the source of truth and the tower deploys from it, so make changes here; a change to the core has to be carried over there before the cutover.
+
 # How to prove a change works
 
 CI (`.github/workflows/ci.yml`) is the gate. Its `gate` job always runs, needs every other job, and fails if any of them

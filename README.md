@@ -306,6 +306,10 @@ Stables, the browser client and installable PWA, is the owner's private add-on a
 The install works without it: the server, the `harness` CLI and the SDK run as documented, and `/` returns 404 instead
 of a web page.
 
+The Server core is moving to a repository of its own, `dflippojr/agent-harness-server` (#334; private for now), and
+the add-on modules under [`harness_modules/`](harness_modules) stay here. Until the move is finished, install and
+deploy from this repository.
+
 ### Quick start (development)
 
 ```powershell
