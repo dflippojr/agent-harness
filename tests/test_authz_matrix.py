@@ -82,6 +82,7 @@ def routes_table(alice_id: str, bob_id: str, alice_sid: str, app_sid: str) -> li
         Route("owner", "POST", f"{PREFIX}/accounts/{bob_id}/google/revoke-sessions", mutates=True),
         *(Route("owner", "POST", f"{PREFIX}/sessions/{sid}/taint/clear", ok=404, mutates=True)
           for sid in beyond_owner),
+        *(Route("owner", "GET", f"{PREFIX}/sessions/{sid}/metrics", ok=404) for sid in beyond_owner),  # #1062
     ]
     legacy = [
         Route("legacy_any", "GET", "/me", role=True), Route("legacy_any", "GET", "/sessions"),
@@ -92,6 +93,8 @@ def routes_table(alice_id: str, bob_id: str, alice_sid: str, app_sid: str) -> li
               mutates=True, member=(404, "no session matches")),
         *(Route("legacy_owner", "POST", f"/sessions/{sid}/taint/clear", ok=404, mutates=True,
                 member=(403, "members cannot use the owner API")) for sid in beyond_owner),
+        *(Route("legacy_owner", "GET", f"/sessions/{sid}/metrics", ok=404,
+                member=(403, "members cannot use the owner API")) for sid in beyond_owner),  # #1062
     ]
     status = [Route("legacy_owner", "GET", path, member=member) for path, member in OWNER_STATUS_PATHS.items()]
     app_contract = [
