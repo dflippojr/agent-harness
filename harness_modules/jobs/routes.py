@@ -154,7 +154,7 @@ async def update_job(jid: str, body: Job, request: Request):
         job = validate(body.model_dump(), m.cfg.projects, m.cfg.models, m.cfg.backends)
     except ValueError as e:
         raise HarnessError(400, str(e)) from e
-    job["next_run_at"] = Cron(job["cron"]).next_slot(_time.time(), old.get("last_run_at"))
+    job["next_run_at"] = Cron(job["cron"]).next_slot(_time.time(), old.get("created_at"))
     context = operation_audit.request_context(request, m)
     def save():
         JobStore(m.db).update_job(jid, **job)

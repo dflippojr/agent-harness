@@ -124,11 +124,6 @@ class ZoneClock(LocalClock):
 LOCAL = LocalClock()  # read at call time, so a test can swap in a ZoneClock
 
 
-def _wall_minute(t: float) -> tuple:
-    d = LOCAL.local(t)
-    return d.year, d.month, d.day, d.hour, d.minute
-
-
 def _fall_backs(start: float, end: float):
     """(instant, seconds repeated) for each time between start and end that local clocks go back."""
     t = start
@@ -230,15 +225,23 @@ class Cron:
                 m += 60
         return found
 
-    def next_slot(self, now: float, *served: float | None) -> float:
-        """next_after(now), but a fixed-time job never gets the second pass of a wall-clock minute it already served
-        (the slot it ran for, or its last run): re-planning it during a repeated hour, or running a slot late in the
-        second pass, must not run that slot twice (#932)."""
+    def next_slot(self, now: float, since: float | None) -> float:
+        """next_after(now) for a job that has existed since `since` (its created_at; None: always). A fixed-time job
+        never runs the second pass of a repeated wall-clock minute whose first pass it already existed for: it ran
+        then, or that slot was skipped. Re-planning it in the second pass (an edit, a late or skipped slot) must not
+        run that slot again; a job created after the first pass still gets the second (#932)."""
         nxt = self.next_after(now)
-        done = {_wall_minute(s) for s in served if s} if not self.wildcard else set()
-        while _wall_minute(nxt) in done:
+        while not self.wildcard and self._first_pass_seen(nxt, since):
             nxt = self.next_after(nxt)
         return nxt
+
+    @staticmethod
+    def _first_pass_seen(t: float, since: float | None) -> bool:
+        d = LOCAL.local(t)
+        if not d.fold:
+            return False
+        first = LOCAL.instant(d.replace(fold=0))
+        return first < t and (since is None or since <= first)
 
     def describe(self) -> str:
         return self.expr
@@ -352,14 +355,14 @@ class JobScheduler:
             s = self.create(prompt, project=job["project"], backend=job.get("backend") or "local",
                             model=job["model"] or None,
                             title=f"⏰ {job['name']} · {stamp}", job_id=job["id"])
-            planned = {} if manual else {"next_run_at": Cron(job["cron"]).next_slot(now, job.get("next_run_at"))}
+            planned = {} if manual else {"next_run_at": Cron(job["cron"]).next_slot(now, job.get("created_at"))}
             self.store.update_job(job["id"], last_run_at=now, last_session_id=s["id"], last_error="", **planned)
             log.info("job %s started session %s%s", job["id"], s["id"], " (run now)" if manual else "")
             audit["resulting_session_id"] = s["id"]
         return s["id"]
 
     def _reschedule(self, job: dict, now: float, skipped: str = "", error: str = "") -> None:
-        fields = {"next_run_at": Cron(job["cron"]).next_slot(now, job.get("next_run_at"), job.get("last_run_at"))}
+        fields = {"next_run_at": Cron(job["cron"]).next_slot(now, job.get("created_at"))}
         if skipped:
             fields["last_skip"] = f"{time.strftime('%b %d %H:%M', time.localtime(now))}: {skipped}"
         if error:
