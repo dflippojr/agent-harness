@@ -23,7 +23,7 @@ git branch for you to review and merge.
 
 | Stack | Scale | Quality gates |
 | --- | --- | --- |
-| Python 3.12 · FastAPI · SQLite · Docker · llama.cpp · vanilla JS PWA | ~60K lines · 5,300+ tests in 196 files | CI on every PR · SonarCloud coverage gate · AI code review · fail-closed deploys |
+| Python 3.12 · FastAPI · SQLite · Docker · llama.cpp · vanilla JS PWA | ~60K lines · 6,700+ tests in 224 files | CI on every PR · SonarCloud coverage gate · AI code review · fail-closed deploys |
 
 ---
 
@@ -107,7 +107,7 @@ stateDiagram-v2
     state "Image generation" as Images
 
     [*] --> Agent
-    Agent --> Sleeping: idle 30 min
+    Agent --> Sleeping: idle 10 min
     Sleeping --> Agent: next request, or web app opened
     Agent --> Images: image batch queued
     Images --> Agent: batch done
@@ -313,7 +313,7 @@ deploy from this repository.
 ### Quick start (development)
 
 ```powershell
-python -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt
+python -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt pytest-xdist
 .\.venv\Scripts\python -m harness                  # daemon on 127.0.0.1:8100
 .\.venv\Scripts\python -m harness.cli new "Clone local:invoice-tools, fix the failing test, and report back"
 .\.venv\Scripts\python -m pytest tests -q -n 4 --dist loadfile

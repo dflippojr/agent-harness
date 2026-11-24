@@ -637,6 +637,8 @@ class FileOps:
         p = self.resolve(path)
         lines = self.read_checked(p, path, errors="replace").splitlines()
         start = max(1, start_line)
+        if lines and start > len(lines):
+            return f"start_line={start} is past the end of the file ({len(lines)} lines total)"
         page = self._page_lines(max_lines)
         end = min(len(lines), end_line or len(lines), start + page - 1)
         body, shown_end = [], start - 1

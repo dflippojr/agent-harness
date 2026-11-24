@@ -37,6 +37,27 @@ def test_failed_replace_removes_temp_and_keeps_old(tmp_path, monkeypatch):
     assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
 
 
+def test_failed_prepare_closes_and_removes_temp(tmp_path, monkeypatch):
+    target = tmp_path / "state.json"
+    target.write_text("old", encoding="utf-8")
+    opened = []
+    real_open = os.open
+    monkeypatch.setattr("harness.atomic_io.os.open", lambda *a, **kw: opened.append(real_open(*a, **kw)) or opened[-1])
+
+    def boom(path):
+        raise PermissionError("acl")
+
+    for _ in range(3):
+        with pytest.raises(PermissionError):
+            write_atomic(target, "new", private=True, prepare=boom)
+    assert len(opened) == 3
+    for fd in opened:  # every call closed its temp file's descriptor
+        with pytest.raises(OSError):
+            os.fstat(fd)
+    assert target.read_text(encoding="utf-8") == "old"
+    assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows inherited ACLs")
 def test_owner_only_directory_protects_future_children(tmp_path):
     from harness.atomic_io import owner_only_acl
