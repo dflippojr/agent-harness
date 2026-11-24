@@ -250,8 +250,130 @@ _GIT_VALUES = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-
                "--super-prefix", "--attr-source"}
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
 _SHELL_PUNCTUATION = re.compile(r"&&|\|\||&>>?|[<>]&|<<-?|>>|[;&|()<>\n]")
-_INLINE_CODE_FLAGS = {"python": {"-c"}, "python3": {"-c"}, "perl": {"-e", "-E"}, "ruby": {"-e"},
-                      "node": {"-e", "--eval", "-p", "--print"}}
+
+
+@dataclass
+class _ShellToken:
+    value: str
+    start: int
+    end: int
+    operator: bool = False
+    plain: bool = True
+
+
+class _ShellLexer:
+    """Literal words and source operators, with shell quote/escape provenance.
+
+    Expansion is never performed. Only active substitution syntax marks execution
+    opaque; single-quoted and escaped substitution text remains ordinary data.
+    """
+
+    def __init__(self, command: str, result: _ShellAnalysis):
+        self.command, self.result = command, result
+        self.i = 0
+        self.quote = ""
+        self.start: int | None = None
+        self.plain = True
+        self.word: list[str] = []
+        self.tokens: list[_ShellToken] = []
+
+    def _begin(self) -> None:
+        if self.start is None:
+            self.start = self.i
+
+    def _emit(self) -> None:
+        if self.start is not None:
+            value = "".join(self.word)
+            self.tokens.append(_ShellToken(value, self.start, self.i, plain=self.plain))
+        self.start, self.plain, self.word = None, True, []
+
+    def _escape(self) -> None:
+        if self.i + 1 == len(self.command):
+            raise ValueError("unfinished shell escape")
+        following = self.command[self.i + 1]
+        if following == "\n":
+            self.i += 2  # removed before token recognition, also inside double quotes
+            return
+        self._begin()
+        self.plain = False
+        if self.quote == '"' and following not in '$`"\\':
+            self.word.append("\\")  # double quotes preserve other backslashes
+            self.i += 1
+        else:
+            self.word.append(following)
+            self.i += 2
+
+    def _append(self, char: str) -> None:
+        self._begin()
+        following = self.command[self.i + 1:self.i + 2]
+        if self.quote != "'" and (char == "`" or char == "$" and (
+                following == "(" or not self.quote and following in {"'", '"'})):
+            self.result.opaque = True
+        self.word.append(char)
+        self.i += 1
+
+    def _quoted(self, char: str) -> None:
+        if char == self.quote:
+            self.quote = ""
+            self.i += 1
+        elif char == "\\" and self.quote == '"':
+            self._escape()
+        else:
+            self._append(char)
+
+    def scan(self) -> list[_ShellToken]:
+        while self.i < len(self.command):
+            char = self.command[self.i]
+            if self.quote:
+                self._quoted(char)
+            elif char == "\\":
+                self._escape()
+            elif char in "'\"":
+                self._begin()
+                self.plain, self.quote = False, char
+                self.i += 1
+            elif char in " \t\r":
+                self._emit()
+                self.i += 1
+            elif char == "#" and self.start is None:
+                end = self.command.find("\n", self.i)
+                self.i = len(self.command) if end == -1 else end
+            else:
+                self._unquoted(char)
+        if self.quote:
+            raise ValueError("unfinished shell quote")
+        self._emit()
+        return self.tokens
+
+    def _unquoted(self, char: str) -> None:
+        operator = _SHELL_PUNCTUATION.match(self.command, self.i)
+        if operator:
+            self._emit()
+            self.tokens.append(_ShellToken(operator[0], self.i, operator.end(), operator=True))
+            self.i = operator.end()
+        else:
+            self._append(char)
+
+
+def _shell_words(tokens: list[_ShellToken], result: _ShellAnalysis) -> list[str]:
+    """Strip only source redirects; a quoted/escaped `>` is a file argument."""
+    words: list[_ShellToken] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token.operator and token.value in {"<", ">", ">>", "<&", ">&", "&>", "&>>"}:
+            if words and words[-1].plain and words[-1].value.isdigit() and words[-1].end == token.start:
+                words.pop()  # fd designators must be unquoted and adjacent to the redirect
+            if i + 1 == len(tokens) or tokens[i + 1].operator:
+                result.opaque = True
+                break
+            i += 2
+            continue
+        if token.operator and token.value.startswith("<<"):
+            result.opaque = True
+        words.append(token)
+        i += 1
+    return [word.value for word in words]
 
 
 def _after_options(argv: list[str], flags: set[str], values: set[str]) -> int | None:
@@ -274,6 +396,47 @@ def _after_options(argv: list[str], flags: set[str], values: set[str]) -> int | 
     return i
 
 
+def _interpreter_opaque(name: str, argv: list[str]) -> bool:
+    """Recognize Python option arities/bundles; never read module/script arguments as flags.
+
+    Other interpreters retain their script boundary, but unknown startup options
+    require approval rather than guessing the position of inline code.
+    """
+    i = 1
+    while i < len(argv):
+        word = argv[i]
+        if word == "--" or not word.startswith("-"):
+            return False
+        if word in {"--help", "--version"}:
+            return False
+        if not name.startswith("python") or word == "-":
+            return True
+        if word == "--check-hash-based-pycs":
+            if i + 1 == len(argv):
+                return True
+            i += 2
+            continue
+        if word.startswith("--"):
+            return True
+        for j, flag in enumerate(word[1:], start=1):
+            if flag == "c":
+                return True
+            if flag == "m":
+                return j + 1 == len(word) and i + 1 == len(argv)
+            if flag in "WX":
+                if j + 1 == len(word):
+                    if i + 1 == len(argv):
+                        return True
+                    i += 1
+                break  # the remainder of the bundle is this option's value
+            if flag in "hV?":
+                return False
+            if flag not in "bBdEiIOPqRsSuvx":
+                return True
+        i += 1
+    return True  # interactive/stdin execution or an unresolved option argument
+
+
 def _analyze_shell(command: str, result: _ShellAnalysis, changed_cwd: bool = False, depth: int = 0) -> None:
     """Inspect literal shell commands without executing or expanding any input.
 
@@ -285,52 +448,26 @@ def _analyze_shell(command: str, result: _ShellAnalysis, changed_cwd: bool = Fal
         result.opaque = True
         return
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>\n")
-        lexer.whitespace = " \t\r"
-        lexer.whitespace_split = True
-        lexer.commenters = ""  # A mid-word # is literal in a shell; never hide a following command.
-        tokens = []
-        for token in lexer:
-            # shlex joins adjacent punctuation, including `((` and `);`. A group
-            # closing beside a separator must not hide the next executable.
-            tokens.extend(_SHELL_PUNCTUATION.findall(token) if token and all(
-                c in ";&|()<>\n" for c in token) else [token])
+        tokens = _ShellLexer(command, result).scan()
     except ValueError:
         result.opaque = True
         return
-    if "$(" in command or "`" in command:
-        result.opaque = True
-    changed_cwd = changed_cwd or any(posixpath.basename(t) in {"cd", "pushd", "popd"} for t in tokens)
-    part: list[str] = []
-    for token in tokens + [";"]:
-        if token in {";", "&&", "||", "|", "&", "(", ")", "{", "}", "\n"}:
+    changed_cwd = changed_cwd or any(posixpath.basename(t.value) in {"cd", "pushd", "popd"} for t in tokens)
+    part: list[_ShellToken] = []
+    for token in tokens + [_ShellToken(";", len(command), len(command), operator=True)]:
+        separator = token.operator and token.value in {";", "&&", "||", "|", "&", "(", ")", "\n"}
+        # Braces are reserved words only at a command boundary, not metacharacters
+        # in arguments such as `rm scratch { src`.
+        group_word = not part and token.plain and token.value in {"{", "}"}
+        if separator or group_word:
             if part:
-                _analyze_argv(part, result, changed_cwd, depth)
+                _analyze_argv(_shell_words(part, result), result, changed_cwd, depth)
                 part = []
         else:
             part.append(token)
 
 
 def _analyze_argv(argv: list[str], result: _ShellAnalysis, changed_cwd: bool, depth: int) -> None:
-    # Redirects may precede an executable. Remove literal file redirects before
-    # unwrapping, while refusing heredocs and descriptor tricks we cannot resolve.
-    words = []
-    i = 0
-    while i < len(argv):
-        word = argv[i]
-        if word in {"<", ">", ">>", "<&", ">&", "&>", "&>>"}:
-            if words and words[-1].isdigit():
-                words.pop()
-            if i + 1 == len(argv):
-                result.opaque = True
-                return
-            i += 2
-            continue
-        if word.startswith("<<"):
-            result.opaque = True
-        words.append(word)
-        i += 1
-    argv = words
     for _ in range(21 - depth):
         while argv and (_ASSIGNMENT.match(argv[0]) or argv[0] in {"!", "if", "then", "elif", "else", "do",
                                                                  "while", "until"}):
@@ -350,14 +487,8 @@ def _analyze_argv(argv: list[str], result: _ShellAnalysis, changed_cwd: bool, de
         if name in {"source", "."}:
             result.opaque = True
             return
-        if name in _INLINE_CODE_FLAGS:
-            for word in argv[1:]:
-                if not word.startswith("-") or word in {"-m", "--"}:
-                    break  # module/script arguments are not interpreter options
-                if any(word == flag or word.startswith(flag + "=") or len(flag) == 2 and word.startswith(flag)
-                       for flag in _INLINE_CODE_FLAGS[name]):
-                    result.opaque = True
-                    return
+        if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", name) or name in {"perl", "ruby", "node"}:
+            result.opaque |= _interpreter_opaque(name, argv)
         if name not in _WRAPPER_OPTIONS:
             break
         if name == "command" and len(argv) > 1 and argv[1] in {"-v", "-V"}:
@@ -393,8 +524,11 @@ def _analyze_argv(argv: list[str], result: _ShellAnalysis, changed_cwd: bool, de
             result.git_push |= args[0] == "push"
             # Stop at --: a path named --hard or -f is not an option.
             options = args[1:args.index("--")] if "--" in args else args[1:]
-            result.git_discard |= (args[0] == "reset" and "--hard" in options or args[0] == "clean" and any(
-                t == "--force" or t.startswith("-") and not t.startswith("--") and "f" in t for t in options))
+            result.git_discard |= (args[0] == "reset" and any(
+                t.startswith("--") and len(t) > 2 and "--hard".startswith(t) for t in options)
+                or args[0] == "clean" and any(
+                    t.startswith("--") and len(t) > 2 and "--force".startswith(t)
+                    or t.startswith("-") and not t.startswith("--") and "f" in t for t in options))
             result.opaque |= any(c in args[0] for c in "$`*?[{}")
     elif name in _DELETERS:
         end = argv.index("--") if "--" in argv else len(argv)
@@ -440,7 +574,7 @@ def _delete_outside_scratch(command: str) -> bool:
     """The shared conservative deletion check used by smart approval eligibility."""
     result = _ShellAnalysis()
     _analyze_shell(command, result)
-    return result.delete or result.opaque
+    return result.delete
 
 
 def _target_outside_scratch(target: str) -> bool:
