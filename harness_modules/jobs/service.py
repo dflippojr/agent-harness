@@ -94,6 +94,21 @@ def _wall_minute(t: float) -> tuple:
     return lt.tm_year, lt.tm_mon, lt.tm_mday, lt.tm_hour, lt.tm_min
 
 
+def _fall_backs(start: float, end: float):
+    """(instant, seconds repeated) for each time between start and end that local clocks go back."""
+    t = start
+    while t < end:
+        step = min(3600.0, end - t)
+        drop = time.localtime(t).tm_gmtoff - time.localtime(t + step).tm_gmtoff
+        if drop > 0:
+            lo, hi = t, t + step  # the offset changes in (lo, hi]: narrow it to the minute
+            while hi - lo > 60:
+                mid = lo + (hi - lo) // 120 * 60
+                lo, hi = (mid, hi) if time.localtime(mid).tm_gmtoff == time.localtime(lo).tm_gmtoff else (lo, mid)
+            yield int(hi) // 60 * 60, drop
+        t += step
+
+
 class Cron:
     def __init__(self, expr: str):
         self.expr = PRESETS.get(expr.strip().lower(), expr.strip())
@@ -153,12 +168,14 @@ class Cron:
         while True:
             d = self._next_wall(d)
             first, second = d.timestamp(), d.replace(fold=1).timestamp()  # equal unless d is repeated or skipped
+            found = None
             if second > first:  # repeated: the first occurrence, or the second if t is past the first
-                found = first if first > t else second if second > t else None
-            elif second < first and self.wildcard:  # skipped: wildcard jobs follow real time, so no run
-                found = None
-            else:  # ordinary, or a skipped fixed time: runs that far past the jump
-                found = first if first > t else None
+                if first > t:
+                    found = first
+                elif second > t:
+                    found = second
+            elif (second == first or not self.wildcard) and first > t:
+                found = first  # ordinary; a skipped fixed time runs that far past the jump (wildcards skip it)
             if found is not None:
                 break
             d += timedelta(minutes=1)
@@ -168,23 +185,23 @@ class Cron:
 
     def _second_pass_before(self, t: float, found: float) -> float:
         """A wildcard job's matching minute in a repeated hour between t and found. The wall-clock walk from t's
-        first-pass time jumps over the second pass; real-time minutes there are checked one by one (at most a few
-        hours, about twice a year)."""
-        if time.localtime(found).tm_gmtoff >= time.localtime(t).tm_gmtoff:
-            return found  # no fall-back between t and found
-        m = (int(t) // 60 + 1) * 60
-        while m < found:
-            d = datetime.fromtimestamp(m)
-            if d.fold and self._matches(d):
-                return float(m)
-            m += 60
+        first-pass time jumps over the second pass, so each fall-back between them is checked minute by minute."""
+        for change, repeat in _fall_backs(t, found):
+            m = change
+            while m < min(change + repeat, found):
+                d = datetime.fromtimestamp(m)
+                if m > t and d.fold and self._matches(d):
+                    return float(m)
+                m += 60
         return found
 
-    def next_slot(self, now: float, last_run_at: float | None = None) -> float:
-        """next_after(now), but a fixed-time job never gets the second pass of the wall-clock minute it last ran in:
-        re-planning it (an edit, a skipped slot) during a repeated hour must not run that slot twice (#932)."""
+    def next_slot(self, now: float, *served: float | None) -> float:
+        """next_after(now), but a fixed-time job never gets the second pass of a wall-clock minute it already served
+        (the slot it ran for, or its last run): re-planning it during a repeated hour, or running a slot late in the
+        second pass, must not run that slot twice (#932)."""
         nxt = self.next_after(now)
-        if not self.wildcard and last_run_at and _wall_minute(nxt) == _wall_minute(last_run_at) and nxt > last_run_at:
+        done = {_wall_minute(s) for s in served if s} if not self.wildcard else set()
+        while _wall_minute(nxt) in done:
             nxt = self.next_after(nxt)
         return nxt
 
@@ -300,14 +317,14 @@ class JobScheduler:
             s = self.create(prompt, project=job["project"], backend=job.get("backend") or "local",
                             model=job["model"] or None,
                             title=f"⏰ {job['name']} · {stamp}", job_id=job["id"])
-            self.store.update_job(job["id"], last_run_at=now, last_session_id=s["id"], last_error="",
-                               **({} if manual else {"next_run_at": Cron(job["cron"]).next_after(now)}))
+            planned = {} if manual else {"next_run_at": Cron(job["cron"]).next_slot(now, job.get("next_run_at"))}
+            self.store.update_job(job["id"], last_run_at=now, last_session_id=s["id"], last_error="", **planned)
             log.info("job %s started session %s%s", job["id"], s["id"], " (run now)" if manual else "")
             audit["resulting_session_id"] = s["id"]
         return s["id"]
 
     def _reschedule(self, job: dict, now: float, skipped: str = "", error: str = "") -> None:
-        fields = {"next_run_at": Cron(job["cron"]).next_slot(now, job.get("last_run_at"))}
+        fields = {"next_run_at": Cron(job["cron"]).next_slot(now, job.get("next_run_at"), job.get("last_run_at"))}
         if skipped:
             fields["last_skip"] = f"{time.strftime('%b %d %H:%M', time.localtime(now))}: {skipped}"
         if error:

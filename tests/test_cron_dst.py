@@ -96,6 +96,19 @@ def test_next_slot_skips_only_a_fixed_jobs_repeated_slot(tz):
     assert Cron("35 1 * * *").next_slot(now, None) == utc(2026, 11, 1, 6, 35)  # never ran: 01:35 EST
 
 
+def test_wildcard_second_pass_found_when_the_next_match_is_a_year_away(tz):
+    tz("America/New_York")
+    # From 01:55 EDT the next first-pass match is a year later (also EDT), but 01:00 EST today matches.
+    assert Cron("*/5 1 1 11 *").next_after(utc(2026, 11, 1, 5, 55)) == utc(2026, 11, 1, 6, 0)
+
+
+def test_wildcard_next_after_months_away_is_quick(tz):
+    tz("America/New_York")
+    begin = time.perf_counter()
+    assert Cron("0 * * 1 *").next_after(utc(2026, 7, 1)) == utc(2027, 1, 1, 5, 0)
+    assert time.perf_counter() - begin < 0.5
+
+
 def test_spring_forward_gap_still_runs_once(tz):
     tz("America/New_York")
     # 02:30 doesn't exist on 2026-03-08; the job runs once that day, after the gap (as before #932).
@@ -162,7 +175,8 @@ def test_wildcard_jobs_match_every_real_minute_once(tz, zone, expr):
 
 # --- the scheduler, ticking every 30 seconds through the night ----------------------------------------------------
 
-def run_night(tz, tmp_path, jobs: dict[str, dict], start: float, end: float) -> dict[str, list[float]]:
+def run_night(tz, tmp_path, jobs: dict[str, dict], start: float, end: float, catch_up: bool = False,
+              final: dict | None = None) -> dict[str, list[float]]:
     """Insert `jobs` (id -> fields), tick every 30 s from start to end with sessions that finish at once; return
     the session start times per job."""
     tz("America/New_York")
@@ -181,9 +195,13 @@ def run_night(tz, tmp_path, jobs: dict[str, dict], start: float, end: float) -> 
         store.insert_job({"id": jid, "name": jid, "prompt": "p", "project": "scratch", "backend": "local",
                           "model": "", "notify": "low", "enabled": True, "catch_up_minutes": 360,
                           "next_run_at": Cron(fields["cron"]).next_after(created_at), **fields})
+    if catch_up:
+        scheduler._catch_up(start)  # the daemon starts at `start`
     while clock["now"] < end:
         scheduler.tick(clock["now"])
         clock["now"] += 30
+    if final is not None:
+        final.update({jid: store.get_job(jid) for jid in jobs})
     m.db.close()
     return started
 
@@ -198,6 +216,16 @@ def test_scheduler_runs_a_job_created_in_the_second_pass_at_its_time(tz, tmp_pat
     started = run_night(tz, tmp_path, {"daily": {"cron": "45 1 * * *", "created_at": utc(2026, 11, 1, 6, 30)}},
                         utc(2026, 11, 1, 6, 30), utc(2026, 11, 1, 8, 0))  # created 01:30 EST
     assert started["daily"] == [utc(2026, 11, 1, 6, 45)], [show(t) for t in started["daily"]]  # 01:45 EST, not early
+
+
+def test_scheduler_running_a_slot_late_in_the_second_pass_does_not_run_its_twin(tz, tmp_path):
+    """Planned for 01:45 EDT, but the daemon only starts at 01:30 EST: the catch-up run is that slot, so 01:45 EST
+    must not run it again."""
+    final: dict = {}
+    started = run_night(tz, tmp_path, {"daily": {"cron": "45 1 * * *", "created_at": utc(2026, 11, 1, 5, 0)}},
+                        utc(2026, 11, 1, 6, 30), utc(2026, 11, 1, 8, 0), catch_up=True, final=final)
+    assert started["daily"] == [utc(2026, 11, 1, 6, 30)], [show(t) for t in started["daily"]]
+    assert final["daily"]["next_run_at"] == utc(2026, 11, 2, 6, 45)
 
 
 def test_scheduler_runs_a_sub_hourly_job_once_per_slot(tz, tmp_path):
