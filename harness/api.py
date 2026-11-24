@@ -1113,11 +1113,8 @@ async def get_transcript(ref: str, request: Request):
 @api_router.get("/sessions/{ref}/metrics")
 async def session_metrics(ref: str, request: Request):
     """Owner-only per-turn context-efficiency metrics for one agent session (#159)."""
-    m = require_owner(request)
-    sid = m.resolve_id(ref, kind="agent", app="")
-    session = m.db.sessions.get_session(sid)
-    if session is None or session.get("app_id"):
-        raise HarnessError(404, "no session matches that id")
+    require_owner(request)
+    m, sid, _ = owned_session(request, ref)  # never a member's or an App's session (#1062)
     return efficiency.session_payload(sid, m.db.sessions.events(sid))
 
 
