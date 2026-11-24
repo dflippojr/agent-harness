@@ -110,3 +110,32 @@ def test_startup_snapshot_takes_hosted_sessions_pending_approvals_only(runner_db
                                 "reason": "asks", "status": status})
         asyncio.run(runner.mark_recovered_place(db.sessions.get_session(sid)))
     assert runner._recovery_unanswered == {"s-hosted": {"a-s-hosted-now"}}
+
+
+# Arguments must be the same call's, compared as their canonical JSON (#1063): Python's == takes true for 1, false
+# for 0 and 1 for 1.0, nested too, so a changed call would bind to the old approval and run on its decision.
+RECORDED = {"command": "deploy", "opts": {"force": False, "retries": 1, "flags": [True, 2]}}
+
+
+@pytest.mark.parametrize("changed", [
+    {"command": "deploy", "opts": {"force": 0, "retries": 1, "flags": [True, 2]}},        # false -> 0
+    {"command": "deploy", "opts": {"force": False, "retries": True, "flags": [True, 2]}},  # 1 -> true
+    {"command": "deploy", "opts": {"force": False, "retries": 1.0, "flags": [True, 2]}},   # 1 -> 1.0
+    {"command": "deploy", "opts": {"force": False, "retries": 1, "flags": [1, 2]}},        # nested list: true -> 1
+    {"command": "deploy", "opts": {"force": False, "retries": 1, "flags": [True, 2.0]}},   # nested list: 2 -> 2.0
+], ids=["false-0", "1-true", "1-1.0", "list-true-1", "list-2-2.0"])
+@pytest.mark.parametrize("status", ["pending", "approved"])
+def test_recovery_never_binds_args_that_differ_only_in_json_type(runner_db, changed, status):
+    runner, db = runner_db
+    assert changed == RECORDED  # equal to Python, so only a type-preserving comparison tells them apart
+    db.sessions.insert_session({"id": "s-type", "title": "t", "project": "p", "target": "tower", "model": "m",
+                       "backend": "claude", "status": "waiting_approval", "workspace": "",
+                       "created_at": 1.0, "updated_at": 1.0, "context": [], "run": {}})
+    db.sessions.insert_approval({"id": "a-type", "session_id": "s-type", "tool_call_id": "tool-1", "tool": TOOL,
+                        "args": RECORDED, "reason": "asks", "status": status})
+    runner._recovery_unanswered["s-type"] = {"a-type"}
+    assert runner._recovery_approval("s-type", TOOL, changed) is None
+    assert runner._recovery_unanswered["s-type"] == {"a-type"}  # a miss does not use up the binding
+    reordered = {"opts": {"flags": [True, 2], "retries": 1, "force": False}, "command": "deploy"}
+    assert runner._recovery_approval("s-type", TOOL, reordered)["id"] == "a-type"  # key order is not the call
+    assert runner._recovery_approval("s-type", TOOL, reordered) is None  # still binds once

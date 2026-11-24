@@ -221,3 +221,20 @@ def test_a_harness_tool_finds_its_approval_asked_natively_or_over_mcp(manager, r
     assert db.sessions.approval_for_exact_call("s1", CALL_ID, names, args)["id"] == "a-1"
     assert db.sessions.approval_for_exact_call("s1", CALL_ID, names, {**args, "content": "other"}) is None
     assert db.sessions.approval_for_exact_call("s1", CALL_ID, harness_tool_names("memory_edit"), args) is None
+
+
+@pytest.mark.parametrize("recorded, changed", [
+    (ARGS, {**ARGS, "timeout": 60.0}),                                       # 60 -> 60.0
+    ({**ARGS, "timeout": 1}, {**ARGS, "timeout": True}),                     # 1 -> true
+    ({"command": ["git", False]}, {"command": ["git", 0]}),                   # nested: false -> 0
+    ({"command": ["git", {"n": 1.0}]}, {"command": ["git", {"n": 1}]}),       # nested: 1.0 -> 1
+], ids=["60-60.0", "1-true", "list-false-0", "nested-1.0-1"])
+def test_the_lookup_tells_apart_args_equal_only_to_python(manager, recorded, changed):
+    """true is not 1 and 1 is not 1.0 in a call's JSON arguments, though Python's == says they are."""
+    db = manager.db
+    _session(db, "s1")
+    db.sessions.insert_approval({"id": "a-1", "session_id": "s1", "tool_call_id": CALL_ID, "tool": TOOL,
+                                 "args": recorded, "reason": "asks", "status": "approved"})
+    assert changed == recorded
+    assert db.sessions.approval_for_exact_call("s1", CALL_ID, TOOL, changed) is None
+    assert db.sessions.approval_for_exact_call("s1", CALL_ID, TOOL, recorded)["id"] == "a-1"
