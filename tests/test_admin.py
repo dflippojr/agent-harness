@@ -174,3 +174,37 @@ def test_every_templated_alias_route_answers_like_its_unversioned_route(tmp_path
                     if alias.status_code >= 500 or alias.status_code != plain.status_code:
                         mismatches.append((method, path, plain.status_code, alias.status_code))
         assert not mismatches, mismatches
+
+
+def test_session_metrics_never_reach_another_users_session(tmp_path):
+    """#1062: session metrics resolve the ref inside the caller's user scope, like taint/clear (#785): a member's or an
+    App's session answers the owner the same 404 as GET /sessions/{id}, by full id and by prefix, on the owner surface
+    and on /api/admin/v1 (owner login and the Hub's owner key); the owner's own sessions still resolve both ways."""
+    from harness.admin import OWNER_KIND
+    from test_household import ALICE, H, OWNER, create_member, household
+    client, m = household(tmp_path)
+    m._spawn = lambda sid: None  # created, not run
+    with client:
+        create_member(client, ALICE, "Alice")
+        app = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": ["sessions"]},
+                          headers=H(OWNER)).json()
+        hub = client.post("/keys", json={"name": "hub", "kind": OWNER_KIND, "scopes": [ADMIN_SCOPE]},
+                          headers=H(OWNER)).json()
+        member_sid = client.post("/api/v1/sessions", json={"prompt": "alice secret mango"}, headers=H(ALICE)).json()["id"]
+        app_sid = client.post("/api/v1/sessions", json={"prompt": "app private papaya"},
+                              headers=bearer(app["key"])).json()["id"]
+        own_sid = client.post("/sessions", json={"prompt": "owner zebra"}, headers=H(OWNER)).json()["id"]
+        callers = (("", H(OWNER)), (PREFIX, H(OWNER)), (PREFIX, bearer(hub["key"])))
+        for sid in (member_sid, app_sid):
+            hidden = client.get(f"/sessions/{sid}", headers=H(OWNER))
+            assert hidden.status_code == 404
+            for path, headers in callers:
+                for ref in (sid, sid[:6]):
+                    r = client.get(f"{path}/sessions/{ref}/metrics", headers=headers)
+                    assert (r.status_code, r.json()) == (404, hidden.json()), (path, ref, r.text)
+                    assert sid not in r.text and "mango" not in r.text and "papaya" not in r.text
+
+        for path, headers in callers:
+            for ref in (own_sid, own_sid[:6]):
+                r = client.get(f"{path}/sessions/{ref}/metrics", headers=headers)
+                assert r.status_code == 200 and r.json()["session_id"] == own_sid, (path, ref, r.text)
