@@ -163,8 +163,9 @@ def test_revocation_closes_stream_on_next_tick_and_reconnect_is_unauthorized(
 
 
 # #787: the admin-surface streams (`/api/admin/v1/events`, `/api/admin/v1/sessions/{ref}/events`) run the Web handlers.
-# Each test opens one through the real alias, so `require_admin` records the bearer key as it does in production,
-# then consumes the stream the handler built with a short tick.
+# #1061: so do the unversioned routes (`/events`, `/sessions/{ref}/events`, `/chats/{ref}/events`), which an owner
+# bearer key reaches without `require_admin`. Each test opens a stream through the real route, so the key is found as it
+# is in production, then consumes the stream the handler built with a short tick.
 def _open_admin_stream(client, monkeypatch, path: str, headers: dict):
     """GET `path` through the app and return the event generator its handler built, unconsumed."""
     opened = []
@@ -201,41 +202,48 @@ def _short_tick(patch, before=None):
     patch.setattr(Request, "is_disconnected", connected)
 
 
-ADMIN_STREAMS = {
-    "global": ("/api/admin/v1/events", "*"),
-    "session": ("/api/admin/v1/sessions/owner00001/events?follow=true&after={last}", "owner00001"),
+# surface: (path, bus subscription, the seeded session whose events the stream carries)
+STREAMS = {
+    "admin-global": ("/api/admin/v1/events", "*", "owner00001"),
+    "admin-session": ("/api/admin/v1/sessions/owner00001/events?follow=true&after={last}", "owner00001", "owner00001"),
+    "global": ("/events", "*", "owner00001"),
+    "session": ("/sessions/owner00001/events?follow=true&after={last}", "owner00001", "owner00001"),
+    "chat": ("/chats/chat000001/events?follow=true&after={last}", "chat000001", "chat000001"),
 }
 
 
-def _seeded_stream_path(m, surface: str) -> tuple[str, str]:
-    """Seed owner00001 and return (path, bus subscription); a session stream starts after its persisted events."""
-    seed(m.db, "owner00001", "scratch", "stream", [("status", {"status": "done"})])
-    path, subscription = ADMIN_STREAMS[surface]
-    return path.format(last=m.db.sessions.events("owner00001")[-1]["seq"]), subscription
+def _seeded_stream_path(m, surface: str) -> tuple[str, str, str]:
+    """Seed the surface's session and return (path, bus subscription, session id); a session or chat stream starts
+    after its persisted events."""
+    path, subscription, sid = STREAMS[surface]
+    seed(m.db, sid, "scratch", "stream", [("status", {"status": "done"})])
+    if sid.startswith("chat"):
+        m.db.sessions.update_session(sid, kind="chat")
+    return path.format(last=m.db.sessions.events(sid)[-1]["seq"]), subscription, sid
 
 
-@pytest.mark.parametrize("surface", sorted(ADMIN_STREAMS))
+@pytest.mark.parametrize("surface", sorted(STREAMS))
 @pytest.mark.parametrize("when", ["before_wait", "during_wait", "keepalive"])
-def test_revoking_an_owner_key_ends_its_admin_surface_stream(tmp_path, monkeypatch, surface, when):
+def test_revoking_an_owner_key_ends_its_stream(tmp_path, monkeypatch, surface, when):
     client, m = make_client(tmp_path)
     key, token = m.db.credentials.create_api_key("reader", "admin", "owner", origins=[ORIGIN])
     headers = {"Authorization": f"Bearer {token}", "Origin": ORIGIN}
     with client:
-        path, subscription = _seeded_stream_path(m, surface)
+        path, subscription, sid = _seeded_stream_path(m, surface)
         stream = _open_admin_stream(client, monkeypatch, path, headers)
 
         def revoke_during_wait():
             if not m.db.credentials.revoke_api_key(key["id"]):
                 return  # revoked on an earlier tick, which should already have ended the stream
             if when == "during_wait":
-                m.bus.emit("owner00001", "status", {"status": "done", "answer": "must not leak"})
+                m.bus.emit(sid, "status", {"status": "done", "answer": "must not leak"})
 
         async def consume(patch):
             assert await anext(stream) == ": connected\n\n"
             if when == "before_wait":
                 revoked = await asyncio.to_thread(client.delete, f"/api/admin/v1/keys/{key['id']}")
                 assert revoked.status_code == 204, revoked.text
-                m.bus.emit("owner00001", "status", {"status": "done", "answer": "must not leak"})
+                m.bus.emit(sid, "status", {"status": "done", "answer": "must not leak"})
                 _short_tick(patch)
             else:
                 _short_tick(patch, before=revoke_during_wait)
@@ -249,13 +257,13 @@ def test_revoking_an_owner_key_ends_its_admin_surface_stream(tmp_path, monkeypat
         assert client.get(reconnect, headers=headers).status_code == 401
 
 
-@pytest.mark.parametrize("surface", sorted(ADMIN_STREAMS))
-def test_releasing_the_hub_ends_the_admin_surface_stream_its_key_holds(tmp_path, monkeypatch, surface):
+@pytest.mark.parametrize("surface", sorted(STREAMS))
+def test_releasing_the_hub_ends_the_stream_its_key_holds(tmp_path, monkeypatch, surface):
     client, m = household(tmp_path)
     with client:
         token, _, _ = _claim(client, m)
         headers = _bearer(token, HUB_ORIGIN)
-        path, subscription = _seeded_stream_path(m, surface)
+        path, subscription, sid = _seeded_stream_path(m, surface)
         stream = _open_admin_stream(client, monkeypatch, path, headers)
 
         async def consume(patch):
@@ -263,7 +271,7 @@ def test_releasing_the_hub_ends_the_admin_surface_stream_its_key_holds(tmp_path,
             released = await asyncio.to_thread(client.post, f"{CLAIM}/release", headers=_host(m),
                                                json={"confirm": True})
             assert released.status_code == 200, released.text
-            m.bus.emit("owner00001", "status", {"status": "done", "answer": "must not leak"})
+            m.bus.emit(sid, "status", {"status": "done", "answer": "must not leak"})
             _short_tick(patch)
             with pytest.raises(StopAsyncIteration):
                 await anext(stream)
@@ -274,12 +282,12 @@ def test_releasing_the_hub_ends_the_admin_surface_stream_its_key_holds(tmp_path,
         assert client.get(path.replace("follow=true", "follow=false"), headers=headers).status_code == 401
 
 
-@pytest.mark.parametrize("surface", sorted(ADMIN_STREAMS))
-def test_ambient_owner_admin_stream_survives_revoking_an_unrelated_key(tmp_path, monkeypatch, surface):
+@pytest.mark.parametrize("surface", sorted(STREAMS))
+def test_ambient_owner_stream_survives_revoking_an_unrelated_key(tmp_path, monkeypatch, surface):
     client, m = make_client(tmp_path)
     other, _ = m.db.credentials.create_api_key("other", "admin", "owner", origins=[ORIGIN])
     with client:
-        path, _ = _seeded_stream_path(m, surface)
+        path, _, sid = _seeded_stream_path(m, surface)
         stream = _open_admin_stream(client, monkeypatch, path, {})
 
         async def consume(patch):
@@ -288,7 +296,7 @@ def test_ambient_owner_admin_stream_survives_revoking_an_unrelated_key(tmp_path,
             assert revoked.status_code == 204, revoked.text
             _short_tick(patch)
             assert await anext(stream) == ": keepalive\n\n"
-            m.bus.emit("owner00001", "status", {"status": "done", "answer": "still live"})
+            m.bus.emit(sid, "status", {"status": "done", "answer": "still live"})
             assert "still live" in await anext(stream)
             await stream.aclose()
 
