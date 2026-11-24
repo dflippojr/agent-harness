@@ -24,12 +24,7 @@ from typing import cast
 from .db import (AND_APP, AND_JOIN, AND_KIND, AND_OWNER, JSON_COLUMNS, CoreStore, _reads, _row, _rows, _writes,
                  merge_newest_first)
 from .digests import sha256_hex
-
-
-def _canonical_args(args) -> str:
-    """One text form of a call's arguments, so a call and its stored approval compare equal whatever their key order
-    (and NaN, which never equals itself as a float, still matches its own text)."""
-    return json.dumps(args, sort_keys=True)
+from .policy import canonical_args
 
 
 def _like_prefix(prefix: str) -> str:
@@ -533,14 +528,14 @@ class SessionStore(CoreStore):
         arguments is a different call, so it finds nothing here and is asked anew. `tool` may name each form the
         same tool is recorded under (a harness tool asked natively or over MCP)."""
         tools = (tool,) if isinstance(tool, str) else tuple(tool)
-        wanted = _canonical_args(args)
+        wanted = canonical_args(args)
         with self.lock:
             rows = _rows(self.conn.execute(
                 f"SELECT * FROM approvals WHERE session_id = ? AND tool_call_id = ? "
                 f"AND tool IN ({', '.join('?' * len(tools))}) ORDER BY created_at DESC, rowid DESC",
                 (sid, call_id, *tools),
             ).fetchall())
-        return next((row for row in rows if _canonical_args(row["args"]) == wanted), None)
+        return next((row for row in rows if canonical_args(row["args"]) == wanted), None)
 
     @_reads
     def pending_approvals(self, sid: str | None = None, user_id: str | None = None) -> list[dict]:
