@@ -12,6 +12,10 @@ notify.
 
 Runs don't pile up: a job whose previous session is still active skips that slot. After downtime, a job whose last
 slot was missed by less than `catch_up_minutes` runs once when the daemon starts; older misses are skipped.
+
+Daylight-saving changes follow vixie-cron (#932, owner decision): a fixed time in the hour that repeats when clocks
+fall back runs once, at the first pass (or the second, for a job created then); a schedule with `*` in the minute or
+hour field runs on real time through both passes. See `Cron.next_after`.
 """
 
 from __future__ import annotations
@@ -85,6 +89,56 @@ def _value(text: str, lo: int, hi: int, names: dict | None) -> int:
     return n
 
 
+class LocalClock:
+    """The tower's local time zone (the process's TZ): the zone job schedules are written in."""
+
+    def local(self, t: float) -> datetime:
+        """Naive local wall-clock time of t; `fold=1` in the second pass of a repeated hour."""
+        return datetime.fromtimestamp(t)
+
+    def instant(self, d: datetime) -> float:
+        """Timestamp of naive local wall-clock time d, honouring `fold` (PEP 495)."""
+        return d.timestamp()
+
+    def offset(self, t: float) -> float:
+        return time.localtime(t).tm_gmtoff
+
+
+class ZoneClock(LocalClock):
+    """A named zone instead of the process's TZ (tests pin one this way on every OS)."""
+
+    def __init__(self, zone):
+        self.zone = zone
+
+    def local(self, t: float) -> datetime:
+        return datetime.fromtimestamp(t, self.zone).replace(tzinfo=None)  # keeps fold
+
+    def instant(self, d: datetime) -> float:
+        return d.replace(tzinfo=self.zone).timestamp()
+
+    def offset(self, t: float) -> float:
+        offset = datetime.fromtimestamp(t, self.zone).utcoffset()
+        return offset.total_seconds() if offset else 0.0
+
+
+LOCAL = LocalClock()  # read at call time, so a test can swap in a ZoneClock
+
+
+def _fall_backs(start: float, end: float):
+    """(instant, seconds repeated) for each time between start and end that local clocks go back."""
+    t = start
+    while t < end:
+        step = min(3600.0, end - t)
+        drop = LOCAL.offset(t) - LOCAL.offset(t + step)
+        if drop > 0:
+            lo, hi = t, t + step  # the offset changes in (lo, hi]: narrow it to the minute
+            while hi - lo > 60:
+                mid = lo + (hi - lo) // 120 * 60
+                lo, hi = (mid, hi) if LOCAL.offset(mid) == LOCAL.offset(lo) else (lo, mid)
+            yield int(hi) // 60 * 60, drop
+        t += step
+
+
 class Cron:
     def __init__(self, expr: str):
         self.expr = PRESETS.get(expr.strip().lower(), expr.strip())
@@ -98,6 +152,8 @@ class Cron:
         self.weekdays = {d % 7 for d in _field(parts[4], 0, 7, DOW_NAMES)}  # 0 and 7 are both Sunday
         # Standard cron: when both day fields are restricted, either one matching is enough.
         self.day_any = parts[2] != "*" and parts[4] != "*"
+        # vixie-cron: a `*` minute or hour field keeps running through a repeated hour; fixed times run once.
+        self.wildcard = parts[0].startswith("*") or parts[1].startswith("*")
 
     def _day_ok(self, d: datetime) -> bool:
         dom = d.day in self.days
@@ -106,9 +162,11 @@ class Cron:
             return dom or dow
         return dom and dow
 
-    def next_after(self, t: float) -> float:
-        """The first matching minute strictly after timestamp t (local time)."""
-        d = datetime.fromtimestamp(t).replace(second=0, microsecond=0) + timedelta(minutes=1)
+    def _matches(self, d: datetime) -> bool:
+        return d.month in self.months and self._day_ok(d) and d.hour in self.hours and d.minute in self.minutes
+
+    def _next_wall(self, d: datetime) -> datetime:
+        """The first matching naive local wall-clock minute at or after d (d has no seconds)."""
         limit = d + timedelta(days=366 * 5)
         while d < limit:
             if d.month not in self.months:
@@ -123,8 +181,70 @@ class Cron:
             if d.minute not in self.minutes:
                 d += timedelta(minutes=1)
                 continue
-            return d.timestamp()
+            return d
         raise CronError(f"{self.expr!r} never matches")
+
+    def next_after(self, t: float) -> float:
+        """The first matching minute strictly after timestamp t (local time).
+
+        Local wall-clock times repeat when clocks fall back and skip when they spring forward (#932). A wall-clock
+        minute that happens twice runs once (vixie-cron): at its first occurrence, or at its second when t is already
+        in the second pass (a job created or re-planned then). Jobs with `*` in the minute or hour field (`*/5`,
+        `0 * * * *`) keep their real-time rhythm: they run in both passes and not in skipped minutes. A fixed time the
+        clocks skip runs at the same offset past the jump (02:30 -> 03:30), as before.
+        """
+        # Naive datetimes lose `fold` on any arithmetic, so walk the wall clock and pick the occurrence explicitly.
+        d = LOCAL.local(t).replace(second=0, microsecond=0, fold=0) + timedelta(minutes=1)
+        while True:
+            d = self._next_wall(d)
+            first, second = LOCAL.instant(d), LOCAL.instant(d.replace(fold=1))  # equal unless repeated or skipped
+            found = None
+            if second > first:  # repeated: the first occurrence, or the second if t is past the first
+                if first > t:
+                    found = first
+                elif second > t:
+                    found = second
+            elif (second == first or not self.wildcard) and first > t:
+                found = first  # ordinary; a skipped fixed time runs that far past the jump (wildcards skip it)
+            if found is not None:
+                break
+            d += timedelta(minutes=1)
+        if self.wildcard:
+            found = self._second_pass_before(t, found)
+        return found
+
+    def _second_pass_before(self, t: float, found: float) -> float:
+        """A wildcard job's matching minute in a repeated hour between t and found. The wall-clock walk from t's
+        first-pass time jumps over the second pass, so each fall-back between them is checked minute by minute."""
+        for change, repeat in _fall_backs(t, found):
+            m = change
+            while m < min(change + repeat, found):
+                d = LOCAL.local(m)
+                if m > t and d.fold and self._matches(d):
+                    return float(m)
+                m += 60
+        return found
+
+    def next_slot(self, now: float, since: float | None) -> float:
+        """next_after(now) for a job created at `since` (its created_at; None: long ago). Every re-plan goes through
+        here. A fixed-time job takes the second occurrence of a repeated wall-clock minute only if it was created
+        during that second pass, at or after the instant the clocks went back (vixie-cron, owner decision on #932). A
+        job that existed before it had the first pass: it ran then, or the slot was skipped."""
+        nxt = self.next_after(now)
+        while not self.wildcard and self._second_pass_barred(nxt, since):
+            nxt = self.next_after(nxt)
+        return nxt
+
+    @staticmethod
+    def _second_pass_barred(t: float, since: float | None) -> bool:
+        d = LOCAL.local(t)
+        if not d.fold:
+            return False
+        first = LOCAL.instant(d.replace(fold=0))
+        if first >= t:
+            return False  # not a second occurrence
+        went_back = next((change for change, _ in _fall_backs(first, t)), None)
+        return since is None or went_back is None or since < went_back
 
     def describe(self) -> str:
         return self.expr
@@ -238,14 +358,14 @@ class JobScheduler:
             s = self.create(prompt, project=job["project"], backend=job.get("backend") or "local",
                             model=job["model"] or None,
                             title=f"⏰ {job['name']} · {stamp}", job_id=job["id"])
-            self.store.update_job(job["id"], last_run_at=now, last_session_id=s["id"], last_error="",
-                               **({} if manual else {"next_run_at": Cron(job["cron"]).next_after(now)}))
+            planned = {} if manual else {"next_run_at": Cron(job["cron"]).next_slot(now, job.get("created_at"))}
+            self.store.update_job(job["id"], last_run_at=now, last_session_id=s["id"], last_error="", **planned)
             log.info("job %s started session %s%s", job["id"], s["id"], " (run now)" if manual else "")
             audit["resulting_session_id"] = s["id"]
         return s["id"]
 
     def _reschedule(self, job: dict, now: float, skipped: str = "", error: str = "") -> None:
-        fields = {"next_run_at": Cron(job["cron"]).next_after(now)}
+        fields = {"next_run_at": Cron(job["cron"]).next_slot(now, job.get("created_at"))}
         if skipped:
             fields["last_skip"] = f"{time.strftime('%b %d %H:%M', time.localtime(now))}: {skipped}"
         if error:
