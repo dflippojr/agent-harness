@@ -170,9 +170,10 @@ def test_a_hosted_request_reusing_an_approved_id_is_asked_again(manager, reused)
 
     async def body():
         task = asyncio.create_task(runner._authorize_cli("s1", cli, "r1", {**reused, "tool_use_id": CALL_ID}))
-        for _ in range(500):
+        deadline = asyncio.get_running_loop().time() + scaled(10)
+        while asyncio.get_running_loop().time() < deadline:  # until it waits on an approval (its event is set up)
             pending = db.sessions.pending_approvals("s1")
-            if pending or task.done():
+            if task.done() or (pending and pending[0]["id"] in runner.approval_events):
                 break
             await asyncio.sleep(0.01)
         assert not cli.answers, f"answered on the earlier approval: {cli.answers}"
