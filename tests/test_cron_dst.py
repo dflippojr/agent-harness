@@ -88,6 +88,14 @@ def test_wildcard_job_keeps_running_through_the_second_pass(tz):
     assert Cron("*/5 * * * *").next_after(utc(2026, 11, 1, 5, 55)) == utc(2026, 11, 1, 6, 0)  # 01:55 EDT -> 01:00 EST
 
 
+def test_next_slot_skips_only_a_fixed_jobs_repeated_slot(tz):
+    tz("America/New_York")
+    ran, now = utc(2026, 11, 1, 5, 35, 4), utc(2026, 11, 1, 6, 30)  # ran 01:35 EDT, re-planned 01:30 EST
+    assert Cron("35 1 * * *").next_slot(now, ran) == utc(2026, 11, 2, 6, 35)
+    assert Cron("*/5 * * * *").next_slot(now, ran) == utc(2026, 11, 1, 6, 35)  # wildcard: 01:35 EST runs
+    assert Cron("35 1 * * *").next_slot(now, None) == utc(2026, 11, 1, 6, 35)  # never ran: 01:35 EST
+
+
 def test_spring_forward_gap_still_runs_once(tz):
     tz("America/New_York")
     # 02:30 doesn't exist on 2026-03-08; the job runs once that day, after the gap (as before #932).
@@ -130,11 +138,13 @@ def test_fixed_jobs_run_once_per_wall_clock_slot(tz, zone, expr):
     tz(zone)
     cron = Cron(expr)
     for edge in transitions():
-        runs = chain(cron, edge - 86400, edge + 86400)
+        runs = chain(cron, edge - 2 * 86400, edge + 2 * 86400)
         assert runs == sorted(set(runs)), [show(r) for r in runs]
         slots = [wall(r) for r in runs]
         assert len(slots) == len(set(slots)), f"a wall-clock slot ran twice: {[show(r) for r in runs]}"
-        assert len(runs) >= 2, [show(r) for r in runs]  # once a day, even on the day of the transition
+        days = {slot[:3] for slot in slots}
+        around = {wall(edge + k * 86400)[:3] for k in (-1, 0, 1)}
+        assert around <= days, [show(r) for r in runs]  # every day runs, the day of the transition too
 
 
 @pytest.mark.parametrize("zone", ZONES)
