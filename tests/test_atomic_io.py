@@ -47,10 +47,13 @@ def test_failed_prepare_closes_and_removes_temp(tmp_path, monkeypatch):
     def boom(path):
         raise PermissionError("acl")
 
-    with pytest.raises(PermissionError):
-        write_atomic(target, "new", private=True, prepare=boom)
-    with pytest.raises(OSError):
-        os.fstat(opened[0])  # the temp file's descriptor was closed
+    for _ in range(3):
+        with pytest.raises(PermissionError):
+            write_atomic(target, "new", private=True, prepare=boom)
+    assert len(opened) == 3
+    for fd in opened:  # every call closed its temp file's descriptor
+        with pytest.raises(OSError):
+            os.fstat(fd)
     assert target.read_text(encoding="utf-8") == "old"
     assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
 
