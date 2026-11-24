@@ -108,6 +108,28 @@ def test_next_slot_skips_a_slot_whose_first_pass_the_job_existed_for(tz):
     assert Cron("15,45 1 * * *").next_slot(utc(2026, 11, 1, 6, 0), utc(2026, 11, 1, 5, 20)) == utc(2026, 11, 1, 6, 15)
 
 
+@pytest.mark.parametrize("cron,minutes", [("45 1 * * *", [45]), ("15,45 1 * * *", [15, 45])])
+def test_creation_by_replan_grid_runs_each_slot_in_one_pass_only(tz, cron, minutes):
+    """Every creation time x every later re-plan time, 5 minutes apart, from 00:00 EDT to 03:00 EST: a job created
+    before the clocks go back (06:00 UTC) only ever gets first-pass slots; one created at or after it gets only
+    second-pass slots after its creation (vixie-cron, owner decision on #932)."""
+    tz("America/New_York")
+    fall_back = utc(2026, 11, 1, 6, 0)
+    first = [utc(2026, 11, 1, 5, m) for m in minutes]                       # 01:mm EDT
+    second = [utc(2026, 11, 1, 6, m) for m in minutes]                      # 01:mm EST
+    next_day = [utc(2026, 11, 2, 6, m) for m in minutes]                    # 01:mm EST, Nov 2
+    grid = range(int(utc(2026, 11, 1, 4, 0)), int(utc(2026, 11, 1, 8, 0)) + 1, 300)
+    bad = []
+    for created in grid:
+        allowed = first + next_day + (second if created >= fall_back else [])
+        for replan in (r for r in grid if r >= created):
+            got = Cron(cron).next_slot(replan, created)
+            want = min(slot for slot in allowed if slot > replan)
+            if got != want:
+                bad.append(f"created {show(created)}, re-planned {show(replan)}: {show(got)}, want {show(want)}")
+    assert not bad, f"{len(bad)} wrong, first: {bad[:3]}"
+
+
 def test_wildcard_second_pass_found_when_the_next_match_is_a_year_away(tz):
     tz("America/New_York")
     # From 01:55 EDT the next first-pass match is a year later (also EDT), but 01:00 EST today matches.
