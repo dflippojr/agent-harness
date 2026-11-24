@@ -475,12 +475,16 @@ class WebTools:
             self._remember(self._pages, url, entry)
             return url, entry[1], entry[2]
         final, ctype, body = await self._download(url)
-        try:  # the content type, final URL and body are the server's, and so are the converters' complaints
+        # The content type, final URL and body are the server's, and so is anything a parser says about them: every
+        # ordinary exception from the whole conversion (pypdf parses page trees lazily, say) is untrusted (#1060).
+        try:
             convert, args = _extract_text(ctype, body, final)
             title, text = await asyncio.to_thread(convert, *args)
+            text = strip_base64_images(re.sub(r"\n{3,}", "\n\n", text)).strip()
         except ToolError as e:
             raise _untrusted(str(e)) from (e.__cause__ or e)
-        text = strip_base64_images(re.sub(r"\n{3,}", "\n\n", text)).strip()
+        except Exception as e:  # noqa: BLE001 - parsers raise many kinds of errors for hostile documents
+            raise _untrusted(f"couldn't read the document: {type(e).__name__}: {e}") from e
         entry = (time.time(), title, f"(final URL: {final})\n\n{text}" if final != url else text)
         self._remember(self._pages, url, entry)
         return url, entry[1], entry[2]
