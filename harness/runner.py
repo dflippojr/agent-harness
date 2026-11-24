@@ -1727,7 +1727,7 @@ class Runner(HostedRuns):
     async def _authorize(self, s: dict, call: dict, name: str, args: dict, ws: Workspace) -> str | None:
         """Apply the policy. Returns None to proceed, or the tool result to record instead of running it."""
         sid = s["id"]
-        existing = self.db.sessions.approval_for_call(sid, call["id"])
+        existing = self.db.sessions.approval_for_exact_call(sid, call["id"], name, args)
         if existing is None:
             decision = self._decide(s, name, args)
             telemetry.annotate({"harness.policy_decision": decision.action})

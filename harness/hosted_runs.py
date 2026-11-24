@@ -589,7 +589,7 @@ class HostedRuns:
         args = obj(request, "input")
         call_id = str(request.get("tool_use_id") or request_id)
         s = self._live(sid)
-        existing = self.db.sessions.approval_for_call(sid, call_id)
+        existing = self.db.sessions.approval_for_exact_call(sid, call_id, name, args)
         if existing is None and recovered and s["status"] == "waiting_approval":
             existing = self._recovery_approval(sid, name, args)
         if existing is None:

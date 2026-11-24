@@ -26,6 +26,12 @@ from .db import (AND_APP, AND_JOIN, AND_KIND, AND_OWNER, JSON_COLUMNS, CoreStore
 from .digests import sha256_hex
 
 
+def _canonical_args(args) -> str:
+    """One text form of a call's arguments, so a call and its stored approval compare equal whatever their key order
+    (and NaN, which never equals itself as a float, still matches its own text)."""
+    return json.dumps(args, sort_keys=True)
+
+
 def _like_prefix(prefix: str) -> str:
     """`LIKE ? ESCAPE '\\'` pattern for ids that start with `prefix`, its own `%`, `_` and `\\` taken literally."""
     return prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
@@ -521,12 +527,20 @@ class SessionStore(CoreStore):
             return _row(self.conn.execute("SELECT * FROM approvals WHERE id = ?", (aid,)).fetchone())
 
     @_reads
-    def approval_for_call(self, sid: str, call_id: str) -> dict | None:
+    def approval_for_exact_call(self, sid: str, call_id: str, tool: str | tuple[str, ...], args: dict) -> dict | None:
+        """The newest approval recorded for this exact call: the same tool call id, tool and arguments (#1063). A
+        backend whose call ids come from model output can reuse an id; a reused id with another tool or other
+        arguments is a different call, so it finds nothing here and is asked anew. `tool` may name each form the
+        same tool is recorded under (a harness tool asked natively or over MCP)."""
+        tools = (tool,) if isinstance(tool, str) else tuple(tool)
+        wanted = _canonical_args(args)
         with self.lock:
-            return _row(self.conn.execute(
-                "SELECT * FROM approvals WHERE session_id = ? AND tool_call_id = ? ORDER BY created_at DESC",
-                (sid, call_id),
-            ).fetchone())
+            rows = _rows(self.conn.execute(
+                f"SELECT * FROM approvals WHERE session_id = ? AND tool_call_id = ? "
+                f"AND tool IN ({', '.join('?' * len(tools))}) ORDER BY created_at DESC, rowid DESC",
+                (sid, call_id, *tools),
+            ).fetchall())
+        return next((row for row in rows if _canonical_args(row["args"]) == wanted), None)
 
     @_reads
     def pending_approvals(self, sid: str | None = None, user_id: str | None = None) -> list[dict]:

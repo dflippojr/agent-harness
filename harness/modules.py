@@ -112,6 +112,7 @@ _PUBLIC = {
     "untrusted_banner": ("harness.taint", "banner"),
     "scoped_store": ("harness.app_stores", "scoped"),
     "TOOLS_ONLY": ("harness.policy", "TOOLS_ONLY"),
+    "harness_tool_names": ("harness.policy", "harness_tool_names"),
     "frozen_app_defaults": ("harness.settings", "frozen_app_defaults"),
     "use_live_app_settings": ("harness.settings", "use_live_app_settings"),
     "ToolError": ("harness.fileops", "ToolError"),
