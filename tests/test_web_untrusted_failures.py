@@ -153,3 +153,21 @@ def test_a_failed_fetch_with_server_text_over_mcp_is_marked_and_taints_a_hosted_
         assert [t["origin"] for t in m.db.sessions.get_session(sid)["taint"]] == ["evil.example"]
         await m.stop()
     asyncio.run(body())
+
+
+def test_server_chosen_failure_text_is_cut_and_a_broken_document_keeps_its_cause():
+    long_type = "application/x-" + "a" * 5000
+
+    def server(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/long":
+            return httpx.Response(200, headers={"content-type": long_type}, content=b"\x00")
+        return httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF-broken")
+
+    web = WebTools(WebConfig(enabled=True), resolver=_resolve, transport=httpx.MockTransport(server))
+    with pytest.raises(ToolError) as caught:
+        asyncio.run(web.web_fetch("https://evil.example/long"))
+    assert len(str(caught.value)) <= 300 and getattr(caught.value, "banner", None) == UNTRUSTED
+    with pytest.raises(ToolError, match="couldn't open the PDF") as caught:
+        asyncio.run(web.web_fetch("https://evil.example/doc.pdf"))
+    assert getattr(caught.value, "banner", None) == UNTRUSTED
+    assert caught.value.__cause__ is not None and not isinstance(caught.value.__cause__, ToolError)

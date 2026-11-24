@@ -1,8 +1,9 @@
 """Session taint: once a session has read untrusted content, risky actions that a rule would allow are asked about.
 
 The record is a capped JSON list of {kind, origin, first_seen} on the session row, deduplicated by origin. It is only
-cleared by the owner's explicit action. Known v1 gaps: web_fetch to an arbitrary URL and network-less commands stay as
-the policy decides; Chat sessions and app context are not tracked.
+cleared by the owner's explicit action. A web_fetch failure that carries the server's text taints like a page (#1060).
+Known v1 gaps: web_fetch to an arbitrary URL and network-less commands stay as the policy decides; Chat sessions and
+app context are not tracked.
 """
 from __future__ import annotations
 
@@ -45,7 +46,8 @@ def context_banner(name: str, *, mcp_client: bool = False, tainted: bool = False
 
 
 def source_for(name: str, args: dict, *, mcp_client: bool = False) -> tuple[str, str] | None:
-    """(kind, origin) when a successful call to this tool brings untrusted content into the session."""
+    """(kind, origin) when a successful call to this tool brings untrusted content into the session, as does a failed
+    one whose error carries remote text (an UntrustedToolError, #1060)."""
     if mcp_client or is_mcp_tool(name):
         return "mcp", name
     if name in WEB_FETCH_TOOLS:
