@@ -28,11 +28,15 @@ SCRATCH_GLOBS = ["/tmp", "/tmp/*", "scratch", "scratch/*", "*__pycache__*", "*.p
 DEFAULT_RULES: list[dict] = [
     {"tool": ["run_shell", "Bash", "exec_command"], "network": True, "action": ASK,
      "reason": "command needs network access"},
-    {"tool": ["run_shell", "Bash", "exec_command"], "args": {"command": r"\bgit\s+push\b"}, "action": ASK,
+    {"tool": ["run_shell", "Bash", "exec_command"], "shell": "git_push", "action": ASK,
      "reason": "git push"},
     {"tool": ["run_shell", "Bash", "exec_command"],
-     "args": {"command": r"\bgit\s+(reset\s+--hard|clean\s+-\w*f)"}, "action": ASK,
+     "shell": "git_discard", "action": ASK,
      "reason": "discards uncommitted work"},
+    {"tool": ["run_shell", "Bash", "exec_command"], "shell": "delete", "action": ASK,
+     "reason": "deletes files outside the scratch area"},
+    {"tool": ["run_shell", "Bash", "exec_command"], "shell": "opaque", "action": ASK,
+     "reason": "cannot determine what the shell command does"},
     # Claude Code reads stay in /workspace (#370): the shared login volume holds every Claude session's history.
     {"tool": "Read", "workspace_read": "file_path", "action": ALLOW},
     {"tool": ["Glob", "Grep", "LS"], "workspace_read": "path", "action": ALLOW},
@@ -55,7 +59,7 @@ DEFAULT_RULES: list[dict] = [
 
 # Added for projects with a repo: the daemon publishes the session branch, the user reviews and merges it.
 REPO_RULES: list[dict] = [
-    {"tool": ["run_shell", "Bash", "exec_command"], "args": {"command": r"\bgit\s+push\b"}, "action": DENY,
+    {"tool": ["run_shell", "Bash", "exec_command"], "shell": "git_push", "action": DENY,
      "reason": "the session branch is published by the harness; the user merges or pushes it from the review screen"},
 ]
 
@@ -186,10 +190,13 @@ def _tool_matches(rule: dict, name: str) -> bool:
     return "*" in tools or bool(aliases.intersection(tools))
 
 
-def _matches(rule: dict, name: str, args: dict, root: Path | None = None) -> bool:
+def _matches(rule: dict, name: str, args: dict, root: Path | None = None,
+             shell: _ShellAnalysis | None = None) -> bool:
     if not _tool_matches(rule, name):
         return False
     if "network" in rule and bool(args.get("network", False)) != bool(rule["network"]):
+        return False
+    if "shell" in rule and (shell is None or not getattr(shell, rule["shell"])):
         return False
     for key, pattern in (rule.get("args") or {}).items():
         if not re.search(pattern, str(args.get(key, ""))):
@@ -205,35 +212,235 @@ def _matches(rule: dict, name: str, args: dict, root: Path | None = None) -> boo
     return True
 
 
-_SPLIT = re.compile(r"&&|\|\||[;|\n&]")
 _DELETERS = {"rm", "rmdir", "unlink", "shred"}
 
 
-def _delete_outside_scratch(command: str) -> bool:
-    """True if the command may delete something outside the scratch area (or we can't tell)."""
-    if re.search(r"\bfind\b[^;&|]*\s-delete\b", command) or re.search(r"\bfind\b[^;&|]*-exec\s+rm\b", command):
-        return True
-    words = re.findall(r"(?:^|[\s;&|(`$])(rm|rmdir|unlink|shred)\s", command)
-    if not words:
-        return False
-    if re.search(r"\bcd\b|\$|`|\*", command.replace("*.pyc", "")):
-        return True  # relative targets depend on cwd or expansion we can't evaluate
-    return any(_part_deletes_outside_scratch(part) for part in _SPLIT.split(command))
+@dataclass
+class _ShellAnalysis:
+    git_push: bool = False
+    git_discard: bool = False
+    delete: bool = False
+    opaque: bool = False
 
 
-def _part_deletes_outside_scratch(part: str) -> bool:
+# Only skip options whose arity we know. Guessing where a wrapper's command starts
+# could turn an unrecognized invocation into an allow. Unknown options ask instead.
+_WRAPPER_OPTIONS = {
+    "command": ({"-p"}, set()),
+    "exec": ({"-c", "-l"}, {"-a"}),
+    "env": ({"-i", "--ignore-environment", "-0", "--null"}, {"-u", "--unset", "-C", "--chdir"}),
+    "sudo": ({"-E", "-H", "-n", "-S", "-k", "-b", "--non-interactive", "--preserve-env"},
+             {"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "--close-from",
+              "-D", "--chdir", "-R", "--chroot"}),
+    "timeout": ({"--foreground", "--preserve-status", "-v", "--verbose"},
+                {"-s", "--signal", "-k", "--kill-after"}),
+    "nice": (set(), {"-n", "--adjustment"}),
+    "nohup": (set(), set()),
+    "time": ({"-p", "-a", "--append", "-v", "--verbose"}, {"-f", "--format", "-o", "--output"}),
+    "builtin": (set(), set()),
+    "stdbuf": (set(), {"-i", "--input", "-o", "--output", "-e", "--error"}),
+    "xargs": ({"-0", "--null", "-r", "--no-run-if-empty", "-t", "--verbose", "-p", "--interactive", "-x"},
+              {"-n", "--max-args", "-P", "--max-procs", "-s", "--max-chars", "-d", "--delimiter",
+               "-I", "--replace", "-L", "--max-lines", "-E", "--eof"}),
+}
+_GIT_FLAGS = {"-p", "--paginate", "-P", "--no-pager", "--bare", "--no-replace-objects", "--no-lazy-fetch",
+              "--no-optional-locks", "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
+              "--icase-pathspecs", "--no-advice"}
+_GIT_VALUES = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path",
+               "--super-prefix", "--attr-source"}
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
+_SHELL_PUNCTUATION = re.compile(r"&&|\|\||&>>?|[<>]&|<<-?|>>|[;&|()<>\n]")
+_INLINE_CODE_FLAGS = {"python": {"-c"}, "python3": {"-c"}, "perl": {"-e", "-E"}, "ruby": {"-e"},
+                      "node": {"-e", "--eval", "-p", "--print"}}
+
+
+def _after_options(argv: list[str], flags: set[str], values: set[str]) -> int | None:
+    i = 1
+    while i < len(argv) and argv[i].startswith("-"):
+        word = argv[i]
+        if word == "--":
+            return i + 1
+        if word in flags:
+            i += 1
+        elif word in values:
+            if i + 1 == len(argv):
+                return None
+            i += 2
+        elif (word.startswith("--") and "=" in word and word.split("=", 1)[0] in values
+              or not word.startswith("--") and word[:2] in values and len(word) > 2):
+            i += 1
+        else:
+            return None
+    return i
+
+
+def _analyze_shell(command: str, result: _ShellAnalysis, changed_cwd: bool = False, depth: int = 0) -> None:
+    """Inspect literal shell commands without executing or expanding any input.
+
+    Groups and command lists share this path with nested shells and wrappers. This is
+    deliberately a bounded heuristic, not a shell interpreter; unsupported execution
+    syntax asks. Keep collecting known hazards even when another part is opaque.
+    """
+    if depth > 20:
+        result.opaque = True
+        return
     try:
-        tokens = shlex.split(part)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        lexer.commenters = ""  # A mid-word # is literal in a shell; never hide a following command.
+        tokens = []
+        for token in lexer:
+            # shlex joins adjacent punctuation, including `((` and `);`. A group
+            # closing beside a separator must not hide the next executable.
+            tokens.extend(_SHELL_PUNCTUATION.findall(token) if token and all(
+                c in ";&|()<>\n" for c in token) else [token])
     except ValueError:
-        return True
-    while tokens and tokens[0] in ("sudo", "command", "exec", "xargs"):
-        tokens = tokens[1:]
-    if not tokens or tokens[0] not in _DELETERS:
-        return False
-    targets = [t for t in tokens[1:] if not t.startswith("-")]
-    if not targets:
-        return True
-    return any(_target_outside_scratch(target) for target in targets)
+        result.opaque = True
+        return
+    if "$(" in command or "`" in command:
+        result.opaque = True
+    changed_cwd = changed_cwd or any(posixpath.basename(t) in {"cd", "pushd", "popd"} for t in tokens)
+    part: list[str] = []
+    for token in tokens + [";"]:
+        if token in {";", "&&", "||", "|", "&", "(", ")", "{", "}", "\n"}:
+            if part:
+                _analyze_argv(part, result, changed_cwd, depth)
+                part = []
+        else:
+            part.append(token)
+
+
+def _analyze_argv(argv: list[str], result: _ShellAnalysis, changed_cwd: bool, depth: int) -> None:
+    # Redirects may precede an executable. Remove literal file redirects before
+    # unwrapping, while refusing heredocs and descriptor tricks we cannot resolve.
+    words = []
+    i = 0
+    while i < len(argv):
+        word = argv[i]
+        if word in {"<", ">", ">>", "<&", ">&", "&>", "&>>"}:
+            if words and words[-1].isdigit():
+                words.pop()
+            if i + 1 == len(argv):
+                result.opaque = True
+                return
+            i += 2
+            continue
+        if word.startswith("<<"):
+            result.opaque = True
+        words.append(word)
+        i += 1
+    argv = words
+    for _ in range(21 - depth):
+        while argv and (_ASSIGNMENT.match(argv[0]) or argv[0] in {"!", "if", "then", "elif", "else", "do",
+                                                                 "while", "until"}):
+            argv = argv[1:]
+        if not argv:
+            return
+        name = posixpath.basename(argv[0])
+        if any(c in argv[0] for c in "$`*?[{}"):
+            result.opaque = True
+            return
+        if name in {"sh", "bash", "dash", "zsh", "ksh", "ash"}:
+            _analyze_shell_script(argv, result, changed_cwd, depth)
+            return
+        if name == "eval":
+            _analyze_shell(" ".join(argv[1:]), result, changed_cwd, depth + 1)
+            return
+        if name in {"source", "."}:
+            result.opaque = True
+            return
+        if name in _INLINE_CODE_FLAGS:
+            for word in argv[1:]:
+                if not word.startswith("-") or word in {"-m", "--"}:
+                    break  # module/script arguments are not interpreter options
+                if any(word == flag or word.startswith(flag + "=") or len(flag) == 2 and word.startswith(flag)
+                       for flag in _INLINE_CODE_FLAGS[name]):
+                    result.opaque = True
+                    return
+        if name not in _WRAPPER_OPTIONS:
+            break
+        if name == "command" and len(argv) > 1 and argv[1] in {"-v", "-V"}:
+            return  # describes the command, does not execute it
+        if name == "env" and len(argv) > 2 and argv[1] in {"-S", "--split-string"}:
+            _analyze_shell(argv[2] + " " + shlex.join(argv[3:]), result, changed_cwd, depth + 1)
+            return
+        if name == "xargs":
+            result.opaque = True  # stdin can supply commands, extra targets or replacement text
+        flags, values = _WRAPPER_OPTIONS[name]
+        start = _after_options(argv, flags, values)
+        if start is None:
+            result.opaque = True
+            return
+        changed_cwd = changed_cwd or name == "sudo" or name == "env" and any(
+            t == "-C" or t.startswith(("-C", "--chdir")) for t in argv[1:start])
+        if name == "timeout":
+            start += 1  # duration precedes the command
+        argv = argv[start:]
+        if not argv:
+            result.opaque = True
+            return
+    else:
+        result.opaque = True
+        return
+    if name == "git":
+        start = _after_options(argv, _GIT_FLAGS, _GIT_VALUES)
+        if start is None:
+            result.opaque = True
+            return
+        args = argv[start:]
+        if args:
+            result.git_push |= args[0] == "push"
+            # Stop at --: a path named --hard or -f is not an option.
+            options = args[1:args.index("--")] if "--" in args else args[1:]
+            result.git_discard |= (args[0] == "reset" and "--hard" in options or args[0] == "clean" and any(
+                t == "--force" or t.startswith("-") and not t.startswith("--") and "f" in t for t in options))
+            result.opaque |= any(c in args[0] for c in "$`*?[{}")
+    elif name in _DELETERS:
+        end = argv.index("--") if "--" in argv else len(argv)
+        targets = [t for t in argv[1:end] if not t.startswith("-")] + argv[end + 1:]
+        result.delete |= (changed_cwd or not targets or any(
+            _target_outside_scratch(t) or any(c in t.replace("*.pyc", "") for c in "$`*?[") for t in targets))
+    elif name == "find":
+        result.delete |= "-delete" in argv
+        for i, word in enumerate(argv):
+            if word in {"-exec", "-execdir", "-ok", "-okdir"}:
+                child = argv[i + 1:]
+                end = next((j for j, t in enumerate(child) if t in {";", "+"}), len(child))
+                if child[:end] and "{}" not in child[0]:
+                    _analyze_argv(child[:end], result, changed_cwd or word.endswith("dir"), depth + 1)
+                else:
+                    result.opaque = True
+
+
+def _analyze_shell_script(argv: list[str], result: _ShellAnalysis, changed_cwd: bool, depth: int) -> None:
+    i = 1
+    while i < len(argv):
+        word = argv[i]
+        if word in {"-o", "-O", "--rcfile", "--init-file"}:
+            # Startup files can execute additional commands.
+            result.opaque = True
+            i += 2
+            continue
+        if word in {"--noprofile", "--norc", "--posix", "--login"}:
+            i += 1
+            continue
+        if word.startswith("-") and not word.startswith("--") and "c" in word:
+            if i + 1 < len(argv):
+                _analyze_shell(argv[i + 1], result, changed_cwd, depth + 1)
+                return
+            break
+        if not word.startswith("-") or word == "--":
+            break
+        i += 1
+    result.opaque = True  # stdin, a script file or an unrecognized shell invocation
+
+
+def _delete_outside_scratch(command: str) -> bool:
+    """The shared conservative deletion check used by smart approval eligibility."""
+    result = _ShellAnalysis()
+    _analyze_shell(command, result)
+    return result.delete or result.opaque
 
 
 def _target_outside_scratch(target: str) -> bool:
@@ -297,14 +504,16 @@ class Policy:
             return decision
         if name in ALWAYS_ASK:
             return Decision(ASK, ALWAYS_ASK[name])
-        if name in ("run_shell", "Bash", "exec_command") and _delete_outside_scratch(args.get("command", "")):
-            return Decision(ASK, "deletes files outside the scratch area")
         return Decision(ASK, "owner-configured MCP tool requires approval") if client else Decision(ALLOW)
 
     def _rule_decision(self, name: str, args: dict, alias: str) -> Decision | None:
+        shell = None
+        if name in ("run_shell", "Bash", "exec_command"):
+            shell = _ShellAnalysis()
+            _analyze_shell(str(args.get("command", "")), shell)
         for rule in self.rules:
             root = self.workspace_root
-            if _matches(rule, name, args, root) or (alias and _matches(rule, alias, args, root)):
+            if _matches(rule, name, args, root, shell) or (alias and _matches(rule, alias, args, root, shell)):
                 if name in ALWAYS_ASK and rule["action"] != DENY:
                     break
                 return Decision(rule["action"], rule.get("reason", ""),

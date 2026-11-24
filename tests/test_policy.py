@@ -61,6 +61,7 @@ def test_decision_table(rules, repo, tool, args, action, reason):
 # classified, never executed. The cross product checks the invariant across tool aliases too.
 DESTRUCTIVE_SHELL = [
     ("rm", "rm -rf src", "rm src -fr"),
+    ("rm-long", "rm -rf src", "rm --recursive src --force"),
     ("rmdir", "rmdir src", "rmdir --parents src"),
     ("unlink", "unlink notes.md", "unlink -- notes.md"),
     ("shred", "shred -u notes.md", "shred --remove notes.md"),
@@ -80,11 +81,15 @@ SHELL_SPELLINGS = [
     ("timeout", "timeout --signal=TERM 10 {cmd}"),
     ("nice", "nice -n 5 {cmd}"),
     ("nohup", "nohup {cmd}"),
+    ("time", "time -p {cmd}"),
     ("stdbuf", "stdbuf -oL {cmd}"),
     ("nested-shell", "sh -c {quoted}"),
     ("login-shell", "/bin/bash -lc {quoted}"),
     ("subshell", "({cmd})"),
     ("brace-group", "{{ {cmd}; }}"),
+    ("nested-groups", "(( {cmd} ); echo done)"),
+    ("group-list", "(echo ready);({cmd})"),
+    ("redirect", ">/tmp/policy-output {cmd} 2>&1"),
     ("path", "/usr/bin/{cmd}"),
     ("flags", "{flags}"),
     ("working-directory", "cd sub && {cmd}"),
@@ -123,6 +128,8 @@ def test_repo_push_with_global_git_options(tool, options):
     "xargs -I{} {}", "sh script.sh", "bash -c \"$COMMAND\"", "sh -s", "eval \"$COMMAND\"",
     "env -S '$COMMAND'", "command \"$COMMAND\"", "exec \"$COMMAND\"", "git --unknown-option payload",
     "sh -c 'unterminated", "env", "sudo", "timeout 10", "rm", "rm --files0-from=list",
+    "python -c 'import os'", "env node --eval 'process.exit()'", "find . -exec {} +",
+    "sh <<EOF\n$COMMAND\nEOF", "find . -exec sh -c '{}' +",
 ])
 @pytest.mark.parametrize("tool", ["run_shell", "exec_command"])
 def test_opaque_shell_commands_ask(command, tool):
@@ -138,8 +145,39 @@ def test_opaque_shell_commands_ask(command, tool):
     "rm -rf __pycache__ .pytest_cache", "rm -f /tmp/out.txt", "rm -f build/out.txt dist/out.whl",
     "command -- ls", "env LC_ALL=C git status", "timeout 10 pytest -q", "sh -c 'git status'",
     "(git status)", "{ git status; }", "echo ready && python -m build", "python -m build >build.log",
+    "pytest -q 2>&1", "python -m build &>build.log", "find . -name '*.py' -exec cat {} +",
+    "echo '$HOME'", "printf '%s' 'rm -rf src'", "git diff -- --hard", "git reset --soft HEAD -- --hard",
+    "python -m pytest -p no:xdist", "python -m pytest -c pytest.ini",
 ])
 @pytest.mark.parametrize("repo", [False, True])
 @pytest.mark.parametrize("tool", ["run_shell", "exec_command"])
 def test_harmless_shell_ratings_unchanged(command, repo, tool):
     assert Policy(repo=repo).decide(tool, {"command": command}).action == ALLOW
+
+
+@pytest.mark.parametrize("command", [
+    "rm -- /tmp/policy-output -src", "rm -f /tmp/*", "cd sub; rm -f build/out.txt",
+    "env -C sub rm -f build/out.txt", "xargs rm -f /tmp/policy-output",
+])
+def test_scratch_exemptions_require_known_targets_and_directory(command):
+    assert Policy().decide("exec_command", {"command": command}).action == ASK
+
+
+@pytest.mark.parametrize("command", [
+    "eval 'git -C sub push origin HEAD'", "builtin eval 'git -C sub push origin HEAD'",
+    "find . -exec git -C sub push origin HEAD +", "if true; then git -C sub push; fi",
+    "echo ready\ngit -C sub push", "env -S 'git -C sub push origin HEAD'",
+])
+def test_repo_push_in_other_execution_contexts(command):
+    assert Policy(repo=True).decide("exec_command", {"command": command}).action == DENY
+
+
+def test_nested_shell_analysis_is_bounded_and_asks():
+    for prefix in ("eval ", "command -- "):
+        command = prefix * 25 + "git status"
+        assert Policy().decide("exec_command", {"command": command}).action == ASK
+
+
+def test_explicit_project_shell_rules_keep_precedence():
+    assert Policy(NO_SHELL).decide("exec_command", {"command": "env ls"}).action == DENY
+    assert Policy(ALLOW_ALL).decide("exec_command", {"command": "rm src"}).action == ALLOW
