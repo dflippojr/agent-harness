@@ -376,7 +376,7 @@ def test_sdk_pair_keeps_the_minted_app_and_its_catalog_app_id():
         paired.close()
 
 
-@pytest.mark.parametrize("error", [httpx.ReadError, httpx.ConnectTimeout, httpx.RemoteProtocolError])
+@pytest.mark.parametrize("error", [httpx.ReadError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.RemoteProtocolError])
 def test_events_reconnect_after_a_dropped_connection(monkeypatch, error):
     calls = []
 

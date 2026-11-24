@@ -23,7 +23,7 @@ git branch for you to review and merge.
 
 | Stack | Scale | Quality gates |
 | --- | --- | --- |
-| Python 3.12 · FastAPI · SQLite · Docker · llama.cpp · vanilla JS PWA | ~60K lines · 5,300+ tests in 196 files | CI on every PR · SonarCloud coverage gate · AI code review · fail-closed deploys |
+| Python 3.12 · FastAPI · SQLite · Docker · llama.cpp · vanilla JS PWA | ~60K lines · 6,700+ tests in 224 files | CI on every PR · SonarCloud coverage gate · AI code review · fail-closed deploys |
 
 ---
 
