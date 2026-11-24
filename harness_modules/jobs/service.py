@@ -89,9 +89,44 @@ def _value(text: str, lo: int, hi: int, names: dict | None) -> int:
     return n
 
 
+class LocalClock:
+    """The tower's local time zone (the process's TZ): the zone job schedules are written in."""
+
+    def local(self, t: float) -> datetime:
+        """Naive local wall-clock time of t; `fold=1` in the second pass of a repeated hour."""
+        return datetime.fromtimestamp(t)
+
+    def instant(self, d: datetime) -> float:
+        """Timestamp of naive local wall-clock time d, honouring `fold` (PEP 495)."""
+        return d.timestamp()
+
+    def offset(self, t: float) -> float:
+        return time.localtime(t).tm_gmtoff
+
+
+class ZoneClock(LocalClock):
+    """A named zone instead of the process's TZ (tests pin one this way on every OS)."""
+
+    def __init__(self, zone):
+        self.zone = zone
+
+    def local(self, t: float) -> datetime:
+        return datetime.fromtimestamp(t, self.zone).replace(tzinfo=None)  # keeps fold
+
+    def instant(self, d: datetime) -> float:
+        return d.replace(tzinfo=self.zone).timestamp()
+
+    def offset(self, t: float) -> float:
+        offset = datetime.fromtimestamp(t, self.zone).utcoffset()
+        return offset.total_seconds() if offset else 0.0
+
+
+LOCAL = LocalClock()  # read at call time, so a test can swap in a ZoneClock
+
+
 def _wall_minute(t: float) -> tuple:
-    lt = time.localtime(t)
-    return lt.tm_year, lt.tm_mon, lt.tm_mday, lt.tm_hour, lt.tm_min
+    d = LOCAL.local(t)
+    return d.year, d.month, d.day, d.hour, d.minute
 
 
 def _fall_backs(start: float, end: float):
@@ -99,12 +134,12 @@ def _fall_backs(start: float, end: float):
     t = start
     while t < end:
         step = min(3600.0, end - t)
-        drop = time.localtime(t).tm_gmtoff - time.localtime(t + step).tm_gmtoff
+        drop = LOCAL.offset(t) - LOCAL.offset(t + step)
         if drop > 0:
             lo, hi = t, t + step  # the offset changes in (lo, hi]: narrow it to the minute
             while hi - lo > 60:
                 mid = lo + (hi - lo) // 120 * 60
-                lo, hi = (mid, hi) if time.localtime(mid).tm_gmtoff == time.localtime(lo).tm_gmtoff else (lo, mid)
+                lo, hi = (mid, hi) if LOCAL.offset(mid) == LOCAL.offset(lo) else (lo, mid)
             yield int(hi) // 60 * 60, drop
         t += step
 
@@ -164,10 +199,10 @@ class Cron:
         clocks skip runs at the same offset past the jump (02:30 -> 03:30), as before.
         """
         # Naive datetimes lose `fold` on any arithmetic, so walk the wall clock and pick the occurrence explicitly.
-        d = datetime.fromtimestamp(t).replace(second=0, microsecond=0, fold=0) + timedelta(minutes=1)
+        d = LOCAL.local(t).replace(second=0, microsecond=0, fold=0) + timedelta(minutes=1)
         while True:
             d = self._next_wall(d)
-            first, second = d.timestamp(), d.replace(fold=1).timestamp()  # equal unless d is repeated or skipped
+            first, second = LOCAL.instant(d), LOCAL.instant(d.replace(fold=1))  # equal unless repeated or skipped
             found = None
             if second > first:  # repeated: the first occurrence, or the second if t is past the first
                 if first > t:
@@ -189,7 +224,7 @@ class Cron:
         for change, repeat in _fall_backs(t, found):
             m = change
             while m < min(change + repeat, found):
-                d = datetime.fromtimestamp(m)
+                d = LOCAL.local(m)
                 if m > t and d.fold and self._matches(d):
                     return float(m)
                 m += 60

@@ -1,4 +1,4 @@
-"""Cron schedules across daylight-saving changes (#932), with TZ pinned to zones that change their clocks.
+"""Cron schedules across daylight-saving changes (#932), with local time pinned to zones that change their clocks.
 
 Job times are local wall-clock times. When clocks fall back, an hour of wall-clock times happens twice; when they
 spring forward, an hour never happens. `next_after(t)` must still always land strictly after `t`, and a fixed-time
@@ -11,31 +11,38 @@ The grid tests are the class-level check: every minute around every 2026 transit
 """
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
 
 from harness.api import create_app
+from harness_modules.jobs import service
 from harness_modules.jobs.service import Cron, JobScheduler
 from harness_modules.jobs.store import JobStore
 from test_module_jobs import jobs_manager
 
-pytestmark = pytest.mark.skipif(not hasattr(time, "tzset"), reason="TZ pinning needs time.tzset (not on Windows)")
-
 ZONES = ["America/New_York", "Europe/London", "Australia/Lord_Howe"]  # Lord Howe shifts by 30 minutes
 WILDCARD = ["*/5 * * * *", "0 * * * *", "*/5 1 * * *"]
 FIXED = ["45 1 * * *", "30 2 * * *", "50 1 * * *", "15 1,2 * * *"]
+# Every test runs with the zone pinned through zoneinfo (any OS), and also through the process's TZ, the path the
+# daemon uses, where the OS lets a process change its zone (time.tzset: not on Windows).
+CLOCKS = ["zoneinfo"] + (["TZ"] if hasattr(time, "tzset") else [])
 
 
-@pytest.fixture
-def tz(monkeypatch):
-    """Pin the process's local time zone; restore it afterwards so later tests on this worker are unaffected."""
+@pytest.fixture(params=CLOCKS)
+def tz(request, monkeypatch):
+    """Pin local time to a zone; restore it afterwards so later tests on this worker are unaffected."""
     def pin(zone: str) -> None:
-        monkeypatch.setenv("TZ", zone)
-        time.tzset()
+        if request.param == "TZ":
+            monkeypatch.setenv("TZ", zone)
+            time.tzset()
+        else:
+            monkeypatch.setattr(service, "LOCAL", service.ZoneClock(ZoneInfo(zone)))
     yield pin
     monkeypatch.undo()
-    time.tzset()
+    if request.param == "TZ":
+        time.tzset()
 
 
 def utc(*parts) -> float:
@@ -43,27 +50,28 @@ def utc(*parts) -> float:
 
 
 def show(t: float) -> str:
-    return f"{datetime.fromtimestamp(t, timezone.utc):%Y-%m-%d %H:%M} UTC ({time.strftime('%H:%M %Z', time.localtime(t))})"
+    return f"{datetime.fromtimestamp(t, timezone.utc):%Y-%m-%d %H:%M} UTC ({service.LOCAL.local(t):%H:%M} local)"
 
 
 def transitions(year: int = 2026) -> list[float]:
     """The instants in `year` at which the local UTC offset changes (to the minute)."""
+    offset = service.LOCAL.offset
     found, t = [], utc(year, 1, 1)
     end = utc(year + 1, 1, 1)
     while t < end:
-        if time.localtime(t).tm_gmtoff != time.localtime(t + 3600).tm_gmtoff:
+        if offset(t) != offset(t + 3600):
             lo, hi = t, t + 3600  # offset differs between lo and hi: narrow to the minute
             while hi - lo > 60:
                 mid = lo + (hi - lo) // 120 * 60
-                lo, hi = (mid, hi) if time.localtime(mid).tm_gmtoff == time.localtime(lo).tm_gmtoff else (lo, mid)
+                lo, hi = (mid, hi) if offset(mid) == offset(lo) else (lo, mid)
             found.append(hi)
         t += 3600
     return found
 
 
 def wall(t: float) -> tuple:
-    lt = time.localtime(t)
-    return lt.tm_year, lt.tm_mon, lt.tm_mday, lt.tm_hour, lt.tm_min
+    d = service.LOCAL.local(t)
+    return d.year, d.month, d.day, d.hour, d.minute
 
 
 # --- the issue's examples -----------------------------------------------------------------------------------------
@@ -169,7 +177,7 @@ def test_wildcard_jobs_match_every_real_minute_once(tz, zone, expr):
     for edge in transitions():
         start, end = edge - 3 * 3600, edge + 3 * 3600
         expected = [m for m in range(int(start) + 60, int(end), 60)
-                    if (lambda lt: lt.tm_min in cron.minutes and lt.tm_hour in cron.hours)(time.localtime(m))]
+                    if wall(m)[4] in cron.minutes and wall(m)[3] in cron.hours]
         assert chain(cron, start, end) == expected
 
 
