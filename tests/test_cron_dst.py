@@ -96,16 +96,17 @@ def test_wildcard_job_keeps_running_through_the_second_pass(tz):
     assert Cron("*/5 * * * *").next_after(utc(2026, 11, 1, 5, 55)) == utc(2026, 11, 1, 6, 0)  # 01:55 EDT -> 01:00 EST
 
 
-def test_next_slot_skips_a_slot_whose_first_pass_the_job_existed_for(tz):
+def test_next_slot_gives_the_second_pass_only_to_jobs_created_in_it(tz):
     tz("America/New_York")
     now = utc(2026, 11, 1, 6, 30)  # re-planned at 01:30 EST
-    old, late = utc(2026, 10, 1), utc(2026, 11, 1, 5, 50)  # created a month ago / after 01:35 EDT had passed
+    old, late = utc(2026, 10, 1), utc(2026, 11, 1, 5, 50)  # created a month ago / at 01:50 EDT
     assert Cron("35 1 * * *").next_slot(now, old) == utc(2026, 11, 2, 6, 35)
     assert Cron("35 1 * * *").next_slot(now, None) == utc(2026, 11, 2, 6, 35)
     assert Cron("*/5 * * * *").next_slot(now, old) == utc(2026, 11, 1, 6, 35)  # wildcard: 01:35 EST runs
-    assert Cron("35 1 * * *").next_slot(now, late) == utc(2026, 11, 1, 6, 35)  # missed 01:35 EDT: 01:35 EST
+    # Created after 01:35 EDT but before the clocks went back: it existed before the second pass, so no 01:35 EST.
+    assert Cron("35 1 * * *").next_slot(now, late) == utc(2026, 11, 2, 6, 35)
+    assert Cron("35 1 * * *").next_slot(now, utc(2026, 11, 1, 6, 10)) == utc(2026, 11, 1, 6, 35)  # created 01:10 EST
     assert Cron("15,45 1 * * *").next_slot(utc(2026, 11, 1, 6, 0), old) == utc(2026, 11, 2, 6, 15)
-    assert Cron("15,45 1 * * *").next_slot(utc(2026, 11, 1, 6, 0), utc(2026, 11, 1, 5, 20)) == utc(2026, 11, 1, 6, 15)
 
 
 @pytest.mark.parametrize("cron,minutes", [("45 1 * * *", [45]), ("15,45 1 * * *", [15, 45])])

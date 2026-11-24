@@ -226,22 +226,25 @@ class Cron:
         return found
 
     def next_slot(self, now: float, since: float | None) -> float:
-        """next_after(now) for a job that has existed since `since` (its created_at; None: always). A fixed-time job
-        never runs the second pass of a repeated wall-clock minute whose first pass it already existed for: it ran
-        then, or that slot was skipped. Re-planning it in the second pass (an edit, a late or skipped slot) must not
-        run that slot again; a job created after the first pass still gets the second (#932)."""
+        """next_after(now) for a job created at `since` (its created_at; None: long ago). Every re-plan goes through
+        here. A fixed-time job takes the second occurrence of a repeated wall-clock minute only if it was created
+        during that second pass, at or after the instant the clocks went back (vixie-cron, owner decision on #932). A
+        job that existed before it had the first pass: it ran then, or the slot was skipped."""
         nxt = self.next_after(now)
-        while not self.wildcard and self._first_pass_seen(nxt, since):
+        while not self.wildcard and self._second_pass_barred(nxt, since):
             nxt = self.next_after(nxt)
         return nxt
 
     @staticmethod
-    def _first_pass_seen(t: float, since: float | None) -> bool:
+    def _second_pass_barred(t: float, since: float | None) -> bool:
         d = LOCAL.local(t)
         if not d.fold:
             return False
         first = LOCAL.instant(d.replace(fold=0))
-        return first < t and (since is None or since <= first)
+        if first >= t:
+            return False  # not a second occurrence
+        went_back = next((change for change, _ in _fall_backs(first, t)), None)
+        return since is None or went_back is None or since < went_back
 
     def describe(self) -> str:
         return self.expr
