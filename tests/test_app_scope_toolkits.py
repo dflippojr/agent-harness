@@ -40,7 +40,7 @@ def _app(client, scopes):
 def _session_tools(client, manager, h, project="lab"):
     created = client.post("/api/v1/sessions", headers=h, json={"prompt": "hello", "project": project})
     assert created.status_code == 201, created.text
-    s = manager.db.get_session(created.json()["id"])
+    s = manager.db.sessions.get_session(created.json()["id"])
     daemon = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
     workspace = {t["function"]["name"] for t in manager.runner.workspace(s).schemas()}
     return s["context"][0]["content"], daemon, workspace
@@ -103,7 +103,7 @@ def test_owner_sessions_keep_memory_and_homelab(tmp_path):
     with client:
         created = client.post("/sessions", json={"prompt": "owner hello", "project": "lab"})
         assert created.status_code == 201, created.text
-        s = manager.db.get_session(created.json()["id"])
+        s = manager.db.sessions.get_session(created.json()["id"])
         assert MEMORY_TOOLS <= {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
         assert "restart_service" in {t["function"]["name"] for t in manager.runner.workspace(s).schemas()}
 
@@ -249,7 +249,7 @@ def test_erase_continues_when_the_local_branch_cannot_be_deleted(tmp_path, monke
             raise projects.GitError("locked")
         monkeypatch.setattr(projects, "discard", fail)
         assert await m.erase_session(s["id"])
-        assert m.db.get_session(s["id"]) is None
+        assert m.db.sessions.get_session(s["id"]) is None
         assert sh(src, "branch", "--list", s["branch"]) != ""  # the branch was left behind, not the erase
         await m.stop()
     asyncio.run(body())

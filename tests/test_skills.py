@@ -19,6 +19,7 @@ from harness.db import Database
 from harness.llm import Completion
 from harness.manager import Manager
 from harness_modules.skills.skill_review import SkillReviewer, _extract_json, normalize_findings, review_payload
+from harness_modules.skills.store import SkillRecordStore
 from harness_modules.skills.skill_validate import (
     SANDBOX_WORK,
     canonical_hash,
@@ -573,23 +574,23 @@ def test_reject_during_review_stays_rejected_and_reopenable(tmp_path):
         reviewer.start()
         store._propose_locked(bundle(), "s1")
         await asyncio.wait_for(started.wait(), timeout=3)
-        row = db.list_skill_proposals()[0]
+        row = SkillRecordStore(db).list_skill_proposals()[0]
         store.reject(row["id"], "nope")
-        assert db.skill_proposal(row["id"])["status"] == "rejected"
-        assert db.skill_hash_rejected(row["content_hash"])
+        assert SkillRecordStore(db).skill_proposal(row["id"])["status"] == "rejected"
+        assert SkillRecordStore(db).skill_hash_rejected(row["content_hash"])
         release.set()
         deadline = time.time() + 3
-        while time.time() < deadline and db.list_skill_review_jobs()[0]["status"] == "running":
+        while time.time() < deadline and SkillRecordStore(db).list_skill_review_jobs()[0]["status"] == "running":
             await asyncio.sleep(0.05)
-        latest = db.skill_proposal(row["id"])
+        latest = SkillRecordStore(db).skill_proposal(row["id"])
         assert latest["status"] == "rejected"
-        assert db.skill_hash_rejected(row["content_hash"])
+        assert SkillRecordStore(db).skill_hash_rejected(row["content_hash"])
         assert latest.get("review")
         assert latest["review"].get("recommendation") == "approve"
         with pytest.raises(SkillError, match="rejected"):
             store.install(row["id"], row["content_hash"])
         store.reopen(row["id"])
-        assert not db.skill_hash_rejected(row["content_hash"])
+        assert not SkillRecordStore(db).skill_hash_rejected(row["content_hash"])
         installed = store.install(row["id"], row["content_hash"])
         assert installed["slug"] == "commit-style"
         await reviewer.stop()
@@ -615,17 +616,17 @@ def test_delete_during_review_allows_repropose_and_install(tmp_path):
         reviewer.start()
         store._propose_locked(bundle(), "s1")
         await asyncio.wait_for(started.wait(), timeout=3)
-        row = db.list_skill_proposals()[0]
+        row = SkillRecordStore(db).list_skill_proposals()[0]
         store.delete_draft(row["id"])
-        assert db.skill_proposal(row["id"]) is None
-        assert not db.skill_hash_rejected(row["content_hash"])
+        assert SkillRecordStore(db).skill_proposal(row["id"]) is None
+        assert not SkillRecordStore(db).skill_hash_rejected(row["content_hash"])
         release.set()
         deadline = time.time() + 3
-        while time.time() < deadline and db.list_skill_review_jobs()[0]["status"] == "running":
+        while time.time() < deadline and SkillRecordStore(db).list_skill_review_jobs()[0]["status"] == "running":
             await asyncio.sleep(0.05)
-        assert db.skill_proposal(row["id"]) is None
+        assert SkillRecordStore(db).skill_proposal(row["id"]) is None
         store._propose_locked(bundle(), "s1")
-        staged = db.list_skill_proposals()[0]
+        staged = SkillRecordStore(db).list_skill_proposals()[0]
         assert staged["id"] != row["id"]
         installed = store.install(staged["id"], staged["content_hash"])
         assert installed["slug"] == "commit-style"
@@ -649,14 +650,14 @@ def test_review_complete_promotes_validated_when_not_rejected(tmp_path):
         store._propose_locked(bundle(), "s1")
         deadline = time.time() + 3
         while time.time() < deadline:
-            row = db.list_skill_proposals()[0]
+            row = SkillRecordStore(db).list_skill_proposals()[0]
             if row["status"] == "reviewed" and row["review_status"] == "done":
                 break
             await asyncio.sleep(0.05)
-        row = db.list_skill_proposals()[0]
+        row = SkillRecordStore(db).list_skill_proposals()[0]
         assert row["status"] == "reviewed"
         assert row["review"]["recommendation"] == "approve"
-        assert not db.skill_hash_rejected(row["content_hash"])
+        assert not SkillRecordStore(db).skill_hash_rejected(row["content_hash"])
         installed = store.install(row["id"], row["content_hash"])
         assert installed["slug"] == "commit-style"
         await reviewer.stop()
@@ -794,7 +795,7 @@ def test_owner_api_reinstall_after_uninstall_is_not_500(tmp_path):
     headers = {"Tailscale-User-Login": "me@example.com"}
     with client:
         m.skills._propose_locked(bundle(), "s1")
-        row = m.db.list_skill_proposals()[0]
+        row = m.skills.db.list_skill_proposals()[0]
         assert client.post(f"/skills/proposals/{row['id']}/install",
                            json={"content_hash": row["content_hash"]}, headers=headers).status_code == 200
         assert client.post("/skills/commit-style/uninstall", headers=headers).status_code == 200
@@ -813,7 +814,7 @@ def test_owner_api_reinstall_after_uninstall_is_not_500(tmp_path):
             "skill_md": SKILL_MD + "\nUse `docs:` for documentation-only changes.\n",
             "examples": json.dumps(EXAMPLES),
         }, {"id": "s2", "owner_id": "owner", "app_id": "", "job_id": ""}))
-        other = [p for p in m.db.list_skill_proposals() if p["slug"] == "other-skill"][0]
+        other = [p for p in m.skills.db.list_skill_proposals() if p["slug"] == "other-skill"][0]
         conflict = client.post(f"/skills/proposals/{other['id']}/install",
                                json={"content_hash": other["content_hash"]}, headers=headers)
         assert conflict.status_code == 409, conflict.text
@@ -878,7 +879,7 @@ def test_injection_only_when_enabled_and_scoped(tmp_path):
         assert app["skills"] == []
         job = m.create("hello", project="scratch", job_id="job1")
         assert job["skills"] == []
-        assert m.db.get_session(before["id"])["skills"] == []
+        assert m.db.sessions.get_session(before["id"])["skills"] == []
         store.set_enabled("commit-style", False)
         later = m.create("hello", project="scratch")
         assert later["skills"] == []
@@ -904,12 +905,12 @@ def test_propose_skill_tool_on_owner_session_only(tmp_path):
     async def body():
         s = m.create("Please draft a commit-style skill.")
         await wait_status(m, s["id"], "done")
-        names = [t["function"]["name"] for t in m.runner.tool_schemas(m.db.get_session(s["id"]), m.runner.workspace(m.db.get_session(s["id"])))]
+        names = [t["function"]["name"] for t in m.runner.tool_schemas(m.db.sessions.get_session(s["id"]), m.runner.workspace(m.db.sessions.get_session(s["id"])))]
         assert "propose_skill" in names
-        proposals = m.db.list_skill_proposals()
+        proposals = m.skills.db.list_skill_proposals()
         assert proposals
         assert proposals[0]["slug"] == "commit-style"
-        assert m.db.list_skill_installed() == []
+        assert m.skills.db.list_skill_installed() == []
         app = m.create("app work", app={"id": "app1", "name": "invoice"})
         app_names = [t["function"]["name"] for t in m.runner.tool_schemas(app, m.runner.workspace(app))]
         assert "propose_skill" not in app_names
@@ -932,7 +933,7 @@ def test_owner_api_and_guest_blocked(tmp_path):
         guest = client.get("/skills", headers={"Tailscale-User-Login": "buddy@example.com"})
         assert guest.status_code == 403
         m.skills._propose_locked(bundle(), "s1")
-        row = m.db.list_skill_proposals()[0]
+        row = m.skills.db.list_skill_proposals()[0]
         body = client.get(f"/skills/proposals/{row['id']}", headers={"Tailscale-User-Login": "me@example.com"}).json()
         assert body["skill_md"] == SKILL_MD
         assert client.post(f"/skills/proposals/{row['id']}/install",
@@ -1066,7 +1067,7 @@ def test_background_review_only_at_idle(tmp_path):
         store._propose_locked(bundle(), "s1")
         await asyncio.wait_for(asked.wait(), timeout=scaled(3))   # the loop saw the job and found the GPU busy
         assert reviewed == []
-        assert db.list_skill_review_jobs()[0]["status"] == "queued"
+        assert SkillRecordStore(db).list_skill_review_jobs()[0]["status"] == "queued"
         idle["value"] = True
         reviewer._wake.set()
         deadline = time.time() + scaled(3)
@@ -1105,13 +1106,13 @@ def test_gpu_preempt_keeps_review_loop_alive(tmp_path):
         while time.time() < deadline:
             if reviewer._task.done():
                 break
-            jobs = db.list_skill_review_jobs()
+            jobs = SkillRecordStore(db).list_skill_review_jobs()
             if jobs and jobs[0]["status"] == "queued" and "preempted by real GPU work" in (jobs[0].get("error") or ""):
                 break
             await asyncio.sleep(0.05)
         assert reviewer._task is not None
         assert not reviewer._task.done()
-        job = db.list_skill_review_jobs()[0]
+        job = SkillRecordStore(db).list_skill_review_jobs()[0]
         assert job["status"] == "queued"
         assert "preempted by real GPU work" in job["error"]
         started.clear()
@@ -1120,9 +1121,9 @@ def test_gpu_preempt_keeps_review_loop_alive(tmp_path):
         await asyncio.wait_for(started.wait(), timeout=3)
         assert runs["n"] == 2
         deadline = time.time() + 3
-        while time.time() < deadline and db.list_skill_review_jobs()[0]["status"] != "done":
+        while time.time() < deadline and SkillRecordStore(db).list_skill_review_jobs()[0]["status"] != "done":
             await asyncio.sleep(0.05)
-        assert db.list_skill_review_jobs()[0]["status"] == "done"
+        assert SkillRecordStore(db).list_skill_review_jobs()[0]["status"] == "done"
         await reviewer.stop()
 
     asyncio.run(body())
@@ -1148,20 +1149,20 @@ def test_stop_does_not_requeue_hosted_review_as_gpu_preempt(tmp_path):
         )
         store = SkillStore(SkillsConfig(enabled=True), db, tmp_path, "img", run_sandbox=in_process_sandbox)
         store._propose_locked(bundle(), "s1")
-        row = db.list_skill_proposals()[0]
+        row = SkillRecordStore(db).list_skill_proposals()[0]
         reviewer.start()
         reviewer.enqueue(row["id"], row["content_hash"], mode="hosted")
         await asyncio.wait_for(started.wait(), timeout=3)
         await reviewer.stop()
-        job = db.list_skill_review_jobs()[0]
+        job = SkillRecordStore(db).list_skill_review_jobs()[0]
         assert job["status"] == "running"
         assert "preempted by real GPU work" not in (job.get("error") or "")
         started.clear()
         reviewer.start()   # reconciles synchronously: the interrupted hosted job is an error, not requeued
-        job = db.list_skill_review_jobs()[0]
+        job = SkillRecordStore(db).list_skill_review_jobs()[0]
         assert job["status"] == "error"
         assert "owner may retry" in job["error"]
-        assert db.skill_proposal(row["id"])["review_status"] == "error"
+        assert SkillRecordStore(db).skill_proposal(row["id"])["review_status"] == "error"
         assert calls == ["run"]
         await reviewer.stop()
 
@@ -1187,14 +1188,14 @@ def test_stop_leaves_local_review_running_for_reconcile(tmp_path):
         store._propose_locked(bundle(), "s1")
         await asyncio.wait_for(started.wait(), timeout=3)
         await reviewer.stop()
-        job = db.list_skill_review_jobs()[0]
+        job = SkillRecordStore(db).list_skill_review_jobs()[0]
         assert job["status"] == "running"
         assert "preempted by real GPU work" not in (job.get("error") or "")
         reviewer.reconcile()
-        job = db.list_skill_review_jobs()[0]
+        job = SkillRecordStore(db).list_skill_review_jobs()[0]
         assert job["status"] == "queued"
         assert "daemon restart" in job["error"]
-        assert db.list_skill_proposals()[0]["review_status"] == "queued"
+        assert SkillRecordStore(db).list_skill_proposals()[0]["review_status"] == "queued"
 
     asyncio.run(body())
 
@@ -1219,14 +1220,14 @@ def test_hosted_review_ignores_gpu_busy(tmp_path):
         )
         store = SkillStore(SkillsConfig(enabled=True), db, tmp_path, "img", run_sandbox=in_process_sandbox)
         store._propose_locked(bundle(), "s1")
-        row = db.list_skill_proposals()[0]
+        row = SkillRecordStore(db).list_skill_proposals()[0]
         reviewer.start()
         reviewer.enqueue(row["id"], row["content_hash"], mode="hosted")
         await asyncio.wait_for(started.wait(), timeout=3)
         deadline = time.time() + 3
-        while time.time() < deadline and db.list_skill_review_jobs()[0]["status"] != "done":
+        while time.time() < deadline and SkillRecordStore(db).list_skill_review_jobs()[0]["status"] != "done":
             await asyncio.sleep(0.05)
-        assert db.list_skill_review_jobs()[0]["status"] == "done"
+        assert SkillRecordStore(db).list_skill_review_jobs()[0]["status"] == "done"
         assert reviewer._task is not None
         assert not reviewer._task.done()
         await reviewer.stop()
@@ -1240,7 +1241,7 @@ def test_hosted_review_requires_owner_action(tmp_path):
     reviewer = SkillReviewer(cfg, db, idle=lambda: True, local_review=False)
     store = SkillStore(cfg, db, tmp_path, "img", run_sandbox=in_process_sandbox, reviewer=reviewer)
     store._propose_locked(bundle(), "s1")
-    pid = db.list_skill_proposals()[0]["id"]
+    pid = SkillRecordStore(db).list_skill_proposals()[0]["id"]
     with pytest.raises(SkillError, match="no hosted reviewer"):
         reviewer.request_hosted(pid)
 

@@ -79,11 +79,11 @@ def test_same_app_lifecycle_contract_across_providers(tmp_path, backend):
         assert final["answer"]
 
         # Tool results and approvals use the same durable broker contract regardless of the model adapter.
-        manager.db.insert_app_tool_call(first["id"], "app-call-1", "lookup_contract", {"key": "x"})
+        manager.db.sessions.insert_app_tool_call(first["id"], "app-call-1", "lookup_contract", {"key": "x"})
         accepted = client.post(f"/api/v1/sessions/{first['id']}/tool_calls/app-call-1", headers=headers,
                                json={"output": "fixture", "ok": True})
         assert accepted.json() == {"accepted": True}
-        manager.db.insert_approval({"id": "a-contract", "session_id": first["id"], "tool_call_id": "native-1",
+        manager.db.sessions.insert_approval({"id": "a-contract", "session_id": first["id"], "tool_call_id": "native-1",
                                     "tool": "run_shell", "args": {"command": "echo ok"},
                                     "reason": "contract", "detail": "same approval shape"})
         pending = client.get(f"/api/v1/sessions/{first['id']}/approvals", headers=headers).json()
@@ -121,5 +121,5 @@ def test_provider_failures_have_one_normalized_shape(tmp_path, backend):
     assert public["stop_reason"] == "provider_error"
     assert public["failure"] == {"code": "provider_error", "provider": backend,
                                  "message": "provider rejected the turn", "retryable": True}
-    error = [event for event in manager.db.events(session["id"]) if event["type"] == "error"][-1]
+    error = [event for event in manager.db.sessions.events(session["id"]) if event["type"] == "error"][-1]
     assert error["data"] == public["failure"]

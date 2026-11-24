@@ -79,7 +79,7 @@ SYNTHETIC = [(46, add_note_column), (47, backfill_note), (48, index_note)]
 def _seed_session(path: Path, sid: str = "s1") -> None:
     """A database at the baseline (v45) holding one session; no numbered step has run yet."""
     db = Database(path, migrations=[])
-    db.insert_session({"id": sid, "title": "hello", "project": "p", "target": "t", "model": "m", "status": "idle",
+    db.sessions.insert_session({"id": sid, "title": "hello", "project": "p", "target": "t", "model": "m", "status": "idle",
                        "workspace": "w", "created_at": 1.0, "updated_at": 1.0, "context": []})
     db.close()
 
@@ -110,7 +110,7 @@ def test_version_zero_database_is_stamped_and_repaired_without_backup(tmp_path):
     conn.commit()
     conn.close()
     db = Database(path, migrations=[])
-    assert db.get_session("s1")["title"] == "kept"
+    assert db.sessions.get_session("s1")["title"] == "kept"
     cols = {r["name"] for r in db.conn.execute("PRAGMA table_info(images)")}
     assert "provenance" in cols
     db.close()
@@ -122,7 +122,7 @@ def test_synthetic_migrations_apply_in_order_after_a_backup(tmp_path):
     path = tmp_path / "harness.db"
     _seed_session(path)
     db = Database(path, migrations=SYNTHETIC)
-    assert db.get_session("s1")["note"] == "title:hello"
+    assert db.sessions.get_session("s1")["note"] == "title:hello"
     assert "idx_sessions_note" in {r["name"] for r in db.conn.execute("PRAGMA index_list(sessions)")}
     db.close()
     assert _version(path) == 48
@@ -155,7 +155,7 @@ def test_version_zero_database_with_data_is_backed_up_before_numbered_steps(tmp_
                      " updated_at, context) VALUES ('s1', 'kept', 'p', 't', 'm', 'idle', 'w', 1, 1, '[]')")
         conn.commit()
     db = Database(path, migrations=SYNTHETIC)
-    assert db.get_session("s1")["note"] == "title:kept"
+    assert db.sessions.get_session("s1")["note"] == "title:kept"
     db.close()
     backups = list((tmp_path / "pre-migration").glob("harness-v45-*.sqlite3"))
     assert len(backups) == 1
@@ -311,7 +311,7 @@ def test_session_taint_migration_adds_column_to_existing_sessions(tmp_path):
     assert _version(path) == BASELINE_VERSION
     shipped = _REAL_DISCOVER()  # the autouse fixture hides shipped steps; this test needs them
     db = Database(path, migrations=shipped)
-    assert db.get_session("s1")["taint"] == []
+    assert db.sessions.get_session("s1")["taint"] == []
     assert db.conn.execute("SELECT taint FROM sessions WHERE id = 's1'").fetchone()[0] == "[]"
     db.close()
     assert _version(path) == migrations.latest_version(shipped)
@@ -321,16 +321,19 @@ def test_session_taint_migration_adds_column_to_existing_sessions(tmp_path):
         assert "taint" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
 
 
-def test_key_listing_counts_each_keys_requests_through_the_key_index(tmp_path):
-    """#669: the request count in the key listing searches `endpoint_requests` by `key_id`, not scanning every row of
-    the table, which is never pruned."""
-    from harness.db import _API_KEY_LISTING
+@pytest.mark.parametrize("keys", [1, 3])
+def test_key_listing_counts_each_keys_requests_through_the_key_index(tmp_path, keys):
+    """#669: the key listing's request count (the endpoint module's query since #992) searches `endpoint_requests` by
+    `key_id`, not scanning every row of the table, which is never pruned."""
+    from harness_modules.endpoint.store import REQUEST_COUNTS
     db = Database(tmp_path / "harness.db", migrations=_REAL_DISCOVER())
-    plan = db.conn.execute("EXPLAIN QUERY PLAN " + _API_KEY_LISTING + " AND k.id = ?", ("k-1",)).fetchall()
+    query = REQUEST_COUNTS.format(marks=",".join("?" * keys))
+    plan = db.conn.execute("EXPLAIN QUERY PLAN " + query, [f"k-{i}" for i in range(keys)]).fetchall()
     db.close()
     details = [row[-1] for row in plan]
-    assert any(d.startswith("SEARCH r USING") and "endpoint_requests_key (key_id=?)" in d for d in details), details
-    assert not any(d.startswith("SCAN r") or d.startswith("SCAN endpoint_requests") for d in details), details
+    assert any(d.startswith("SEARCH endpoint_requests USING") and "endpoint_requests_key (key_id=?)" in d
+               for d in details), details
+    assert not any(d.startswith("SCAN endpoint_requests") for d in details), details
 
 
 _SESSION_INDEXES = {"sessions_list", "sessions_owner_status"}
@@ -349,7 +352,7 @@ def test_session_scan_indexes_reach_old_and_fresh_databases(tmp_path):
     Database(old, migrations=[step for step in shipped if step[0] < 62]).close()
     db = Database(old, migrations=shipped)
     assert _session_indexes(db) == _SESSION_INDEXES
-    assert db.get_session("s1")["title"] == "hello"
+    assert db.sessions.get_session("s1")["title"] == "hello"
     db.close()
     assert _version(old) == shipped[-1][0]
     fresh = Database(tmp_path / "fresh.db", migrations=shipped)
@@ -368,7 +371,7 @@ def _searches_an_index(details: list[str]) -> bool:
 @pytest.mark.parametrize("owner_id", ["owner", None])
 def test_session_list_searches_an_index(tmp_path, owner_id):
     """#668: the list's filter is answered by `sessions_list`, not a scan past each row's `context`."""
-    from harness.db import _SESSION_LIST_COLUMNS, _session_filter
+    from harness.session_store import _SESSION_LIST_COLUMNS, _session_filter
     db = Database(tmp_path / "harness.db", migrations=_REAL_DISCOVER())
     where, params = _session_filter(owner_id, "agent", None)
     details = _plan(db, _SESSION_LIST_COLUMNS + where + " ORDER BY created_at DESC, id DESC LIMIT ?", (*params, 51))
@@ -383,7 +386,7 @@ def test_owner_session_count_searches_the_owner_status_index(tmp_path, holding):
     seen: list[str] = []
     db.conn.set_trace_callback(seen.append)  # the statement as run, its parameters bound
     # count_sessions' body on the traced writer; the public method runs on a pooled reader
-    assert db._count_sessions("owner_id", "owner", ("running", "queued"), holding) == 0
+    assert db.sessions._count_sessions("owner_id", "owner", ("running", "queued"), holding) == 0
     db.conn.set_trace_callback(None)
     [sql] = [s for s in seen if "COUNT(*)" in s]
     details = _plan(db, sql, ())
@@ -409,6 +412,6 @@ def test_stables_registry_name_reaches_old_databases(tmp_path):
     db.close()
     assert names == {"app-web": "Stables", "k1": "Agent Harness Web"}
     fresh = Database(tmp_path / "fresh.db", migrations=shipped)
-    fresh.ensure_web_app("app-web")
+    fresh.credentials.ensure_web_app("app-web")
     assert fresh.conn.execute("SELECT name FROM api_keys WHERE id = 'app-web'").fetchone()[0] == "Stables"
     fresh.close()

@@ -30,6 +30,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import access as access_mod
 from . import audit_context, credential_audit
 from . import compat
+from . import response_docs as docs
+from .response_docs import documented
 from .app_usage import AppsUsageResponse, snapshot as app_usage_snapshot
 from .manager import HarnessError
 from .origins import check_key_origin, daemon_origins, normalize_origin_or_403 as _normalized_origin
@@ -177,7 +179,7 @@ def require_admin(request: Request, mgr) -> dict | None:
     header = request.headers.get("authorization") or ""
     token = header[7:].strip() if header.lower().startswith("bearer ") else ""
     if token:
-        key = m.db.api_key_by_secret(token)
+        key = m.db.credentials.api_key_by_secret(token)
         if key is None:
             raise HarnessError(401, "missing or invalid owner token")
         scopes = set((key.get("scopes") or "").split())
@@ -337,7 +339,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
             "server": "agent-harness",
             **compat.metadata(mgr(request).cfg.capabilities()),
             "scopes": {ADMIN_SCOPE: ADMIN_SCOPE_HELP},
-            "hub": {"claimed": mgr(request).db.main.hub_claim() is not None},
+            "hub": {"claimed": mgr(request).db.main.credentials.hub_claim() is not None},
             "allowed_logins": list(mgr(request).cfg.allowed_logins),
             "auth": {
                 "tailscale_owner": True,
@@ -346,13 +348,14 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
             "operations": operations,
         }
 
-    @app.get(PREFIX + "/provider-credentials")
+    @app.get(PREFIX + "/provider-credentials", responses=documented(list[docs.ProviderCredentialResponse]))
     async def provider_credentials(request: Request):
         """List provider grants, including revoked ones, newest first; `available` shows whether a key-based grant's secret file exists."""
         require_admin(request, mgr)
         return mgr(request).provider_credentials()
 
-    @app.post(PREFIX + "/provider-credentials", status_code=201)
+    @app.post(PREFIX + "/provider-credentials", status_code=201,
+               responses=documented(docs.ProviderCredentialResponse, 201))
     async def set_provider_credential(body: ProviderCredentialRequest, request: Request):
         """Grant an App a provider backend, revoking its previous grant for that backend; key-based policies need a configured `secret_ref`."""
         key = require_admin(request, mgr)
@@ -360,7 +363,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         ctx = _context(request, key)
 
         def commit():
-            previous = manager.db.main.app_provider_credential(body.app_id, body.backend)
+            previous = manager.db.main.credentials.app_provider_credential(body.app_id, body.backend)
             row = manager.set_app_provider_credential(body.app_id, body.backend, body.secret_ref,
                                                       body.policy, body.models)
             fields = ["backend", "policy", "models", "secret_ref"] if previous is None else [
@@ -389,7 +392,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         ctx = _context(request, key)
 
         def commit() -> bool:
-            grant = manager.db.main.app_provider_credential_by_id(credential_id)
+            grant = manager.db.main.credentials.app_provider_credential_by_id(credential_id)
             if manager.revoke_app_provider_credential(credential_id):
                 credential_audit.record(manager.db, ctx, "provider_grant.revoke", credential_id, "ok",
                                         "provider_grant", {"grant_id": credential_id, "app_id": grant["app_id"],
@@ -409,11 +412,11 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         return await asyncio.to_thread(app_usage_snapshot, mgr(request).db.main, days)
 
     # #330 decision 5: an App's default retention, and the erasures that revoking Apps scheduled.
-    @app.get(PREFIX + "/apps/erasures")
+    @app.get(PREFIX + "/apps/erasures", responses=documented(list[docs.ErasureResponse]))
     async def app_erasures(request: Request):
         """List revoked Apps and devices still waiting for their store and folder to be erased, soonest first."""
         require_admin(request, mgr)
-        return mgr(request).db.pending_erasures()
+        return mgr(request).db.apps.pending_erasures()
 
     @app.post(PREFIX + "/apps/{app_id}/restore")
     async def restore_app(app_id: str, request: Request):
@@ -439,7 +442,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         return JSONResponse({**row, "key": key},
                             headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
-    @app.put(PREFIX + "/apps/{app_id}/retention")
+    @app.put(PREFIX + "/apps/{app_id}/retention", responses=documented(docs.KeyResponse))
     async def set_app_retention(app_id: str, body: AppRetentionRequest, request: Request):
         """Set an App's default session retention in days, or null to keep sessions until deleted; 404 for an unknown id."""
         admin_key = require_admin(request, mgr)
@@ -447,8 +450,8 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         ctx = _context(request, admin_key)
 
         def commit() -> bool:
-            before = m.db.main.get_api_key(app_id)
-            if m.db.main.set_app_retention(app_id, body.retention_days):
+            before = m.db.main.credentials.get_api_key(app_id)
+            if m.db.main.apps.set_app_retention(app_id, body.retention_days):
                 credential_audit.record(m.db, ctx, "app.retention", app_id, "ok", "api_key", {
                     "app_id": app_id, "old_retention_days": before.get("retention_days"),
                     "new_retention_days": body.retention_days})
@@ -457,14 +460,14 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
             return False
         if not await m.db.main.awrite(commit):
             raise HarnessError(404, "no App or device key has that id")
-        return m.db.get_api_key_listing(app_id)
+        return m.db.listed_api_key(app_id)
 
     def _live_app(m, app_id: str) -> None:
-        key = m.db.main.get_api_key(app_id)
+        key = m.db.main.credentials.get_api_key(app_id)
         if key is None or key.get("kind") != "app" or key.get("erased_at") is not None:
             raise HarnessError(404, "no App has that id")
 
-    @app.get(PREFIX + "/apps/{app_id}/limits")
+    @app.get(PREFIX + "/apps/{app_id}/limits", responses=documented(docs.AppLimitsResponse))
     async def get_app_limits(app_id: str, request: Request):
         """An App's session caps: what the owner set, what applies, and its sessions that count against them."""
         require_admin(request, mgr)
@@ -472,7 +475,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         _live_app(m, app_id)
         return await asyncio.to_thread(m.app_limits_view, app_id)
 
-    @app.put(PREFIX + "/apps/{app_id}/limits")
+    @app.put(PREFIX + "/apps/{app_id}/limits", responses=documented(docs.AppLimitsResponse))
     async def set_app_limits(app_id: str, body: AppLimitsRequest, request: Request):
         """Set how many sessions an App may have running and queued (#524); a field left out keeps its value and
         null restores the default. Only the owner can; an App cannot."""
@@ -482,9 +485,9 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         sent = {k: getattr(body, k) for k in body.model_fields_set}
 
         def commit() -> bool:
-            before = m.db.main.app_limits(app_id)
+            before = m.db.main.apps.app_limits(app_id)
             limits = {**before, **sent}
-            if m.db.main.set_app_limits(app_id, limits):
+            if m.db.main.apps.set_app_limits(app_id, limits):
                 credential_audit.record(m.db, ctx, "app.limits", app_id, "ok", "api_key", {
                     "app_id": app_id, **{f"old_{k}": v for k, v in before.items()},
                     **{f"new_{k}": v for k, v in limits.items()}})
@@ -507,26 +510,26 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         from .accounts import AccountService
         return AccountService(mgr(request))
 
-    @app.get(PREFIX + "/accounts")
+    @app.get(PREFIX + "/accounts", responses=documented(list[docs.AccountResponse]))
     async def list_accounts(request: Request):
         """List household member accounts with quotas, disk usage, and Google sign-in state."""
         require_admin(request, mgr)
         return _accounts(request).list_public()
 
-    @app.post(PREFIX + "/accounts", status_code=201)
+    @app.post(PREFIX + "/accounts", status_code=201, responses=documented(docs.AccountResponse, 201))
     async def create_account(body: AccountCreateRequest, request: Request):
         """Create a household member account; needs an explicit owner allowlist, and a login can hold only one role."""
         key = require_admin(request, mgr)
         return await asyncio.to_thread(_accounts(request).create, _context(request, key), body.login,
                                        body.display_name, body.disk_quota_bytes, body.max_running, body.max_queued)
 
-    @app.get(PREFIX + "/accounts/audit")
+    @app.get(PREFIX + "/accounts/audit", responses=documented(list[docs.AccountAuditRow]))
     async def account_audit(request: Request, limit: int = 200):
         """List recent account audit rows, newest first; `limit` is clamped to 1 through 500."""
         require_admin(request, mgr)
-        return await asyncio.to_thread(mgr(request).db.list_audit, limit)
+        return await asyncio.to_thread(mgr(request).db.accounts.list_audit, limit)
 
-    @app.get(PREFIX + "/audit")
+    @app.get(PREFIX + "/audit", responses=documented(docs.AuditPage))
     async def audit_review(request: Request, limit: int = 200, before_id: int | None = None,
                            actor_id: str | None = None, key_id: str | None = None, target_id: str | None = None,
                            action: str | None = None, outcome: str | None = None, since: float | None = None,
@@ -543,17 +546,17 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         if since is not None and until is not None and since >= until:
             raise HarnessError(400, "since must be earlier than until")
         return await asyncio.to_thread(
-            mgr(request).db.audit_page, limit, before_id, actor_id=actor_id, key_id=key_id, target_id=target_id,
+            mgr(request).db.accounts.audit_page, limit, before_id, actor_id=actor_id, key_id=key_id, target_id=target_id,
             action=action, outcome=outcome, since=since, until=until)
 
-    @app.get(PREFIX + "/accounts/{user_id}")
+    @app.get(PREFIX + "/accounts/{user_id}", responses=documented(docs.AccountResponse))
     async def get_account(user_id: str, request: Request):
         """Return one household member's account with disk usage and Google sign-in state; 404 for other ids."""
         require_admin(request, mgr)
         svc = _accounts(request)
         return svc.public_account(svc._require(user_id))
 
-    @app.patch(PREFIX + "/accounts/{user_id}")
+    @app.patch(PREFIX + "/accounts/{user_id}", responses=documented(docs.AccountResponse))
     async def update_account(user_id: str, body: AccountUpdateRequest, request: Request):
         """Update the fields sent for a household member; raising `max_running` can start a waiting session now."""
         key = require_admin(request, mgr)
@@ -565,7 +568,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
 
     # Issue #63: the owner switches member GitHub sign-in on or off, sees each member's coarse state, and can
     # erase a member's credential. The owner cannot connect, test, list repositories, or use it.
-    @app.get(PREFIX + "/github-member-auth")
+    @app.get(PREFIX + "/github-member-auth", responses=documented(docs.GitHubMemberAuthResponse))
     async def github_member_auth(request: Request, refresh: bool = False):
         """Return GitHub sign-in state and each member's coarse status; `refresh` forces a fresh preflight check."""
         require_admin(request, mgr)
@@ -574,7 +577,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
             await asyncio.to_thread(gh.preflight, True)
         return gh.owner_view()
 
-    @app.put(PREFIX + "/github-member-auth")
+    @app.put(PREFIX + "/github-member-auth", responses=documented(docs.GitHubMemberAuthResponse))
     async def set_github_member_auth(body: GitHubMemberAuthRequest, request: Request):
         """Turn member GitHub sign-in on or off; enabling needs GitHub configured (409 otherwise), and disabling keeps credentials."""
         from .github_auth import GitHubAuthError
@@ -584,7 +587,8 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         except GitHubAuthError as e:
             raise HarnessError(e.status, str(e), code=e.code) from None
 
-    @app.post(PREFIX + "/accounts/{user_id}/github-connection/reset")
+    @app.post(PREFIX + "/accounts/{user_id}/github-connection/reset",
+               responses=documented(docs.GitHubMemberAuthResponse))
     async def reset_member_github(user_id: str, body: GitHubResetRequest, request: Request):
         """Erase a member's GitHub credential and stop their Git work, leaving them disconnected; `confirm` must be true."""
         from .github_auth import GitHubAuthError

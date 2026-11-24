@@ -217,14 +217,14 @@ def matrix(tmp_path_factory, gitleaks_tools):
             assert owner["scopes"] == ADMIN_SCOPE
             for kind in ("app", "device"):  # only an owner key can carry the admin scope
                 assert client.post("/keys", json={"name": "nope", "kind": kind, "scopes": [ADMIN_SCOPE]}).status_code == 400
-            _, noadmin = m.db.main.create_api_key("owner-without-admin", "sessions", OWNER_KIND)
+            _, noadmin = m.db.main.credentials.create_api_key("owner-without-admin", "sessions", OWNER_KIND)
             hub, _, _ = _claim(client, m)
             client.local_owner = False  # each caller sends only the headers it is given
             # A tainted member session and App session, so a taint clear that reached either would change them.
             alice_sid = client.post("/api/v1/sessions", headers=H(ALICE), json={"prompt": "alice's own"}).json()["id"]
             app_sid = client.post("/api/v1/sessions", headers=_bearer(app["key"]), json={"prompt": "app's own"}).json()["id"]
             for sid in (alice_sid, app_sid):
-                m.db.update_session(sid, taint=[{"kind": "web_fetch", "origin": "evil.example"}])
+                m.db.sessions.update_session(sid, taint=[{"kind": "web_fetch", "origin": "evil.example"}])
             callers = {
                 "owner": H(OWNER), "local": {local_owner.HEADER: m.local_owner_token}, "none": {},
                 "wrongtok": {local_owner.HEADER: "not-the-token"}, "emptytok": {local_owner.HEADER: ""},
@@ -252,7 +252,7 @@ def snapshot(m) -> dict:
     for row in state["api_keys"] + state["accounts"]:  # a presented credential's last-use stamp is not a change
         row.pop("last_used_at", None)
         row.pop("last_activity_at", None)
-    state["session_ids"] = sorted(m.db.find_session_ids(""))  # Web's store and every App's store
+    state["session_ids"] = sorted(m.db.sessions.find_session_ids(""))  # Web's store and every App's store
     state["owner_projects"] = sorted(m.cfg.projects)
     return state
 

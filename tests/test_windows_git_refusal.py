@@ -230,7 +230,8 @@ def test_rewind_refuses_before_probing_the_workspace(refuse, ws):
         busy = plan
 
     checkpointer = object.__new__(Checkpointer)
-    checkpointer.db = SimpleNamespace(get_session=lambda sid: {"id": sid, "workspace": str(ws), "branch": "agent/s1"})
+    checkpointer.db = SimpleNamespace(sessions=SimpleNamespace(
+        get_session=lambda sid: {"id": sid, "workspace": str(ws), "branch": "agent/s1"}))
     checkpointer.checkpoint = lambda sid, turn: {"turn": turn, "sha": "0" * 40, "head": "", "branch": "agent/s1"}
     checkpointer.store = lambda s: Store()
     before = tree(ws)
@@ -383,7 +384,7 @@ class _RewindStore:
 
 def _checkpointer(session, ckpt, store):
     checkpointer = object.__new__(Checkpointer)
-    checkpointer.db = SimpleNamespace(get_session=lambda sid: session)
+    checkpointer.db = SimpleNamespace(sessions=SimpleNamespace(get_session=lambda sid: session))
     checkpointer.checkpoint = lambda sid, turn: ckpt
     checkpointer.store = lambda s: store
     return checkpointer
@@ -438,7 +439,7 @@ def test_manager_fork_refuses_before_allocating_the_workspace(refuse, ws):
     parent = {"id": "s1", "workspace": str(ws), "branch": "agent/s1", "base_branch": "main", "backend": "local"}
     ckpt = {"turn": 1, "sha": "0" * 40, "head": sh(ws, "rev-parse", "HEAD").strip(), "branch": "agent/s1"}
     manager = object.__new__(Manager)
-    manager.db = SimpleNamespace(get_session=lambda sid: parent)
+    manager.db = SimpleNamespace(sessions=SimpleNamespace(get_session=lambda sid: parent))
     manager.runner = SimpleNamespace(checkpointer=_checkpointer(parent, ckpt, None))
     manager._enforce_app_caps = lambda *_a: None
     manager._check_free_space = lambda *_a: None
@@ -456,8 +457,8 @@ def test_changes_and_review_comments_report_the_refusal(tmp_path, monkeypatch):
     client, m, _ = make_client(tmp_path, [Completion(content="done")])
     with client:
         sid = client.post("/sessions", json={"prompt": "look around"}).json()["id"]
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
-        make_repo(Path(m.db.get_session(sid)["workspace"]) / "repo")
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
+        make_repo(Path(m.db.sessions.get_session(sid)["workspace"]) / "repo")
         comment = {"side": "new", "path": "repo/a.txt", "start_line": 1, "end_line": 1, "quoted": ["a"],
                    "comment": "rename this"}
         assert client.post(f"/sessions/{sid}/review-comments", json=comment).status_code == 201
@@ -466,4 +467,4 @@ def test_changes_and_review_comments_report_the_refusal(tmp_path, monkeypatch):
                          client.post(f"/sessions/{sid}/review-comments/send")):
             assert response.status_code == 409, response.text
             assert REFUSAL in response.json()["error"]["message"]
-        assert len(m.db.list_review_comments(sid)) == 1  # nothing was sent
+        assert len(m.db.sessions.list_review_comments(sid)) == 1  # nothing was sent

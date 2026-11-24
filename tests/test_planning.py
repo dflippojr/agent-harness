@@ -149,7 +149,7 @@ def run_session(tmp_path: Path, reinject: bool, kind: str = "agent") -> tuple[Sc
         m = Manager(cfg, chat=script)
         await m.start(maintenance=False)
         s = await finished(m, m.create("Fix the parser.", project="scratch", kind=kind)["id"])
-        events = m.db.events(s["id"])
+        events = m.db.sessions.events(s["id"])
         await m.stop()
         return s, events
 
@@ -243,7 +243,7 @@ def test_fake_model_receives_the_plan_and_nothing_stores_it(monkeypatch, tmp_pat
     monkeypatch.setattr(fake_model.FakeModel, "__call__", recording)
     m = Manager(config_mod.load(config_dir, data_dir))
     try:
-        _, token = m.db.main.create_api_key("ui-testing", "admin", "owner")
+        _, token = m.db.main.credentials.create_api_key("ui-testing", "admin", "owner")
         headers = {"Authorization": f"Bearer {token}", **fake_instance.CLIENT}
         with TestClient(create_app(m)) as client:
             made = client.post("/api/v1/sessions", headers=headers,
@@ -251,14 +251,14 @@ def test_fake_model_receives_the_plan_and_nothing_stores_it(monkeypatch, tmp_pat
             assert made.status_code == 201, made.text
             sid = made.json()["id"]
             done = wait_session(client, sid, headers, "done", "failed")
-        events = json.dumps(m.db.events(sid))
+        events = json.dumps(m.db.sessions.events(sid))
         assert (done["status"], done["answer"]) == ("done", "Done."), done
         plan = "Plan:\n1. write notes.md\n2. answer\n\nNext step: write notes.md"
         assert len(requests) == 3 and planning.MARKER not in json.dumps(requests[0])
         for request in requests[1:]:
             assert request[-1]["role"] == "tool" and request[-1]["content"].endswith(f"\n\n{planning.MARKER}\n{plan}")
         assert planning.PROMPT in requests[0][0]["content"]
-        context = m.db.get_session(sid)["context"]
+        context = m.db.sessions.get_session(sid)["context"]
         assert planning.MARKER not in json.dumps(context) and planning.MARKER not in events
         stored = [p for p in m.cfg.transcripts_dir.rglob("*") if p.is_file()]
         assert all(planning.MARKER not in p.read_text(encoding="utf-8", errors="replace") for p in stored)
@@ -334,10 +334,10 @@ def test_a_fork_has_the_sentence_only_where_it_runs_natively(tmp_path):
         assert planning.PROMPT not in s["context"][0]["content"]
         m.cfg.planning = PlanningConfig(reinject=True)
         local = await finished(m, (await m.fork(s["id"], 1, "carry on"))["id"])
-        hosted = m.db.get_session((await m.fork(local["id"], 1, "on codex", backend="codex"))["id"])
+        hosted = m.db.sessions.get_session((await m.fork(local["id"], 1, "on codex", backend="codex"))["id"])
         await finished(m, hosted["id"])
-        m.db.update_session(s["id"], backend="claude", model="claude-opus-5", effort="high")
-        back = m.db.get_session((await m.fork(s["id"], 1, "back home", backend="local"))["id"])
+        m.db.sessions.update_session(s["id"], backend="claude", model="claude-opus-5", effort="high")
+        back = m.db.sessions.get_session((await m.fork(s["id"], 1, "back home", backend="local"))["id"])
         await finished(m, back["id"])
         await m.stop()
         return local, hosted, back

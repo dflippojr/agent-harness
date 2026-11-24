@@ -77,7 +77,7 @@ def _audit(client, action: str, **params) -> list[dict]:
 
 
 def _app_keys(m) -> list[dict]:
-    return [k for k in m.db.list_api_keys() if k["kind"] == "app"]
+    return [k for k in m.db.listed_api_keys() if k["kind"] == "app"]
 
 
 def _assert_no_secrets(texts, *secrets_seen):
@@ -98,7 +98,7 @@ def test_owner_view_never_exposes_a_match_code_in_any_state(hh, monkeypatch):
             asked, _ = _ask(client, origin, kind=kind, scopes=None if kind == "hub" else ("sessions",))
             assert asked.status_code == 201, asked.text
             for state in states:
-                row = m.db.main.get_pairing_request(asked.json()["id"])
+                row = m.db.main.credentials.get_pairing_request(asked.json()["id"])
                 row["state"] = state
                 owner = pr.owner_view(row, m.cfg)
                 where = (kind, origin, state)
@@ -133,7 +133,7 @@ def test_open_pairing_requests_redraw_duplicate_match_codes(hh, monkeypatch, fir
     assert first.json()["match_code"] == "123456"
     assert second.json()["match_code"] == "654321"
     for response in (first, second):
-        assert m.db.main.get_pairing_request(response.json()["id"])["match_code"] == response.json()["match_code"]
+        assert m.db.main.credentials.get_pairing_request(response.json()["id"])["match_code"] == response.json()["match_code"]
     assert {row["match_code"] for row in client.get(BASE, headers=H(OWNER)).json()} == {""}
 
 
@@ -142,13 +142,13 @@ def test_match_code_uniqueness_includes_requests_outside_the_owner_list(hh, cloc
     codes = iter(["123456", "123456", "654321"])
     monkeypatch.setattr(pr, "_match_code", lambda: next(codes))
     first, _ = _ask(client)
-    row = m.db.main.get_pairing_request(first.json()["id"])
+    row = m.db.main.credentials.get_pairing_request(first.json()["id"])
     clock[0] += 1
     # The owner's newest-100 list is a projection, not the set of codes that must stay unique.
     for i in range(100):
-        m.db.main.insert_pairing_request({**row, "id": f"pr-finished-{i}", "state": pr.DENIED,
-                                         "source": "", "created_at": clock[0], "finished_at": clock[0]})
-    assert first.json()["id"] not in {r["id"] for r in m.db.main.list_pairing_requests()}
+        m.db.main.credentials.insert_pairing_request({**row, "id": f"pr-finished-{i}", "state": pr.DENIED,
+                                                     "source": "", "created_at": clock[0], "finished_at": clock[0]})
+    assert first.json()["id"] not in {r["id"] for r in m.db.main.credentials.list_pairing_requests()}
     second, _ = _ask(client)
     assert second.status_code == 201 and second.json()["match_code"] == "654321"
 
@@ -257,7 +257,7 @@ def test_browser_request_approve_and_redeem_once(hh):
     reasons = {r["metadata"].get("reason") for r in rows if r["outcome"] == "denied"}
     assert {"match_mismatch", "invalid_verifier", "origin_mismatch"} <= reasons
     _assert_no_secrets(rec.texts, token, verifier, req["match_code"])
-    stored = m.db.main.get_pairing_request(rid)
+    stored = m.db.main.credentials.get_pairing_request(rid)
     assert verifier not in json.dumps(stored) and pr.challenge_of(verifier) not in json.dumps(stored)
 
 

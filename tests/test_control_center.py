@@ -26,8 +26,8 @@ def make_client(tmp_path):
 def wait_done(manager, sid: str, timeout: float = 10) -> None:
     """The run continues on the app's loop after the create request returns (its writes are awaited, #294)."""
     deadline = time.monotonic() + timeout
-    while manager.db.get_session(sid)["status"] != "done" or sid in manager.tasks:
-        assert time.monotonic() < deadline, manager.db.get_session(sid)["status"]
+    while manager.db.sessions.get_session(sid)["status"] != "done" or sid in manager.tasks:
+        assert time.monotonic() < deadline, manager.db.sessions.get_session(sid)["status"]
         time.sleep(0.01)
 
 
@@ -37,7 +37,7 @@ def test_bundled_web_dogfoods_app_api_without_becoming_an_app(tmp_path):
         created = client.post("/api/v1/sessions", json={"prompt": "from bundled Stables"})
         assert created.status_code == 201
         sid = created.json()["id"]
-        assert manager.db.get_session(sid)["app_id"] == ""
+        assert manager.db.sessions.get_session(sid)["app_id"] == ""
         wait_done(manager, sid)
         listed = client.get("/api/v1/sessions").json()[0]
         assert listed["id"] == sid
@@ -51,8 +51,8 @@ def test_session_event_replay_order_and_last_event_id(tmp_path):
     manager._spawn = lambda *_a, **_k: None
     with client:
         sid = client.post("/api/v1/sessions", json={"prompt": "stream"}).json()["id"]
-        first = manager.db.insert_event(sid, "characterization_first", {"n": 1})
-        manager.db.insert_event(sid, "characterization_second", {"n": 2})
+        first = manager.db.sessions.insert_event(sid, "characterization_first", {"n": 1})
+        manager.db.sessions.insert_event(sid, "characterization_second", {"n": 2})
 
         replay = client.get(f"/api/v1/sessions/{sid}/events?after={first['seq'] - 1}&follow=false")
         resumed = client.get(f"/api/v1/sessions/{sid}/events?after=0&follow=false",
@@ -76,7 +76,7 @@ def test_session_event_live_replay_deduplicates_and_closes(tmp_path):
     manager._spawn = lambda *_a, **_k: None
     with client:
         sid = client.post("/api/v1/sessions", json={"prompt": "stream"}).json()["id"]
-        historical = manager.db.insert_event(sid, "historical", {"n": 1})
+        historical = manager.db.sessions.insert_event(sid, "historical", {"n": 1})
 
         async def disconnected():
             return False
@@ -227,7 +227,7 @@ def test_independent_web_owner_token_cors_and_stream_ticket(tmp_path):
         created = client.post("/api/v1/sessions", headers=headers, json={"prompt": "remote owner"})
         assert created.status_code == 201
         sid = created.json()["id"]
-        assert manager.db.get_session(sid)["app_id"] == ""
+        assert manager.db.sessions.get_session(sid)["app_id"] == ""
         ticket = client.post(f"/api/v1/sessions/{sid}/events/ticket", headers=headers)
         assert ticket.status_code == 201
         streamed = client.get(ticket.json()["events_url"] + "&follow=false", headers={"Origin": ORIGIN})
@@ -256,8 +256,8 @@ def test_manual_browser_origins_are_owner_only(tmp_path):
 def test_cross_origin_admin_request_never_falls_back_to_ambient_owner(tmp_path, name, scopes, kind, preflight_status):
     client, manager = make_client(tmp_path)
     with client:
-        key, _ = manager.db.create_api_key(name, scopes, kind, [ORIGIN])
-        assert manager.db.get_api_key(key["id"])["name"] == name
+        key, _ = manager.db.credentials.create_api_key(name, scopes, kind, [ORIGIN])
+        assert manager.db.credentials.get_api_key(key["id"])["name"] == name
         preflight = client.options("/api/admin/v1/me", headers={
             "Origin": ORIGIN,
             "Access-Control-Request-Method": "GET",

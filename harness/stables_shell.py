@@ -4,7 +4,8 @@ Stables, the browser client, is a separate static site in its own repository, df
 daemon only through the documented API, and nothing in the daemon depends on it: the daemon serves a copy at `/` and
 `/static` when it finds one, and runs the API alone when it does not. The tower's deploy points `HARNESS_STABLES_DIR`
 at the pinned release (tools/stables/pin.json); a developer can clone the repository into the checkout as `stables/`,
-which git ignores. This is the only place the server names the client's files.
+which git ignores. A Server installed from the wheel has no checkout, so only the variable names a copy there. This is
+the only place the server names the client's files.
 """
 
 from __future__ import annotations
@@ -12,17 +13,17 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .config import ROOT
+from .config import CHECKOUT
 
 ENV = "HARNESS_STABLES_DIR"
-DEFAULT = ROOT / "stables" / "public"
+DEFAULT = CHECKOUT / "stables" / "public" if CHECKOUT else None
 
 
 def locate() -> Path | None:
     """The shell directory to serve: `HARNESS_STABLES_DIR` when set, else a clone in the checkout; None without one."""
     override = os.environ.get(ENV, "").strip()
     path = Path(override).expanduser() if override else DEFAULT
-    return path.resolve() if (path / "index.html").is_file() else None
+    return path.resolve() if path is not None and (path / "index.html").is_file() else None
 
 
 def top_files(shell: Path | None) -> frozenset[str]:

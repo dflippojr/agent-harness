@@ -495,7 +495,7 @@ class SettingsService:
         if backend == "local" and configured not in self.cfg.models:
             return "", "models"
         if backend and backend != "local":
-            cred = self.db.app_provider_credential(key["id"], backend) if self.db else None
+            cred = self.db.credentials.app_provider_credential(key["id"], backend) if self.db else None
             if cred and cred.get("models") and configured not in cred["models"]:
                 return "", "provider_policy"
         return None
@@ -525,9 +525,9 @@ class SettingsService:
         needs_grant = self.cfg.backends[backend].is_cli
         if self.db is None:
             return not needs_grant
-        if not needs_grant and not self.db.app_provider_managed(key["id"]):
+        if not needs_grant and not self.db.credentials.app_provider_managed(key["id"]):
             return True
-        return self.db.app_provider_credential(key["id"], backend) is not None
+        return self.db.credentials.app_provider_credential(key["id"], backend) is not None
 
     # --- mutate ----------------------------------------------------------
     def validate_admin(self, changes: dict[str, Any], revision: int | None, actor: dict | None = None) -> Plan:
@@ -560,8 +560,9 @@ class SettingsService:
             candidate = effective_candidate(old.active, old.pending)
             changes: dict[str, Any] = {key: old.lkg.values.get(key) for key in set(candidate) | set(old.lkg.values)}
             if dry_run:
-                return self._plan_admin(changes, old.active.revision if old.active else 0,
+                plan = self._plan_admin(changes, old.active.revision if old.active else 0,
                                         persist=False, apply=False, actor=actor)
+                return {**plan.as_dict(self.registry), "dry_run": True}
             current_revision = old.active.revision if old.active else 0
             new = next_overlay(
                 old,
@@ -941,7 +942,7 @@ class SettingsService:
     def delete_app(self, app_id: str) -> None:
         if self.db is None:
             return
-        self.db.delete_app_settings(app_id)
+        self.db.apps.delete_app_settings(app_id)
 
     def app_defaults(self, key: dict | None) -> dict[str, Any]:
         if not key or key.get("kind") != "app":
@@ -959,7 +960,7 @@ class SettingsService:
         app_id = session.get("app_id") or ""
         if not app_id or self.db is None:
             return {}
-        key = self.db.get_api_key(app_id)
+        key = self.db.credentials.get_api_key(app_id)
         snapshot = session.get("app_defaults") if isinstance(session.get("app_defaults"), dict) else {}
         if use_live_app_settings(key):
             return self.app_defaults(key)
@@ -996,7 +997,7 @@ class SettingsService:
     def _app_envelope(self, app_id: str) -> AppEnvelope:
         if self.db is None:
             return AppEnvelope()
-        row = self.db.get_app_settings(app_id)
+        row = self.db.apps.get_app_settings(app_id)
         if not row:
             return AppEnvelope()
         return AppEnvelope(schema_version=row.get("schema_version", SCHEMA_VERSION),
@@ -1005,7 +1006,8 @@ class SettingsService:
                            updated_at=float(row.get("updated_at") or 0))
 
     def _save_app_envelope(self, app_id: str, envelope: AppEnvelope) -> None:
-        self.db.set_app_settings(app_id, envelope.revision, envelope.values)
+        assert self.db is not None, "App settings are stored in the database"
+        self.db.apps.set_app_settings(app_id, envelope.revision, envelope.values)
 
     def _audit(self, actor_kind: str, action: str, keys: list[str], result: str, revision: int | None = None,
                actor: dict | None = None, extra: dict | None = None) -> None:

@@ -202,7 +202,7 @@ def test_unknown_backend_is_still_rejected_by_the_manager_and_the_runner(tmp_pat
     async def body():
         await m.start()
         sid = m.create("x", backend="opencode")["id"]
-        m.db.update_session(sid, backend="nope")
+        m.db.sessions.update_session(sid, backend="nope")
         s = await wait_status(m, sid, "failed")
         assert "not implemented" in s["run"]["failure"]["message"]
         await m.stop()
@@ -387,7 +387,7 @@ def test_opencode_cancel_stops_the_container(tmp_path):
 class FakeGuard:
     def __init__(self, active: bool):
         self.active = active
-        self.reasons = [{"kind": "game", "name": "game.exe"}]
+        self.reasons = [{"key": "game:game.exe", "kind": "game", "detail": "game.exe"}]  # the guard's shape
         self.cfg = type("C", (), {"resume_after_seconds": 60})()
 
     @staticmethod
@@ -415,7 +415,7 @@ def test_no_opencode_turn_starts_while_the_gpu_guard_holds(tmp_path):
         assert events(m, sid, "gpu_paused")
         await asyncio.sleep(m.runner.gpu_poll_seconds * 5)
         assert not state.exists()  # no OpenCode process yet
-        assert m.db.get_session(sid)["status"] == "queued"
+        assert m.db.sessions.get_session(sid)["status"] == "queued"
         guard.active = False
         m.runner.gpu_resumed(1)
         s = await wait_status(m, sid, "done")

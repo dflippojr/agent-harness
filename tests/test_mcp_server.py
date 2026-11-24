@@ -403,7 +403,7 @@ def test_hosted_claude_calls_harness_tools_through_policy_and_relay(tmp_path):
         assert [t["kind"] for t in s["taint"]] == ["web_search"]  # MCP results taint like native web tools
         assert made[0]["mcp_token"] and m.runner.mcp_tokens.session_for(made[0]["mcp_token"]) is None
         assert sid not in m.runner._mcp_grants
-        for record in m.db.events(sid):
+        for record in m.db.sessions.events(sid):
             assert made[0]["mcp_token"] not in json.dumps(record)
         await m.stop()
     asyncio.run(body())
@@ -433,7 +433,7 @@ def test_an_ask_rule_prompts_for_an_mcp_call_and_denial_blocks_it(tmp_path):
         await m.start()
         sid = m.create("search", backend="claude", project="guarded")["id"]
         await wait_status(m, sid, "waiting_approval")
-        pending = m.db.pending_approvals(sid)
+        pending = m.db.sessions.pending_approvals(sid)
         assert [(p["tool"], p["reason"]) for p in pending] == [("mcp__harness__web_search", "check searches")]
         m.decide(sid, pending[0]["id"], approve=approve)
         await wait_status(m, sid, "done")
@@ -640,7 +640,7 @@ def test_hosted_codex_calls_harness_tools_through_policy_and_relay(tmp_path):
         assert [t["kind"] for t in s["taint"]] == ["web_search"]  # MCP results taint like native web tools
         assert m.runner.mcp_tokens.session_for(made[0]["mcp_token"]) is None
         assert sid not in m.runner._mcp_grants
-        for record in m.db.events(sid):
+        for record in m.db.sessions.events(sid):
             assert made[0]["mcp_token"] not in json.dumps(record)
         await m.stop()
     asyncio.run(body())
@@ -657,7 +657,7 @@ def test_codex_mcp_calls_follow_ask_and_deny_rules(tmp_path, rule, approve, ran)
         sid = m.create("search", backend="codex", project="guarded")["id"]
         if rule == "ask":
             await wait_status(m, sid, "waiting_approval")
-            pending = m.db.pending_approvals(sid)
+            pending = m.db.sessions.pending_approvals(sid)
             assert [(p["tool"], p["reason"]) for p in pending] == [("mcp__harness__web_search", "check searches")]
             m.decide(sid, pending[0]["id"], approve=approve)
         await wait_status(m, sid, "done")
@@ -710,7 +710,7 @@ def test_memory_writes_over_mcp_ask_with_the_diff_and_run_once_under_the_approve
         await wait_status(m, sid, "failed")
         await asyncio.gather(*m.tasks.values())
         memory = m.modules.get("memory_library").service = FakeMemory()
-        s, cli, args = m.db.get_session(sid), FakeCli(), {"path": "notes.md", "content": "hi", "summary": "note"}
+        s, cli, args = m.db.sessions.get_session(sid), FakeCli(), {"path": "notes.md", "content": "hi", "summary": "note"}
         name = "mcp__harness__memory_write"
         approval = await m.runner._ask_cli_policy(s, cli, "req-1", {"tool_name": name, "input": args}, name, args,
                                                   "toolu-1")

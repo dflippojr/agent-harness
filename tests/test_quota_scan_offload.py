@@ -18,18 +18,22 @@ class Bus:
         self.events.append((kind, payload))
 
 
+class Accounts:
+    def account_by_id(self, uid):
+        return {"disk_quota_bytes": LIMIT}
+
+
 class Db:
     def __init__(self, owner_id):
         self.session = {"id": "s1", "owner_id": owner_id, "run": {"workspace_mb": 0}, "target": "tower"}
+        self.accounts = Accounts()      # the account store (#992), as Runner reads it
+        self.sessions = self            # the session routing proxy (#992 stage 6), as Runner reads the session
 
     def get_session(self, sid):
         return self.session
 
     def update_session(self, sid, **fields):
         self.session.update(fields)
-
-    def account_by_id(self, uid):
-        return {"disk_quota_bytes": LIMIT}
 
 
 class Ws:

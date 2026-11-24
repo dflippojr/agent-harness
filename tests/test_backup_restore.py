@@ -51,24 +51,24 @@ def _quiet(*_args) -> None:
 async def _seed_and_back_up(cfg) -> tuple[Path, dict]:
     m = Manager(cfg, chat=Script([Completion(content="ok")]))
     await m.start(maintenance=False)
-    first, _ = m.db.create_api_key("first", scopes="sessions", kind="app")
-    second, _ = m.db.create_api_key("second", scopes="sessions", kind="app")
-    gone, _ = m.db.create_api_key("gone", scopes="sessions", kind="app")
+    first, _ = m.db.credentials.create_api_key("first", scopes="sessions", kind="app")
+    second, _ = m.db.credentials.create_api_key("second", scopes="sessions", kind="app")
+    gone, _ = m.db.credentials.create_api_key("gone", scopes="sessions", kind="app")
     apps = {"first": first["id"], "second": second["id"], "gone": gone["id"]}
-    m.db.insert_account({"user_id": "u-member", "role": "member", "login": "member", "display_name": "member",
+    m.db.accounts.insert_account({"user_id": "u-member", "role": "member", "login": "member", "display_name": "member",
                          "enabled": 1, "disk_quota_bytes": 0, "max_running": 1, "max_queued": 1,
                          "created_at": 1, "updated_at": 1, "last_activity_at": 0})
     for sid, app_id in (("own1", ""), ("a1", apps["first"]), ("a2", apps["first"]), ("b1", apps["second"]),
                         ("g1", apps["gone"])):
-        m.db.insert_session(_session(sid, app_id))
-        m.db.insert_event(sid, "user_message", {"content": f"hello {sid}"})
+        m.db.sessions.insert_session(_session(sid, app_id))
+        m.db.sessions.insert_event(sid, "user_message", {"content": f"hello {sid}"})
     _write(storage.transcripts_dir(cfg, "owner") / "own1.md", "owner transcript")
     _write(storage.transcripts_dir(cfg, "u-member") / "m1.md", "member transcript")
     for name in ("first", "gone"):
         _write(storage.transcripts_dir(cfg, "owner", apps[name]) / "s.md", f"{name} transcript")
     # Revoked and erased after the store was written: the backup still holds its store and transcripts.
-    m.db.revoke_api_key(apps["gone"])
-    m.db.mark_app_erased(apps["gone"])
+    m.db.credentials.revoke_api_key(apps["gone"])
+    m.db.apps.mark_app_erased(apps["gone"])
     result = await m.modules.get("backup").service.backup()
     await m.stop()
     m.db.close()
@@ -80,8 +80,8 @@ async def _booted_sessions(cfg) -> tuple[dict, list]:
     m = Manager(cfg, chat=Script([Completion(content="ok")]))
     await m.start(maintenance=False)
     try:
-        return {sid: (m.db.get_session(sid) or {}).get("app_id")
-                for sid in ("own1", "a1", "a2", "b1")}, [e["data"] for e in m.db.events("a1")]
+        return {sid: (m.db.sessions.get_session(sid) or {}).get("app_id")
+                for sid in ("own1", "a1", "a2", "b1")}, [e["data"] for e in m.db.sessions.events("a1")]
     finally:
         await m.stop()
         m.db.close()
@@ -189,7 +189,7 @@ def backed_up(tmp_path):
     cfg = _cfg(tmp_path)
     cfg.data_dir.mkdir(parents=True)
     db = Database(cfg.db_path)
-    db.insert_session(_session("s1"))
+    db.sessions.insert_session(_session("s1"))
     _write(storage.transcripts_dir(cfg, "owner") / "nested" / "s1.md", "x" * 4000)
     result = asyncio.run(BackupService(cfg, db).backup())
     db.close()
@@ -308,7 +308,7 @@ def _light_backup(cfg) -> Path:
     Path(cfg.data_dir).mkdir(parents=True, exist_ok=True)
     db = Database(cfg.db_path)
     try:
-        db.insert_session(_session("s1"))
+        db.sessions.insert_session(_session("s1"))
         return Path(asyncio.run(BackupService(cfg, db).backup())["path"])
     finally:
         db.close()

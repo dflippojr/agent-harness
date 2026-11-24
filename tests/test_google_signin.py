@@ -304,7 +304,7 @@ def test_defaults_off_preserve_existing_principals(tmp_path, monkeypatch):
         for login in (None, OWNER, ALICE, BOB, GUEST, KITCHEN, STRANGER):
             b = e.browser(login)
             b.jar.set(gs.SESSION_COOKIE, "forged", domain="tower.tailnet.ts.net")
-            expected = resolve_human(e.cfg, login, e.m.db)
+            expected = resolve_human(e.cfg, login, e.m.db.accounts)
             r = b.get("/me")
             if expected.allowed:
                 assert r.status_code == 200 and r.json()["role"] == expected.role, (login, r.text)
@@ -527,7 +527,7 @@ def test_concurrent_invitation_redemption_links_once(env):
     for t in threads:
         t.join()
     assert sorted(results.values()) == ["/#/agents", "/#/signin/failed"]
-    assert env.m.db.google_identity(env.ids[ALICE]) is not None
+    assert env.m.db.accounts.google_identity(env.ids[ALICE]) is not None
 
 
 def test_one_sub_per_member_and_one_member_per_sub(env):
@@ -535,7 +535,7 @@ def test_one_sub_per_member_and_one_member_per_sub(env):
     b = env.browser(BOB)
     r = env.flow(b, ALICE_SUB, BOB, mode="link")
     assert r.headers["location"] == "/#/signin/failed"
-    assert env.m.db.google_identity(env.ids[BOB]) is None
+    assert env.m.db.accounts.google_identity(env.ids[BOB]) is None
     r = env.start(env.browser(ALICE), "link")
     assert r.status_code == 409  # unlink first
     assert env.owner("POST", f"{PREFIX}/accounts/{env.ids[ALICE]}/google/invitation").status_code == 409
@@ -546,7 +546,7 @@ def test_mutable_email_does_not_change_identity(env):
     b = env.browser(KITCHEN)
     r = env.flow(b, ALICE_SUB, "alice@new.example")
     assert r.headers["location"] == "/#/agents"
-    assert env.m.db.google_identity(env.ids[ALICE])["email"] == "alice@new.example"
+    assert env.m.db.accounts.google_identity(env.ids[ALICE])["email"] == "alice@new.example"
     # a different sub with Alice's email is not Alice
     r = env.flow(env.browser(KITCHEN), "someone-else", "alice@new.example")
     assert r.headers["location"] == "/#/signin/failed"
@@ -865,7 +865,7 @@ def test_idle_and_absolute_expiry(env):
     env.clock.advance(gs.IDLE_SECONDS + 1)
     assert me(b).status_code == 401  # idle
     b = env.kitchen_signin()
-    created = env.m.db.web_session(gs._hash(b.session_cookie()))["created_at"]
+    created = env.m.db.accounts.web_session(gs._hash(b.session_cookie()))["created_at"]
     for _ in range(4):
         env.clock.advance(gs.IDLE_SECONDS - 60)
         assert me(b).status_code == 200
@@ -878,13 +878,13 @@ def test_touch_is_throttled(env):
     env.link(ALICE, ALICE_SUB)
     b = env.kitchen_signin()
     h = gs._hash(b.session_cookie())
-    before = env.m.db.web_session(h)["last_seen_at"]
+    before = env.m.db.accounts.web_session(h)["last_seen_at"]
     env.clock.advance(10)
     me(b)
-    assert env.m.db.web_session(h)["last_seen_at"] == before
+    assert env.m.db.accounts.web_session(h)["last_seen_at"] == before
     env.clock.advance(gs.TOUCH_SECONDS)
     me(b)
-    assert env.m.db.web_session(h)["last_seen_at"] > before
+    assert env.m.db.accounts.web_session(h)["last_seen_at"] > before
 
 
 def test_sign_in_regenerates_session(env):
@@ -893,7 +893,7 @@ def test_sign_in_regenerates_session(env):
     old = b.session_cookie()
     env.flow(b, ALICE_SUB, ALICE)
     assert b.session_cookie() != old
-    assert env.m.db.web_session(gs._hash(old))["revoked_at"] is not None
+    assert env.m.db.accounts.web_session(gs._hash(old))["revoked_at"] is not None
 
 
 def test_member_unlink_and_relink(env):
@@ -923,7 +923,7 @@ def test_owner_revoke_all_and_unlink(env):
     b3 = env.kitchen_signin()
     assert env.owner("DELETE", f"{PREFIX}/accounts/{env.ids[ALICE]}/google", json={"confirm": True}).status_code == 200
     assert me(b3).status_code == 401
-    assert env.m.db.google_identity(env.ids[ALICE]) is None
+    assert env.m.db.accounts.google_identity(env.ids[ALICE]) is None
     assert me(env.browser(ALICE)).status_code == 200
 
 

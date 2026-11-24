@@ -98,36 +98,36 @@ def test_artifact_cap_scoping_and_ranges(tmp_path):
     db = Database(path)
     text = "abcdefghij" * 3000
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    db.put_artifact("s1", digest, text)
-    db.put_artifact("s1", digest, "ignored duplicate")
-    db.put_artifact("s2", digest, "other session")
+    db.sessions.put_artifact("s1", digest, text)
+    db.sessions.put_artifact("s1", digest, "ignored duplicate")
+    db.sessions.put_artifact("s2", digest, "other session")
 
-    assert db.full_artifact("s1", digest) == text  # the daemon-side read is not capped
-    assert db.full_artifact("missing", digest) is None
-    head, truncated = db.read_artifact("s1", digest)
+    assert db.sessions.full_artifact("s1", digest) == text  # the daemon-side read is not capped
+    assert db.sessions.full_artifact("missing", digest) is None
+    head, truncated = db.sessions.read_artifact("s1", digest)
     assert head == text[:20000] and truncated
-    assert db.read_artifact("s1", digest, 5, 15) == (text[5:15], False)
-    capped, truncated = db.read_artifact("s1", digest, 0, 29999)
+    assert db.sessions.read_artifact("s1", digest, 5, 15) == (text[5:15], False)
+    capped, truncated = db.sessions.read_artifact("s1", digest, 0, 29999)
     assert len(capped) == 20000 and truncated
-    assert db.read_artifact("s1", digest, 29990, 40000) == (text[29990:], False)
-    assert db.read_artifact("s2", digest) == ("other session", False)
-    assert db.read_artifact("s3", digest) is None
-    db.delete_session("s1")
-    assert db.read_artifact("s1", digest) is None
-    assert db.read_artifact("s2", digest) is not None
+    assert db.sessions.read_artifact("s1", digest, 29990, 40000) == (text[29990:], False)
+    assert db.sessions.read_artifact("s2", digest) == ("other session", False)
+    assert db.sessions.read_artifact("s3", digest) is None
+    db.sessions.delete_session("s1")
+    assert db.sessions.read_artifact("s1", digest) is None
+    assert db.sessions.read_artifact("s2", digest) is not None
 
     emoji = "😀" * 22001                              # multi-byte: ranges count characters, not bytes
     emoji_digest = hashlib.sha256(emoji.encode("utf-8")).hexdigest()
-    db.put_artifact("s4", emoji_digest, emoji)
+    db.sessions.put_artifact("s4", emoji_digest, emoji)
     db.close()
 
     db = Database(path)                                # a reopened database resumes where the first left off
-    first, truncated = db.read_artifact("s4", emoji_digest)
+    first, truncated = db.sessions.read_artifact("s4", emoji_digest)
     assert first == emoji[:20000] and truncated
-    rest, truncated = db.read_artifact("s4", emoji_digest, 20000, len(emoji))
+    rest, truncated = db.sessions.read_artifact("s4", emoji_digest, 20000, len(emoji))
     assert rest == emoji[20000:] and not truncated
     assert hashlib.sha256((first + rest).encode("utf-8")).hexdigest() == emoji_digest
-    assert db.read_artifact("other-session", emoji_digest) is None
+    assert db.sessions.read_artifact("other-session", emoji_digest) is None
     db.close()
 
 
@@ -135,15 +135,15 @@ def test_artifact_with_embedded_nuls_round_trips(tmp_path):
     db = Database(tmp_path / "nul.db")
     text = "\0start" + "a" * 100 + "\0mid" + "b" * 30000 + "end\0"
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    db.put_artifact("s1", digest, text)
-    assert db.full_artifact("s1", digest) == text
-    got, truncated = db.read_artifact("s1", digest, 0, 50)
+    db.sessions.put_artifact("s1", digest, text)
+    assert db.sessions.full_artifact("s1", digest) == text
+    got, truncated = db.sessions.read_artifact("s1", digest, 0, 50)
     assert (got, truncated) == (text[:50], False)
-    assert db.read_artifact("s1", digest, 103, 110) == (text[103:110], False)  # spans the middle NUL
-    assert db.read_artifact("s1", digest, len(text) - 6) == (text[-6:], False)  # ends in NUL
+    assert db.sessions.read_artifact("s1", digest, 103, 110) == (text[103:110], False)  # spans the middle NUL
+    assert db.sessions.read_artifact("s1", digest, len(text) - 6) == (text[-6:], False)  # ends in NUL
     chunks, pos = [], 0
     while True:
-        chunk, more = db.read_artifact("s1", digest, pos)
+        chunk, more = db.sessions.read_artifact("s1", digest, pos)
         chunks.append(chunk)
         pos += len(chunk)
         if not more:
@@ -152,5 +152,5 @@ def test_artifact_with_embedded_nuls_round_trips(tmp_path):
     recovered = "".join(chunks)
     assert recovered == text
     assert hashlib.sha256(recovered.encode("utf-8")).hexdigest() == digest
-    db.delete_session("s1")
-    assert db.read_artifact("s1", digest) is None
+    db.sessions.delete_session("s1")
+    assert db.sessions.read_artifact("s1", digest) is None

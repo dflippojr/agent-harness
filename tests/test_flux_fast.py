@@ -978,9 +978,45 @@ def hanging_comfy():
     return handler
 
 
-def test_delayed_interrupt_cannot_cancel_next_comfy_job(tmp_path):
+async def _finished_within(awaitable, budget: float):
+    """The result of `awaitable` if it has finished once `budget` seconds have passed, else an AssertionError.
+
+    Unlike asyncio.wait_for, this judges whether the task finished, not which callback ran first. When one
+    synchronous step stalls the loop past the deadline, the task's last step and the expired timer run in
+    the same loop iteration, and wait_for then raises TimeoutError for a task that already returned (#1034).
+    """
+    task = asyncio.ensure_future(awaitable)
+    done, _ = await asyncio.wait({task}, timeout=budget)
+    if task not in done:
+        message = f"{task!r} still running after {budget} s"
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise AssertionError(message)
+    return task.result()
+
+
+def _delayed_interrupt_scenario(tmp_path, cancel_budget: float | None = None, stall_seconds=0.0):
+    """Cancel a running ComfyUI job whose interrupt is delayed, then check the next job is untouched.
+
+    stall_seconds > 0 blocks the event loop synchronously when the next job is marked running, the step
+    right after the cancelled job's boundary releases cancel(): a loaded runner does the same in any
+    synchronous SQLite write (#1034). cancel_budget bounds only cancel(); the next job, which writes its
+    image through a thread with fsync, keeps the scaled deadline.
+    """
+    budget = scaled(2)
+    cancel_budget = budget if cancel_budget is None else cancel_budget
+
     async def body():
         m, _, _ = image_manager(tmp_path)
+        if stall_seconds:
+            update_image = m.images.db.update_image
+
+            def stalling_update(job_id, **fields):
+                result = update_image(job_id, **fields)
+                if job_id == second["id"] and fields.get("status") == "running":
+                    time.sleep(stall_seconds)
+                return result
+            m.images.db.update_image = stalling_update
         interrupt_received = asyncio.Event()
         deliver_interrupt = asyncio.Event()
         state = {"prompts": [], "running": "", "interrupted": []}
@@ -1034,8 +1070,8 @@ def test_delayed_interrupt_cannot_cancel_next_comfy_job(tmp_path):
         assert state["prompts"] == ["p1"]
 
         deliver_interrupt.set()
-        cancelled = await asyncio.wait_for(cancelling, timeout=2)
-        completed = await asyncio.wait_for(m.images.wait(second["id"]), timeout=2)
+        cancelled = await _finished_within(cancelling, cancel_budget)
+        completed = await _finished_within(m.images.wait(second["id"]), budget)
         assert cancelled["status"] == "failed"
         assert cancelled["error"] == "cancelled"
         assert completed["status"] == "done"
@@ -1044,6 +1080,15 @@ def test_delayed_interrupt_cannot_cancel_next_comfy_job(tmp_path):
         await m.stop()
 
     asyncio.run(body())
+
+
+def test_delayed_interrupt_cannot_cancel_next_comfy_job(tmp_path):
+    _delayed_interrupt_scenario(tmp_path)
+
+
+def test_delayed_interrupt_survives_event_loop_stall_past_the_budget(tmp_path):
+    # cancel() finishes in the stalled step's next loop iteration, the same one in which its deadline expires.
+    _delayed_interrupt_scenario(tmp_path, cancel_budget=0.2, stall_seconds=0.5)
 
 
 def test_cancel_deletes_comfy_prompt_while_still_pending(tmp_path):

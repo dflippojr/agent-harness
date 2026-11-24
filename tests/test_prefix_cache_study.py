@@ -85,10 +85,10 @@ def test_turn_metrics_by_session_keeps_only_turn_metrics_rows():
                     {"type": "tool_result", "data": {}},
                     {"type": "turn_metrics", "data": {"turn": 2, "cache_tokens": 90}}],
               "b": []}
-    db = SimpleNamespace(
+    db = SimpleNamespace(sessions=SimpleNamespace(
         sessions_with_status=lambda *statuses: [{"id": i, "title": f"canary {i}", "status": "done"} for i in "ab"]
         if statuses == canary_cli.DONE else [],
-        events=lambda sid: events[sid])
+        events=lambda sid: events[sid]))
     out = canary_cli.turn_metrics_by_session(db)
     assert [s["session"] for s in out] == ["a", "b"]
     assert out[0]["turns"] == [{"turn": 1, "cache_tokens": 0}, {"turn": 2, "cache_tokens": 90}]
@@ -328,6 +328,7 @@ def test_a_fake_session_breaks_the_prefix_only_where_compaction_or_the_plan_does
     monkeypatch.setenv(fake_model.ENV, str(script))
     cfg = config_mod.load(config_dir, data_dir)
     cfg.planning = config_mod.PlanningConfig(reinject=reinject)
+    cfg.mask_batch_at = 0.0  # the per-turn breaks this study pins; batching is the default since #1027
     m = Manager(cfg)
     path = tmp_path / "p.jsonl"
     m.runner.chat = canary_cli.PromptCapture(path, chat=m.runner.chat, holder=lambda: m.scheduler.holder)
@@ -337,10 +338,10 @@ def test_a_fake_session_breaks_the_prefix_only_where_compaction_or_the_plan_does
         try:
             s = m.create("Run the prefix study.", project=fake_instance.PROJECT)
             for _ in range(600):
-                if m.db.get_session(s["id"])["status"] in ("done", "failed"):
+                if m.db.sessions.get_session(s["id"])["status"] in ("done", "failed"):
                     break
                 await asyncio.sleep(0.05)
-            return m.db.get_session(s["id"])
+            return m.db.sessions.get_session(s["id"])
         finally:
             await m.stop()
 

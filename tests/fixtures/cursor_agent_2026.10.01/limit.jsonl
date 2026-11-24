@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/workspace","model":"Cursor Grok 4.6","permissionMode":"default","session_id":"3c9e2f71-4a8b-4d6e-b1f0-7a2c5e8d9b34"}
+{"type":"result","subtype":"error","duration_ms":412,"duration_api_ms":0,"is_error":true,"result":"You've hit your usage limit for this billing cycle. Upgrade or wait for the reset.","request_id":"5d1c8e2a-7b3f-4a9e-8c6d-2e1f0a9b3c47","session_id":"3c9e2f71-4a8b-4d6e-b1f0-7a2c5e8d9b34"}

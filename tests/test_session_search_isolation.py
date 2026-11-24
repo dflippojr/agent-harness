@@ -31,9 +31,9 @@ def _tools(tmp_path) -> tuple[Database, SessionSearch]:
 
 
 def _apps(db: Database):
-    app_a, _ = db.create_api_key("shop", "sessions", "app")
-    app_b, _ = db.create_api_key("other", "sessions", "app")
-    reader, _ = db.create_api_key("dash", "sessions sessions:all", "app")
+    app_a, _ = db.credentials.create_api_key("shop", "sessions", "app")
+    app_b, _ = db.credentials.create_api_key("other", "sessions", "app")
+    reader, _ = db.credentials.create_api_key("dash", "sessions sessions:all", "app")
     return app_a, app_b, reader
 
 
@@ -86,7 +86,7 @@ def test_revoked_sessions_all_does_not_unrestrict(tmp_path):
     _history(db, app_a, app_b, reader)
 
     assert restrict_app_id(db, "dddd00000r") is None
-    assert db.revoke_api_key(reader["id"])
+    assert db.credentials.revoke_api_key(reader["id"])
     assert restrict_app_id(db, "dddd00000r") == reader["id"]
     with pytest.raises(ToolError, match="no session matches"):
         tools.session_read("aaaa000001", _session="dddd00000r")
@@ -94,7 +94,7 @@ def test_revoked_sessions_all_does_not_unrestrict(tmp_path):
     assert_no_hit(hidden, "aaaa000001")
 
     # A non-elevated revoked app keeps its own-app boundary; in-flight sessions are not cancelled.
-    assert db.revoke_api_key(app_a["id"])
+    assert db.credentials.revoke_api_key(app_a["id"])
     assert restrict_app_id(db, "bbbb00000a") == app_a["id"]
     own = tools.session_search(APP_A_MARKER, _session="bbbb00000a")
     assert "aaaa00000a" in own
@@ -179,9 +179,9 @@ def test_agent_tool_path_owner_two_apps_own_session_and_read_all(tmp_path):
         await m.start(maintenance=False)
         owner = m.create(f"keep {OWNER_MARKER} secret")
         await wait_status(m, owner["id"], "done")
-        app_a, app_a_secret = m.db.create_api_key("shop", "sessions", "app")
-        app_b, _ = m.db.create_api_key("other", "sessions", "app")
-        reader, _ = m.db.create_api_key("dash", "sessions sessions:all", "app")
+        app_a, app_a_secret = m.db.credentials.create_api_key("shop", "sessions", "app")
+        app_b, _ = m.db.credentials.create_api_key("other", "sessions", "app")
+        reader, _ = m.db.credentials.create_api_key("dash", "sessions sessions:all", "app")
         a_hist = m.create(f"buy {APP_A_MARKER} milk", app=app_a)
         await wait_status(m, a_hist["id"], "done")
         b_hist = m.create(f"fly {APP_B_MARKER} tomorrow", app=app_b)

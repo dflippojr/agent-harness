@@ -5,9 +5,11 @@ from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
-from harness.modules import (HarnessError, RouteTable, manager as mgr, runtime,
-                             require_admin, log_safe, compat, API_VERSION, ROOT, credential_audit,
-                             refuse_hub_owner_key)
+from harness.modules import (HarnessError, RouteTable, documented, response_docs, manager as mgr, runtime,
+                             require_admin, log_safe, compat, API_VERSION, credential_audit,
+                             refuse_hub_owner_key, repo_file)
+
+from .store import RunnerPairingStore
 
 log = logging.getLogger("harness.runners")
 RUNNER_BODY_LIMIT = 16 * 2**20
@@ -62,7 +64,7 @@ def runner_auth(request: Request, name: str):
     return m
 
 
-@owner_routes.get("/runners")
+@owner_routes.get("/runners", responses=documented(list[response_docs.RunnerResponse]))
 async def runners(request: Request):
     """List each runner's presence, compatibility, pending requests, and whether remote update is supported."""
     return mgr(request).hub.status()
@@ -84,7 +86,7 @@ async def runner_result(name: str, body: RunnerResult, request: Request):
     return {"accepted": m.hub.result(name, body.id, body.ok, body.value, body.error, body.kind)}
 
 
-@owner_routes.post("/runners/{name}/update")
+@owner_routes.post("/runners/{name}/update", responses=documented(response_docs.RunnerUpdateResult))
 async def runner_update(name: str, request: Request):
     """Ask an online Mac runner to update itself and wait for the outcome; 409 if offline, too old, or failed."""
     m = mgr(request)
@@ -113,7 +115,7 @@ async def runner_update(name: str, request: Request):
 @owner_routes.get("/runner-pairing-codes")
 async def runner_pairing_codes(request: Request):
     """Owner view. Native pairing codes and runner tokens are never included."""
-    return mgr(request).db.list_runner_pairing_codes()
+    return RunnerPairingStore(mgr(request).db).list_runner_pairing_codes()
 
 
 @owner_routes.post("/runner-pairing-codes", status_code=201)
@@ -154,7 +156,7 @@ async def pair_runner(body: RunnerPairRequest, request: Request):
 @public_routes.get("/mac-client/install.sh", include_in_schema=False)
 async def mac_client_installer():
     """Serve the shell script that installs the Mac client."""
-    return FileResponse(ROOT / "macrunner" / "install.sh",
+    return FileResponse(repo_file(__package__, "macrunner/install.sh"),
                         media_type="text/x-shellscript", headers={"Cache-Control": "no-cache"})
 
 

@@ -31,7 +31,7 @@ import json
 import re
 import secrets
 import time
-from typing import Literal
+from typing import Literal, cast
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -40,6 +40,8 @@ from pydantic import BaseModel, Field
 from . import audit_context, catalog_ids, credential_audit
 from .digests import sha256_hex
 from .manager import HarnessError
+from . import response_docs as docs
+from .response_docs import documented
 from .origins import normalize_origin, request_origin as _request_origin
 from .request_body import json_body
 
@@ -168,7 +170,7 @@ def _match_code() -> str:
 
 def _unused_match_code(db) -> str:
     """Called inside the allocation write, after sweeping expired requests."""
-    used = db.open_pairing_match_codes()
+    used = db.credentials.open_pairing_match_codes()
     code = _match_code()
     while code in used:
         code = _match_code()
@@ -204,7 +206,7 @@ def app_view(row: dict) -> dict:
 
 def sweep(db, now: float) -> None:
     """Expire what ran out of time, one `pairing_request.expire` row each. Runs inside the caller's write."""
-    for row in db.expire_pairing_requests(now, ACTIVE, KEEP_SECONDS):
+    for row in db.credentials.expire_pairing_requests(now, ACTIVE, KEEP_SECONDS):
         action = "hub.claim.expire" if row["kind"] == HUB else "pairing_request.expire"
         credential_audit.record(db, audit_context.SYSTEM, action, row["id"], "ok",
                                 "pairing_request", {"request_id": row["id"], "reason": "expired"})
@@ -283,12 +285,12 @@ def register_app(app: FastAPI) -> None:
         def commit():
             db, now = m.db.main, clock()
             sweep(db, now)
-            if hub and db.hub_claim() is not None:  # exclusive (#543): no API path replaces the Hub
+            if hub and db.credentials.hub_claim() is not None:  # exclusive (#543): no API path replaces the Hub
                 credential_audit.record(db, unknown, "hub.claim.refused", "", "denied", "pairing_request",
                                         {"reason": "hub_claimed", "browser": bool(origin)})
                 return _refuse(409, "this harness already has a Hub; the owner releases it on the daemon host with "
                                     "`harness hub release --confirm`", "hub_claimed")
-            recent, mine, total = db.pairing_request_load(source, now - SOURCE_RATE[1], (PENDING,))
+            recent, mine, total = db.credentials.pairing_request_load(source, now - SOURCE_RATE[1], (PENDING,))
             if recent >= SOURCE_RATE[0] or mine >= SOURCE_PENDING_CAP or total >= PENDING_CAP:
                 reason = "rate_limited" if recent >= SOURCE_RATE[0] else "too_many_pending"
                 credential_audit.record(db, unknown, action, "", "denied", "pairing_request", {"reason": reason})
@@ -297,7 +299,7 @@ def register_app(app: FastAPI) -> None:
                    "catalog_app_id": catalog_app_id, "origin": origin, "source": source, "challenge_hash": challenge,
                    "match_code": _unused_match_code(db), "state": PENDING, "armed": 0, "created_at": now,
                    "expires_at": now + APPROVE_TTL_SECONDS, "approved_at": None, "finished_at": None, "key_id": ""}
-            db.insert_pairing_request(row)
+            db.credentials.insert_pairing_request(row)
             credential_audit.record(db, unknown, action, row["id"], "ok", "pairing_request",
                                     {"request_id": row["id"], "scopes": scopes.split(), "catalog_app_id": catalog_app_id,
                                      "browser": bool(origin), "armed": False})
@@ -320,7 +322,7 @@ def register_app(app: FastAPI) -> None:
         def commit():
             db, now = m.db.main, clock()
             sweep(db, now)
-            row = db.get_pairing_request(rid)
+            row = db.credentials.get_pairing_request(rid)
             refusal = None
             if row is None:
                 refusal = (404, "no pairing request has that id", "not_found")
@@ -334,11 +336,11 @@ def register_app(app: FastAPI) -> None:
                 return _refuse(*refusal)
             # Origin can be forged by a native caller: every claim needs the owner's typed code (#519 decision 2).
             fields = {"state": CLAIMED, "match_code": _unused_match_code(db), "expires_at": now + APPROVE_TTL_SECONDS}
-            if not db.update_pairing_request(rid, (ARMED,), challenge_hash=challenge, **fields):
+            if not db.credentials.update_pairing_request(rid, (ARMED,), challenge_hash=challenge, **fields):
                 return _refuse(409, "this pairing request cannot be claimed", "not_claimable")
             credential_audit.record(db, unknown, "pairing_request.claim", rid, "ok", "pairing_request",
                                     {"request_id": rid, "browser": bool(origin)})
-            return {"row": db.get_pairing_request(rid)}
+            return {"row": db.credentials.get_pairing_request(rid)}
         out = await m.db.main.awrite(commit)
         _raise_refusal(out)
         return JSONResponse(app_view(out["row"]), headers=NO_STORE)
@@ -360,7 +362,7 @@ def register_app(app: FastAPI) -> None:
         def commit():
             db, now = m.db.main, clock()
             sweep(db, now)
-            row = db.get_pairing_request(rid)
+            row = db.credentials.get_pairing_request(rid)
             hub = row is not None and row["kind"] == HUB
             refusal = _redeem_refusal(row, origin, verifier)
             if refusal:
@@ -370,9 +372,9 @@ def register_app(app: FastAPI) -> None:
                                             "hub.claim.redeem" if hub else "pairing_request.redeem", "",
                                             "denied", "pairing_request", {"reason": reason})
                 return _refuse(status, detail, "pairing_pending" if status == 409 else "")
-            if hub:
-                return _redeem_hub(db, row, now)
-            key, secret = db.redeem_pairing_request(rid, now)
+            if hub:  # a hub request is a row
+                return _redeem_hub(db, cast(dict, row), now)
+            key, secret = db.credentials.redeem_pairing_request(rid, now)
             if key is None:
                 return _refuse(400, "this pairing request was already redeemed")
             credential_audit.record(db, credential_audit.device_context(key["id"], "app"), "pairing_request.redeem",
@@ -389,9 +391,9 @@ def register_app(app: FastAPI) -> None:
 
 def _redeem_hub(db, row: dict, now: float) -> dict:
     """Mint the one Hub key (#543), or refuse when a Hub was recorded since this claim was approved."""
-    key, secret, error = db.redeem_hub_claim(row["id"], now)
+    key, secret, error = db.credentials.redeem_hub_claim(row["id"], now)
     if error == "claimed":
-        db.update_pairing_request(row["id"], (APPROVED,), state=DENIED, finished_at=now)
+        db.credentials.update_pairing_request(row["id"], (APPROVED,), state=DENIED, finished_at=now)
         credential_audit.record(db, credential_audit.unknown_context(), "hub.claim.refused", row["id"], "denied",
                                 "pairing_request", {"request_id": row["id"], "reason": "hub_claimed"})
         return _refuse(409, "this harness already has a Hub", "hub_claimed")
@@ -441,7 +443,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         def commit():
             db, now = m.db.main, clock()
             sweep(db, now)
-            row = db.get_pairing_request(rid)
+            row = db.credentials.get_pairing_request(rid)
             refusal = None
             if row is None:
                 refusal = (404, "no pairing request has that id", "not_found")
@@ -457,11 +459,11 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
                 credential_audit.record(db, ctx, action, rid if row else "", outcome, "pairing_request",
                                         {"request_id": rid, "reason": refusal[2]} if row else {"reason": "not_found"})
                 return _refuse(*refusal)
-            if not db.update_pairing_request(rid, states, **fields(now)):
+            if not db.credentials.update_pairing_request(rid, states, **fields(now)):
                 return _refuse(409, "this pairing request changed; list it again", "not_approvable")
             credential_audit.record(db, ctx, action, rid, "ok", "pairing_request",
                                     {"request_id": rid, **meta(row)})
-            return {"row": db.get_pairing_request(rid)}
+            return {"row": db.credentials.get_pairing_request(rid)}
         out = await m.db.main.awrite(commit)
         _raise_refusal(out)
         return JSONResponse(owner_view(out["row"], m.cfg), headers=NO_STORE)
@@ -472,7 +474,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
     def _elevated_unacknowledged(scopes: list[str], acknowledged: bool) -> bool:
         return bool(ELEVATED.intersection(scopes)) and not acknowledged
 
-    @app.get(base)
+    @app.get(base, responses=documented(list[docs.PairingRequestView]))
     async def list_pairing_requests(request: Request):
         """Owner view of pairing requests: metadata and disclosure copy; never a match code, token or verifier."""
         require_admin(request, mgr)
@@ -480,7 +482,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
 
         def commit():
             sweep(m.db.main, clock())
-            return m.db.main.list_pairing_requests()
+            return m.db.main.credentials.list_pairing_requests()
         rows = await m.db.main.awrite(commit)
         return JSONResponse([owner_view(r, m.cfg) for r in rows], headers=NO_STORE)
 
@@ -500,7 +502,8 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         return JSONResponse(values, headers={**NO_STORE, "X-Disclosures-Digest": disclosures_digest(values),
                                              "Access-Control-Expose-Headers": "X-Disclosures-Digest"})
 
-    @app.post(base, status_code=201, responses={409: {"description": "disclosures_changed: preview again before arming"}})
+    @app.post(base, status_code=201, responses={**documented(docs.PairingRequestView, 201),
+                                                409: {"description": "disclosures_changed: preview again before arming"}})
     async def arm_pairing_request(body: ArmPairingRequest, request: Request):
         """Arm a pre-approved slot for a Hub entry (#519): no secret; the App claims it with its own challenge."""
         key = require_admin(request, mgr)
@@ -531,7 +534,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
                    "scopes": scopes, "catalog_app_id": catalog_app_id, "origin": origin, "source": "",
                    "challenge_hash": "", "match_code": "", "state": ARMED, "armed": 1, "created_at": now,
                    "expires_at": now + APPROVE_TTL_SECONDS, "approved_at": now, "finished_at": None, "key_id": ""}
-            db.insert_pairing_request(row)
+            db.credentials.insert_pairing_request(row)
             credential_audit.record(db, ctx, "pairing_request.create", row["id"], "ok", "pairing_request",
                                     {"request_id": row["id"], "scopes": scopes.split(), "catalog_app_id": catalog_app_id,
                                      "browser": bool(origin), "armed": True,
@@ -543,7 +546,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         _raise_refusal(out)
         return JSONResponse(out["view"], status_code=201, headers=NO_STORE)
 
-    @app.post(base + "/{rid}/approve")
+    @app.post(base + "/{rid}/approve", responses=documented(docs.PairingRequestView))
     async def approve_pairing_request(rid: str, body: ApprovePairingRequest, request: Request):
         """Approve an App's pairing request with the match code it shows. Elevated scopes need acknowledge_elevated.
         No token exists until the App redeems."""
@@ -560,7 +563,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
                             lambda row: {"scopes": row["scopes"].split(),
                                          "acknowledged": bool(ELEVATED.intersection(row["scopes"].split()))})
 
-    @app.post(base + "/{rid}/confirm")
+    @app.post(base + "/{rid}/confirm", responses=documented(docs.PairingRequestView))
     async def confirm_pairing_request(rid: str, body: ConfirmPairingRequest, request: Request):
         """Confirm an App's claim on an armed slot with the match code it shows; then it may redeem."""
         key = require_admin(request, mgr)
@@ -573,7 +576,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
                             approved,
                             lambda row: {"scopes": row["scopes"].split(), "confirmed": True})
 
-    @app.post(base + "/{rid}/deny")
+    @app.post(base + "/{rid}/deny", responses=documented(docs.PairingRequestView))
     async def deny_pairing_request(rid: str, request: Request):
         """Deny a pairing request, or withdraw an armed slot or an approval the App has not redeemed yet."""
         key = require_admin(request, mgr)

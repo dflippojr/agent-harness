@@ -141,7 +141,7 @@ def test_create_rejects_bash_only_where_tools_cannot_be_restricted(tmp_path):
         assert e.value.status == 400 and e.value.code == tool_profiles.UNSUPPORTED
     with pytest.raises(HarnessError, match="must be one of"):
         m.create("x", backend="claude", tool_profile="nope")
-    assert m.db.list_sessions(10) == []
+    assert m.db.sessions.list_sessions(10) == []
 
 
 def test_bash_only_reaches_the_claude_factory_and_the_session(tmp_path):
@@ -152,11 +152,11 @@ def test_bash_only_reaches_the_claude_factory_and_the_session(tmp_path):
         await wait_status(m, sid, "failed")
         await asyncio.gather(*m.tasks.values())
         assert made[-1]["tool_profile"] == "bash-only" and "split" not in made[-1]
-        assert m.summary(m.db.get_session(sid))["tool_profile"] == "bash-only"
+        assert m.summary(m.db.sessions.get_session(sid))["tool_profile"] == "bash-only"
         plain = m.create("x", backend="claude")["id"]
         await wait_status(m, plain, "failed")
         await asyncio.gather(*m.tasks.values())
-        assert "tool_profile" not in made[-1] and m.db.get_session(plain)["tool_profile"] == "default"
+        assert "tool_profile" not in made[-1] and m.db.sessions.get_session(plain)["tool_profile"] == "default"
         await m.stop()
     asyncio.run(body())
 
@@ -171,7 +171,7 @@ def test_split_bash_only_serves_and_runs_only_run_shell(tmp_path):
         assert made[-1]["split"] is True and made[-1]["tool_profile"] == "bash-only"
         served = {t["function"]["name"] for t in m.runner.mcp_tool_schemas(sid)}
         assert "run_shell" in served and not served & {"read_file", "write_file", "edit_file", "search", "list_files"}
-        s = m.db.get_session(sid)
+        s = m.db.sessions.get_session(sid)
         write = {"path": "a.txt", "content": "hi"}
         m.runner._grant_mcp(sid, "mcp__harness__write_file", write, "toolu-1")  # even a granted call is refused
         text, ok = await m.runner.mcp_call(sid, "write_file", write, "toolu-1")
@@ -189,7 +189,7 @@ def test_a_run_refuses_when_codex_left_split_mode_after_creation(tmp_path):
         await m.start()
         await wait_status(m, sid, "failed")
         await asyncio.gather(*m.tasks.values())
-        assert not made and m.db.get_session(sid)["run"]["failure"]["code"] == tool_profiles.UNSUPPORTED
+        assert not made and m.db.sessions.get_session(sid)["run"]["failure"]["code"] == tool_profiles.UNSUPPORTED
         await m.stop()
     asyncio.run(body())
 
@@ -210,10 +210,10 @@ def test_api_takes_tool_profile_and_lists_what_each_backend_accepts(tmp_path):
 
 def test_usage_and_cost_group_by_profile(tmp_path):
     m, _ = _manager(tmp_path)
-    m.db.record_usage("claude", "s1", "", 100, 10, 0.25, "subscription", tool_profile="bash-only")
-    m.db.record_usage("claude", "s2", "", 300, 30, 0.75, "subscription")
-    m.db.record_usage("claude", "s3", "", 100, 10, 0.5, "subscription", tool_profile="bash-only")
-    by_profile = m.db.usage_by_profile("claude", 0)
+    m.db.usage.record_usage("claude", "s1", "", 100, 10, 0.25, "subscription", tool_profile="bash-only")
+    m.db.usage.record_usage("claude", "s2", "", 300, 30, 0.75, "subscription")
+    m.db.usage.record_usage("claude", "s3", "", 100, 10, 0.5, "subscription", tool_profile="bash-only")
+    by_profile = m.db.usage.usage_by_profile("claude", 0)
     assert by_profile["bash-only"] == {"requests": 2, "prompt_tokens": 200, "completion_tokens": 20, "cost_usd": 0.75}
     assert by_profile["default"]["cost_usd"] == 0.75
     metrics = render_metrics(m)
@@ -241,12 +241,12 @@ def test_comparison_reads_the_harness_database(tmp_path, capsys):
     db = Database(tmp_path / "harness.sqlite3")
     for sid, profile, status, touched in (("s-def", "default", "done", ["src/a.py"]),
                                           ("s-bash", "bash-only", "failed", [])):
-        db.insert_session({"id": sid, "title": "t", "project": "p", "target": "tower", "model": "m",
+        db.sessions.insert_session({"id": sid, "title": "t", "project": "p", "target": "tower", "model": "m",
                            "backend": "claude", "status": status, "workspace": str(tmp_path / "gone"),
                            "created_at": 1.0, "updated_at": 1.0, "context": [], "tool_profile": profile,
                            "run": {"files_touched": touched}})
-        db.record_usage("claude", sid, "", 1000, 100, 0.5, "subscription", tool_profile=profile)
-    db.record_usage("claude", "s-def", "", 500, 50, 0.25, "subscription")
+        db.usage.record_usage("claude", sid, "", 1000, 100, 0.5, "subscription", tool_profile=profile)
+    db.usage.record_usage("claude", "s-def", "", 500, 50, 0.25, "subscription")
     db.close()
     tasks = tmp_path / "tasks.json"
     tasks.write_text(json.dumps({"runs": [
@@ -276,10 +276,10 @@ def test_rerun_keeps_the_tool_profile(tmp_path):
 
 def test_comparison_reads_sessions_from_the_web_store_and_usage_from_the_main_store(tmp_path, capsys):
     main = Database(tmp_path / "harness.sqlite3")
-    main.record_usage("claude", "s-web", "", 700, 70, 0.35, "subscription", tool_profile="bash-only")
+    main.usage.record_usage("claude", "s-web", "", 700, 70, 0.35, "subscription", tool_profile="bash-only")
     main.close()
     web = Database(tmp_path / "apps" / "app-web" / "harness.sqlite3")
-    web.insert_session({"id": "s-web", "title": "t", "project": "p", "target": "tower", "model": "m",
+    web.sessions.insert_session({"id": "s-web", "title": "t", "project": "p", "target": "tower", "model": "m",
                         "backend": "claude", "status": "done", "workspace": "", "created_at": 1.0, "updated_at": 1.0,
                         "context": [], "tool_profile": "bash-only", "run": {}})
     web.close()
@@ -295,7 +295,7 @@ def test_comparison_reads_a_dormant_app_store_that_has_not_migrated_yet(tmp_path
     Database(tmp_path / "harness.sqlite3").close()
     store = tmp_path / "apps" / "app-abc" / "harness.sqlite3"
     app = Database(store)
-    app.insert_session({"id": "s-app", "title": "t", "project": "p", "target": "tower", "model": "m",
+    app.sessions.insert_session({"id": "s-app", "title": "t", "project": "p", "target": "tower", "model": "m",
                         "backend": "claude", "status": "done", "workspace": "", "created_at": 1.0, "updated_at": 1.0,
                         "context": [], "run": {}})
     app.close()

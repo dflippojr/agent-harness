@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from harness import storage
 from harness.api import create_app
 from harness.app_stores import APP_STORE_FILE, SessionStores
+from harness.credential_store import CredentialStore
 from harness.db import APP_ERASE_GRACE_SECONDS, Database
 from harness.llm import Completion
 from harness.manager import Manager
@@ -50,10 +51,10 @@ def test_new_app_sessions_keep_their_files_in_the_app_folder(tmp_path):
             "prompt": "balance", "tools_only": True, "tools": [BALANCE]}).json()["id"]
         owner_sid = client.post("/sessions", json={"prompt": "owner task", "project": "scratch"}).json()["id"]
         wait_for(lambda: _done(client, sid, auth) and _done(client, owner_sid))
-        s, owner = m.db.get_session(sid), m.db.get_session(owner_sid)
+        s, owner = m.db.sessions.get_session(sid), m.db.sessions.get_session(owner_sid)
         folder = Path(cfg.data_dir) / "apps" / app_id
         assert Path(s["workspace"]) == folder / "workspaces" / sid and Path(s["workspace"]).is_dir()
-        assert Path(m.db.get_session(tools_only)["workspace"]).parent == folder / "workspaces"
+        assert Path(m.db.sessions.get_session(tools_only)["workspace"]).parent == folder / "workspaces"
         wait_for(lambda: (folder / "transcripts" / f"{sid}.md").is_file())
         assert m.runner.checkpointer.store(s).base == folder / "checkpoints" / sid
         assert storage.session_dirs(cfg, s)["artifacts"] == folder / "artifacts"
@@ -71,7 +72,7 @@ def test_the_file_migration_moves_app_session_files_with_a_backup_once(tmp_path)
     path, apps_dir = data / "harness.sqlite3", data / "apps"
     db = Database(path)
     for sid, app_id in (("own1", ""), ("a1", "k-aaaa"), ("b1", "k-bbbb")):
-        db.insert_session(_session(sid, app_id, workspace=str(data / "workspaces" / sid)))
+        db.sessions.insert_session(_session(sid, app_id, workspace=str(data / "workspaces" / sid)))
         _fill(db, sid, "ledger")
         (data / "workspaces" / sid).mkdir(parents=True)
         (data / "workspaces" / sid / "notes.txt").write_text(f"work of {sid}")
@@ -86,21 +87,21 @@ def test_the_file_migration_moves_app_session_files_with_a_backup_once(tmp_path)
         backups = list((folder / "pre-migration").glob("harness-app-files-*.sqlite3"))
         assert len(backups) == 1  # taken before the paths changed
         assert rows(backups[0], "SELECT workspace FROM sessions") == [(str(data / "workspaces" / sid),)]
-        assert stores.get_session(sid)["workspace"] == str(folder / "workspaces" / sid)
+        assert stores.sessions.get_session(sid)["workspace"] == str(folder / "workspaces" / sid)
         assert (folder / "workspaces" / sid / "notes.txt").read_text() == f"work of {sid}"
         assert (folder / "checkpoints" / sid / "repo.git").is_dir()
         assert (folder / "transcripts" / f"{sid}.md").read_text() == f"transcript of {sid}"
         assert not any(p.exists() for p in (data / "workspaces" / sid, data / "checkpoints" / sid,
                                             data / "transcripts" / f"{sid}.md"))
     # The owner's files and path stay.
-    assert stores.get_session("own1")["workspace"] == str(data / "workspaces" / "own1")
+    assert stores.sessions.get_session("own1")["workspace"] == str(data / "workspaces" / "own1")
     assert (data / "workspaces" / "own1" / "notes.txt").is_file() and (data / "checkpoints" / "own1").is_dir()
     stores.close()
 
     # A second start finds nothing to move: no new backup, nothing changes.
     again = SessionStores(Database(path), apps_dir)
     assert again.migrate_app_files() == []
-    assert again.get_session("a1")["workspace"] == str(apps_dir / "k-aaaa" / "workspaces" / "a1")
+    assert again.sessions.get_session("a1")["workspace"] == str(apps_dir / "k-aaaa" / "workspaces" / "a1")
     again.close()
     assert len(list((apps_dir / "k-aaaa" / "pre-migration").glob("harness-app-files-*.sqlite3"))) == 1
 
@@ -109,13 +110,13 @@ def test_a_file_migration_cut_short_is_finished_on_the_next_start(tmp_path):
     data = tmp_path / "data"
     apps_dir = data / "apps"
     stores = SessionStores(Database(data / "harness.sqlite3"), apps_dir)
-    stores.insert_session(_session("a1", "k-aaaa", workspace=str(data / "workspaces" / "a1")))
+    stores.sessions.insert_session(_session("a1", "k-aaaa", workspace=str(data / "workspaces" / "a1")))
     stores.close()
     # The files had moved, the stored path not yet.
     (apps_dir / "k-aaaa" / "workspaces" / "a1").mkdir(parents=True)
 
     again = SessionStores(Database(data / "harness.sqlite3"), apps_dir)
-    assert again.get_session("a1")["workspace"] == str(apps_dir / "k-aaaa" / "workspaces" / "a1")
+    assert again.sessions.get_session("a1")["workspace"] == str(apps_dir / "k-aaaa" / "workspaces" / "a1")
     assert len(list((apps_dir / "k-aaaa" / "pre-migration").glob("*.sqlite3"))) == 1
     again.close()
 
@@ -148,47 +149,47 @@ def test_an_app_deletes_its_session_and_everything_tied_to_it(tmp_path):
         wait_for(answer, timeout=60)
         wait_for(lambda: _done(client, kept, a))
         wait_for(lambda: client.get(f"/api/v1/sessions/{running}/tool_calls", headers=a).json())
-        m.db.put_artifact(sid, "h1", "artifact body")
-        m.db.insert_approval({"id": f"ap-{sid}", "session_id": sid, "tool_call_id": "c9", "tool": "write_file",
+        m.db.sessions.put_artifact(sid, "h1", "artifact body")
+        m.db.sessions.insert_approval({"id": f"ap-{sid}", "session_id": sid, "tool_call_id": "c9", "tool": "write_file",
                               "args": {"path": "x"}, "reason": "ask"})
-        s = m.db.get_session(sid)
+        s = m.db.sessions.get_session(sid)
         transcript = storage.session_dirs(cfg, s)["transcripts"] / f"{sid}.md"
         wait_for(transcript.is_file)
         store = Path(cfg.data_dir) / "apps" / a_id / APP_STORE_FILE
         held = rows_of(store, {sid})
         assert held["events"] and held["app_tool_calls"] and held["search_index"] and held["artifacts"]
         assert Path(s["workspace"]).is_dir()
-        token = m.db.get_approval(f"ap-{sid}")["token"]
+        token = m.db.sessions.get_approval(f"ap-{sid}")["token"]
 
         # Another App (sessions:all too), the owner (token or Web) and the owner's admin route get a 404.
         assert client.delete(f"/api/v1/sessions/{sid}", headers=b).status_code == 404
         assert client.delete(f"/api/v1/sessions/{sid}", headers=owner).status_code == 404
         assert client.delete(f"/api/v1/sessions/{sid}").status_code == 404
         assert client.delete(f"/api/admin/v1/sessions/{sid}").status_code in (404, 405)
-        assert m.db.get_session(sid) is not None
+        assert m.db.sessions.get_session(sid) is not None
 
         assert client.delete(f"/api/v1/sessions/{sid}", headers=a).status_code == 204
         assert client.get(f"/api/v1/sessions/{sid}", headers=a).status_code == 404
         assert not any(rows_of(store, {sid}).values())
         assert not any(p.exists() for p in _files(cfg, s))
-        assert m.db.get_approval(f"ap-{sid}") is None and m.db.approval_by_token(token) is None
+        assert m.db.sessions.get_approval(f"ap-{sid}") is None and m.db.sessions.approval_by_token(token) is None
         assert m.db.app_of(sid) == ""
         found = client.get("/api/v1/search?q=pelican", headers=a).json()["results"]
         assert [r["id"] for r in found] == [kept]
         # Idempotent: erasing it again succeeds and changes nothing.
         assert client.delete(f"/api/v1/sessions/{sid}", headers=a).status_code == 204
-        assert m.db.get_session(kept) is not None
+        assert m.db.sessions.get_session(kept) is not None
 
         # A running session is cancelled, then erased.
-        assert m.db.get_session(running)["status"] == "waiting_app"
+        assert m.db.sessions.get_session(running)["status"] == "waiting_app"
         assert client.delete(f"/api/v1/sessions/{running}", headers=a).status_code == 204
-        assert m.db.get_session(running) is None and running not in m.tasks
+        assert m.db.sessions.get_session(running) is None and running not in m.tasks
         assert not any(rows_of(store, {running}).values())
         # The owner's own sessions can't be deleted through it either.
         owner_sid = client.post("/sessions", json={"prompt": "owner task"}).json()["id"]
         assert client.delete(f"/api/v1/sessions/{owner_sid}", headers=a).status_code == 404
         assert client.delete(f"/api/v1/sessions/{owner_sid}", headers=owner).status_code == 404
-        assert m.db.get_session(owner_sid) is not None
+        assert m.db.sessions.get_session(owner_sid) is not None
 
 
 # retention ----------------------------------------------------------------------------------------------------------
@@ -215,8 +216,8 @@ def test_retention_days_and_the_app_default_expire_sessions_in_the_sweep_while_t
         assert client.post("/api/v1/sessions", headers=a, json={"prompt": "x", "retention_days": 0}).status_code == 422
         owner_sid = client.post("/sessions", json={"prompt": "owner task"}).json()["id"]
         for sid in (*sids.values(), owner_sid):
-            wait_for(lambda sid=sid: m.db.get_session(sid)["status"] == "done")
-        assert m.db.get_session(sids["own_short"])["retention_days"] == 1
+            wait_for(lambda sid=sid: m.db.sessions.get_session(sid)["status"] == "done")
+        assert m.db.sessions.get_session(sids["own_short"])["retention_days"] == 1
 
         # The owner sets App A's default; a bad value or an unknown App is refused.
         assert client.put(f"/api/admin/v1/apps/{a_id}/retention", json={"retention_days": 7}).json()[
@@ -227,16 +228,16 @@ def test_retention_days_and_the_app_default_expire_sessions_in_the_sweep_while_t
         for sid in (*sids.values(), owner_sid):
             _age(m, sid, 10)
         _age(m, sids["b_short"], 1)  # still inside its 2 days
-    files = {name: _files(cfg, m.db.get_session(sid)) for name, sid in sids.items()}
+    files = {name: _files(cfg, m.db.sessions.get_session(sid)) for name, sid in sids.items()}
 
     # The sweep runs with neither App connected: nothing it does needs them.
     report = asyncio.run(m.sweep_app_data())
     assert sorted(report["sessions_expired"]) == sorted([sids["own_short"], sids["default"]])
-    assert m.db.get_session(sids["own_short"]) is None and m.db.get_session(sids["default"]) is None
+    assert m.db.sessions.get_session(sids["own_short"]) is None and m.db.sessions.get_session(sids["default"]) is None
     assert not any(p.exists() for name in ("own_short", "default") for p in files[name])
     for name in ("own_long", "none", "b_short"):
-        assert m.db.get_session(sids[name]) is not None, name
-    assert m.db.get_session(owner_sid) is not None
+        assert m.db.sessions.get_session(sids[name]) is not None, name
+    assert m.db.sessions.get_session(owner_sid) is not None
     assert asyncio.run(m.sweep_app_data())["sessions_expired"] == []
     m.db.close()
 
@@ -267,7 +268,7 @@ def test_an_erase_right_after_done_waits_for_the_run_to_end_and_leaves_nothing(t
         sid = client.post("/api/v1/sessions", headers=a, json={"prompt": "task", "retention_days": 1}).json()["id"]
         wait_for(ended.is_set)
         assert _done(client, sid, a) and sid in m.tasks
-        s = m.db.get_session(sid)
+        s = m.db.sessions.get_session(sid)
         if erase == "delete":
             def run() -> None:
                 assert client.delete(f"/api/v1/sessions/{sid}", headers=a).status_code == 204
@@ -283,12 +284,12 @@ def test_an_erase_right_after_done_waits_for_the_run_to_end_and_leaves_nothing(t
         worker = threading.Thread(target=run)
         worker.start()
         assert started.wait(30)
-        waited = m.db.get_session(sid) is not None and m.db.app_of(sid) == a_id  # the erase waits for the run's end
+        waited = m.db.sessions.get_session(sid) is not None and m.db.app_of(sid) == a_id  # the erase waits for the run's end
         release.set()
         worker.join(30)
         assert waited and not worker.is_alive()
         assert order == ["run over", "erase continues"]
-        assert m.db.get_session(sid) is None and sid not in m.tasks
+        assert m.db.sessions.get_session(sid) is None and sid not in m.tasks
         main = Path(m.db.main.path)
         store = Path(cfg.data_dir) / "apps" / a_id / APP_STORE_FILE
     assert not any(p.exists() for p in _files(cfg, s))
@@ -313,10 +314,10 @@ def test_nothing_about_an_erased_app_session_is_written_to_the_owners_files_or_s
         m.runner.write_transcript(sid)
         client.portal.call(m.runner._end_run, sid)
         client.portal.call(m.runner.save_branch, sid)
-        for write in (lambda: m.db.insert_event(sid, "error", {"message": "pelican"}),
-                      lambda: m.db.put_artifact(sid, "h1", "pelican"),
-                      lambda: m.db.update_session(sid, title="pelican"),
-                      lambda: m.db.insert_approval({"id": "ap-x", "session_id": sid, "tool_call_id": "c1",
+        for write in (lambda: m.db.sessions.insert_event(sid, "error", {"message": "pelican"}),
+                      lambda: m.db.sessions.put_artifact(sid, "h1", "pelican"),
+                      lambda: m.db.sessions.update_session(sid, title="pelican"),
+                      lambda: m.db.sessions.insert_approval({"id": "ap-x", "session_id": sid, "tool_call_id": "c1",
                                                     "tool": "write_file", "args": {}, "reason": "ask"})):
             with pytest.raises(sqlite3.ProgrammingError, match="was erased"):
                 write()
@@ -324,7 +325,7 @@ def test_nothing_about_an_erased_app_session_is_written_to_the_owners_files_or_s
             storage.session_dirs(cfg, None)
         owner_sid = client.post("/sessions", json={"prompt": "owner task"}).json()["id"]
         wait_for(lambda: _done(client, owner_sid))
-        m.db.insert_event(owner_sid, "error", {"message": "still written"})  # other sessions are unaffected
+        m.db.sessions.insert_event(owner_sid, "error", {"message": "still written"})  # other sessions are unaffected
     assert not (storage.transcripts_dir(cfg, "owner") / f"{sid}.md").exists()
     assert not any(rows_of(main, {sid}).values())
 
@@ -335,12 +336,12 @@ def test_the_maintenance_cleanup_runs_the_app_sweep(tmp_path):
     async def body():
         m = Manager(cfg, chat=Script([Completion(content="ok")]))
         await m.start(maintenance=False)
-        key, _ = m.db.create_api_key("shop", "sessions", "app")
-        m.db.set_app_retention(key["id"], 1)
-        m.db.insert_session(_session("a1", key["id"]))
+        key, _ = m.db.credentials.create_api_key("shop", "sessions", "app")
+        m.db.apps.set_app_retention(key["id"], 1)
+        m.db.sessions.insert_session(_session("a1", key["id"]))
         _age(m, "a1", 3)
         report = await m.maintenance.cleanup()
-        gone = m.db.get_session("a1") is None
+        gone = m.db.sessions.get_session("a1") is None
         await m.stop()
         return report, gone
 
@@ -380,8 +381,8 @@ def test_revoke_erases_the_apps_store_and_folder_after_the_grace_leaving_a_tombs
         report = asyncio.run(m.sweep_app_data(time.time() + APP_ERASE_GRACE_SECONDS + 60))
         assert report["apps_erased"] == [a_id]
         assert not folder.exists()
-        assert m.db.app_session_ids(a_id) == [] and m.db.get_session(a_sid) is None
-        tomb = m.db.get_api_key(a_id)
+        assert m.db.app_session_ids(a_id) == [] and m.db.sessions.get_session(a_sid) is None
+        tomb = m.db.credentials.get_api_key(a_id)
         assert tomb["erased_at"] and tomb["revoked_at"] and tomb["erase_after"] is None and tomb["scopes"] == ""
         assert client.get("/api/admin/v1/apps/erasures").json() == []
         assert "store" not in {k["id"]: k for k in client.get("/keys").json()}[a_id]
@@ -412,7 +413,7 @@ def test_undo_during_the_grace_keeps_everything_and_issues_a_new_token(tmp_path)
         assert [s["id"] for s in client.get("/api/v1/sessions", headers=new).json()] == [sid]
         assert client.get(f"/api/v1/sessions/{sid}", headers=new).json()["status"] == "done"
         assert client.get("/api/admin/v1/apps/erasures").json() == []
-        assert m.db.get_api_key(a_id)["retention_days"] == 90
+        assert m.db.credentials.get_api_key(a_id)["retention_days"] == 90
         assert asyncio.run(m.sweep_app_data(time.time() + 2 * APP_ERASE_GRACE_SECONDS))["apps_erased"] == []
         assert (Path(cfg.data_dir) / "apps" / a_id / APP_STORE_FILE).is_file()
         assert client.post(f"/api/admin/v1/apps/{a_id}/restore").status_code == 404   # nothing pending any more
@@ -435,19 +436,20 @@ def test_the_retention_route_and_an_undone_revoke_read_one_key_not_the_whole_lis
         def no_listing(self, *args, **kwargs):
             raise AssertionError("listed every key to return one")
 
-        monkeypatch.setattr(Database, "list_api_keys", no_listing)
+        monkeypatch.setattr(CredentialStore, "list_api_keys", no_listing)
         retention = client.put(f"/api/admin/v1/apps/{a_id}/retention", json={"retention_days": 90})
         monkeypatch.undo()
         assert retention.status_code == 200 and retention.json() == listed()
 
         assert client.delete(f"/keys/{a_id}").status_code == 204
-        monkeypatch.setattr(Database, "list_api_keys", no_listing)
+        monkeypatch.setattr(CredentialStore, "list_api_keys", no_listing)
         restored = client.post(f"/api/admin/v1/apps/{a_id}/restore")
         monkeypatch.undo()
-        # The restore answers with the main store's row, as it always has: no App store metadata.
-        main_row = {k["id"]: k for k in m.db.main.list_api_keys()}[a_id]
+        # The restore answers with the main store's row and its request count, as it always has: no App store
+        # metadata.
+        main_row = {k["id"]: k for k in m.db.main.credentials.list_api_keys()}[a_id]
         assert restored.status_code == 200
-        assert {k: v for k, v in restored.json().items() if k != "key"} == main_row
+        assert {k: v for k, v in restored.json().items() if k != "key"} == {**main_row, "requests": 0}
 
 
 def test_the_apps_own_settings_survive_an_undone_revoke_and_go_with_the_erasure(tmp_path):
@@ -459,18 +461,18 @@ def test_the_apps_own_settings_survive_an_undone_revoke_and_go_with_the_erasure(
         patched = client.patch("/api/v1/config", headers=a, json={"revision": 0,
                                                                   "changes": {"app.sessions.max_turns": 10}})
         assert patched.status_code == 200, patched.text
-        saved = m.db.get_app_settings(a_id)
+        saved = m.db.apps.get_app_settings(a_id)
         assert client.delete(f"/keys/{a_id}").status_code == 204
-        assert m.db.get_app_settings(a_id) == saved                               # kept through the grace
+        assert m.db.apps.get_app_settings(a_id) == saved                               # kept through the grace
 
         new = {"Authorization": f"Bearer {client.post(f'/api/admin/v1/apps/{a_id}/restore').json()['key']}"}
-        assert m.db.get_app_settings(a_id) == saved
+        assert m.db.apps.get_app_settings(a_id) == saved
         live = {k: v for k, v in patched.json().items() if k != "changes"}
         assert client.get("/api/v1/config", headers=new).json() == live
 
         assert client.delete(f"/keys/{a_id}").status_code == 204
         assert asyncio.run(m.sweep_app_data(time.time() + APP_ERASE_GRACE_SECONDS + 60))["apps_erased"] == [a_id]
-        assert m.db.get_app_settings(a_id) is None
+        assert m.db.apps.get_app_settings(a_id) is None
 
 
 def test_owner_keys_have_no_erasure_and_member_storage_and_quota_are_unchanged(tmp_path):
@@ -479,9 +481,9 @@ def test_owner_keys_have_no_erasure_and_member_storage_and_quota_are_unchanged(t
     cfg = make_cfg(tmp_path)
     Path(cfg.data_dir).mkdir(parents=True)
     db = Database(Path(cfg.data_dir) / "harness.sqlite3")
-    owner, _ = db.create_api_key("control-center", "admin", "owner")
-    assert db.revoke_api_key(owner["id"]) and db.get_api_key(owner["id"])["erase_after"] is None
-    assert db.pending_erasures() == []
+    owner, _ = db.credentials.create_api_key("control-center", "admin", "owner")
+    assert db.credentials.revoke_api_key(owner["id"]) and db.credentials.get_api_key(owner["id"])["erase_after"] is None
+    assert db.apps.pending_erasures() == []
     db.close()
 
     data = Path(cfg.data_dir)
@@ -518,3 +520,38 @@ def test_the_cleanup_sweeps_app_workspace_roots(tmp_path):
     m.maintenance._workspaces(time.time(), report)
     assert report["orphans_removed"] == ["gone1"] and not orphan.exists()
     m.db.close()
+
+
+def test_erasing_an_app_is_all_or_nothing_across_its_stores(tmp_path):
+    """`mark_app_erased` writes CredentialStore rows, AppStore rows and meta keys in one transaction (#992 decision 4):
+    when one statement fails, none of it lands."""
+    db = Database(tmp_path / "state.sqlite")
+    try:
+        app, _ = db.credentials.create_api_key("Gone", kind="app")
+        kid = app["id"]
+        db.credentials.set_app_provider_credential(kid, "claude", "secret-ref", "app_only", [])
+        db.apps.set_app_settings(kid, 2, {"app.notify.completion": "never"})
+        assert db.apps.set_app_limits(kid, {"max_running": 1})
+        db.set_meta("app_error:" + kid, '{"errors": 2}')
+
+        def state():
+            key = db.credentials.get_api_key(kid)
+            return (key["erased_at"], key["scopes"], db.apps.get_app_settings(kid) is not None,
+                    db.credentials.app_provider_credential(kid, "claude") is not None,
+                    db.apps.app_limits(kid)["max_running"], db.get_meta("app_error:" + kid))
+
+        before = state()
+        assert before[0] is None and before[2:] == (True, True, 1, '{"errors": 2}')
+        # The provider credentials' delete comes after the tombstone and the settings' delete: refuse it.
+        db.write(lambda: db.conn.execute("CREATE TRIGGER refuse_erase BEFORE DELETE ON app_provider_credentials "
+                                         "BEGIN SELECT RAISE(ABORT, 'refused'); END"))
+        with pytest.raises(sqlite3.DatabaseError, match="refused"):
+            db.apps.mark_app_erased(kid)
+        assert state() == before                       # nothing landed: no tombstone, settings and keys kept
+
+        db.write(lambda: db.conn.execute("DROP TRIGGER refuse_erase"))
+        db.apps.mark_app_erased(kid)
+        erased_at, scopes, *rest = state()
+        assert erased_at is not None and scopes == "" and rest == [False, False, None, ""]
+    finally:
+        db.close()

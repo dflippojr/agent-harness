@@ -374,7 +374,7 @@ def test_session_waits_for_memory_before_loading_then_continues(tmp_path, monkey
         waiting = events(m, s["id"], "waiting_memory")[0]
         assert "RAM available" in waiting["reason"] and waiting["waiting_for"] == "local model"
         assert m.guard.control.starts == 0
-        note = next(m.notifier.build(e) for e in m.db.events(s["id"]) if e["type"] == "waiting_memory")
+        note = next(m.notifier.build(e) for e in m.db.sessions.events(s["id"]) if e["type"] == "waiting_memory")
         assert note["title"].startswith("Waiting for memory") and "Actions → Resources" in note["message"]
         ram.available = 24 * GIB
         await wait_status(m, s["id"], "done", timeout=15)
@@ -1054,9 +1054,9 @@ def test_memory_recovered_notification(tmp_path):
     async def body():
         m = guarded_manager(tmp_path)
         s = m.create("hello")
-        m.db.insert_event(s["id"], "memory_recovered", {"seconds": 150})
-        m.db.insert_event(s["id"], "memory_recovered", {"seconds": 20})
-        notes = [m.notifier.build(e) for e in m.db.events(s["id"]) if e["type"] == "memory_recovered"]
+        m.db.sessions.insert_event(s["id"], "memory_recovered", {"seconds": 150})
+        m.db.sessions.insert_event(s["id"], "memory_recovered", {"seconds": 20})
+        notes = [m.notifier.build(e) for e in m.db.sessions.events(s["id"]) if e["type"] == "memory_recovered"]
         assert [n["message"] for n in notes] == ["Memory recovered after 2 min; the task continues.",
                                                  "Memory recovered after 20 s; the task continues."]
         assert notes[0]["title"].startswith("Resumed:") and notes[0]["sequence_id"] == f"mem-{s['id']}"
@@ -1262,7 +1262,7 @@ def test_hold_ending_after_the_paused_session_ended_leaves_model_unloaded(tmp_pa
         else:
             await m.cancel(s["id"])
             await wait_status(m, s["id"], "cancelled")
-            m.db.delete_session(s["id"])
+            m.db.sessions.delete_session(s["id"])
         assert not m.guard.want_model()
         m.guard.detector.signals = []
         await m.guard.check()
@@ -2055,7 +2055,7 @@ def _count_tokens_request(m, model):
     """A real Starlette request for the endpoint's tokenizer route, as an editor sends it."""
     import json
     from starlette.requests import Request
-    _, secret = m.db.create_api_key("editor")
+    _, secret = m.db.credentials.create_api_key("editor")
     body = json.dumps({"model": model.name, "messages": [{"role": "user", "content": "hi"}]}).encode()
 
     async def receive():

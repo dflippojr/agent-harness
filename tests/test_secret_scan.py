@@ -189,8 +189,8 @@ def test_doctor_ok_with_the_pinned_binary(gitleaks_tools, capsys):
 def _leaks(m: Manager, sid: str, caplog) -> list[str]:
     """Every place the fixture value must never reach."""
     places = {
-        "events": json.dumps(m.db.events(sid)),
-        "audit": json.dumps(m.db.list_audit()),
+        "events": json.dumps(m.db.sessions.events(sid)),
+        "audit": json.dumps(m.db.accounts.list_audit()),
         "transcript": transcript.render(m.db, sid),
         "logs": caplog.text,
     }
@@ -237,7 +237,7 @@ def test_committed_key_blocks_merge_until_dismissed(tmp_path, caplog):
             await m.dismiss_secret_finding(sid, "nope", "test fixture", "owner")
         assert e.value.status == 404
         await m.dismiss_secret_finding(sid, finding["fingerprint"], "test fixture, not a real key", "owner")
-        audit = [a for a in m.db.list_audit() if a["action"] == "secret_finding_dismiss"]
+        audit = [a for a in m.db.accounts.list_audit() if a["action"] == "secret_finding_dismiss"]
         assert len(audit) == 1 and audit[0]["actor_id"] == "owner" and audit[0]["target_id"] == sid
         detail = json.loads(audit[0]["detail"])
         assert detail == {"session": sid, "rule": "aws-access-token", "repo": ".", "file": "settings.py", "line": 1,
@@ -338,7 +338,7 @@ def test_key_removed_by_a_later_commit_blocks_push_until_dismissed(tmp_path, cap
 
 
 def _user_messages(m: Manager, sid: str) -> list[str]:
-    return [e["data"]["content"] for e in m.db.events(sid) if e["type"] == "user_message"]
+    return [e["data"]["content"] for e in m.db.sessions.events(sid) if e["type"] == "user_message"]
 
 
 @needs_host_git
@@ -599,8 +599,8 @@ def test_api_fix_drafts_and_owner_only_dismiss(tmp_path):
     with client:
         s = client.post("/sessions", json={"prompt": "bump", "project": "proj"}).json()
         sid = s["id"]
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done" and sid not in m.tasks)
-        ws = Path(m.db.get_session(sid)["workspace"])
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done" and sid not in m.tasks)
+        ws = Path(m.db.sessions.get_session(sid)["workspace"])
         (ws / "deploy.sh").write_text(f"#!/bin/sh\nexport AWS_ACCESS_KEY_ID={KEY}\n")
 
         changes = client.get(f"/sessions/{sid}/changes")
@@ -621,8 +621,8 @@ def test_api_fix_drafts_and_owner_only_dismiss(tmp_path):
         assert again["message"].startswith("The findings in the diff already have draft comments")
         assert client.post(f"/sessions/{sid}/review-comments/send").status_code == 200
         # Final git/checkpoint work continues after the terminal status is written.
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done" and sid not in m.tasks)
-        sent = [e["data"]["content"] for e in m.db.events(sid) if e["type"] == "user_message"][-1]
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done" and sid not in m.tasks)
+        sent = [e["data"]["content"] for e in m.db.sessions.events(sid) if e["type"] == "user_message"][-1]
         assert "deploy.sh, line 2" in sent and "aws-access-token" in sent and KEY not in sent
 
         app = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": ["sessions", "sessions:all"]}).json()

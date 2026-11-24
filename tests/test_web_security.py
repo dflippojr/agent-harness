@@ -89,7 +89,7 @@ def test_foreign_and_malformed_hosts_refused_before_auth_or_routes(tmp_path, mon
         assert_framing(duplicate)
         # TestClient synthesizes Host when it is absent; inspect a raw ASGI request for that case.
         assert not _host_allowed(Request({"type": "http", "headers": []}), manager.cfg)
-    assert manager.db.list_sessions() == []
+    assert manager.db.sessions.list_sessions() == []
 
 
 @pytest.mark.parametrize("encoding", ["gzip", "identity"])

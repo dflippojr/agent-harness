@@ -4,11 +4,14 @@ they were before the setting existed; with it on, the prompt only grows between 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
 from bakeoff import canary as canary_cli, prefix_diff, trim_bench
 from harness import compaction, config as config_mod, fake_instance, fake_model
@@ -70,10 +73,10 @@ def run_session(monkeypatch, tmp_path, configure=None) -> list[dict]:
         try:
             s = m.create("Run the mask batch session.", project=fake_instance.PROJECT)
             for _ in range(600):
-                if m.db.get_session(s["id"])["status"] in ("done", "failed"):
+                if m.db.sessions.get_session(s["id"])["status"] in ("done", "failed"):
                     break
                 await asyncio.sleep(0.05)
-            return m.db.get_session(s["id"])
+            return m.db.sessions.get_session(s["id"])
         finally:
             await m.stop()
 
@@ -90,6 +93,10 @@ def receipts(request: dict) -> list[int]:
             and (message.get("content") or "").startswith(compaction.RECEIPT_PREFIX)]
 
 
+def set_off(cfg):
+    cfg.mask_batch_at = 0.0
+
+
 def test_bench_prompts_match_the_ones_recorded_before_the_setting_existed(monkeypatch):
     """The fixture was written by `trim_bench.prompt_digests` on the commit before batching. If a deliberate change
     to masking, trim, elide or the summary moves it, rewrite the fixture in that change."""
@@ -103,19 +110,31 @@ PER_TURN = [[], [], [], [5], [5, 7], [5, 7, 9], [5, 7, 9], [5, 7, 9, 13], [5, 7,
 
 
 def test_a_session_masks_each_result_one_turn_after_it_is_used(monkeypatch, tmp_path):
-    """Today's timing through the real runner, recorded before the setting existed."""
-    assert [receipts(r) for r in run_session(monkeypatch, tmp_path)] == PER_TURN
+    """Today's timing through the real runner, recorded before the setting existed, with the setting named off."""
+    assert [receipts(r) for r in run_session(monkeypatch, tmp_path, set_off)] == PER_TURN
 
 
-def test_the_shipped_setting_is_off(tmp_path):
-    assert config_mod.load(config_mod.ROOT / "config", tmp_path / "data").mask_batch_at == 0
+def test_the_shipped_setting_batches_at_0_45(tmp_path):
+    """#1027: batching at 0.45 is the default (#898, docs/compaction.md)."""
+    assert config_mod.load(config_mod.ROOT / "config", tmp_path / "data").mask_batch_at == 0.45
+
+
+def test_the_key_absent_batches_at_0_45(tmp_path):
+    config_dir = tmp_path / "config"
+    shutil.copytree(config_mod.ROOT / "config", config_dir)
+    harness = config_dir / "harness.yaml"
+    data = yaml.safe_load(harness.read_text(encoding="utf-8"))
+    del data["compaction"]["mask_batch_at"]
+    harness.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    assert config_mod.load(config_dir, tmp_path / "data").mask_batch_at == 0.45
+
+
+def test_the_config_dataclass_default_batches_at_0_45():
+    assert {f.name: f.default for f in dataclasses.fields(config_mod.Config)}["mask_batch_at"] == 0.45
 
 
 def test_a_session_with_the_setting_named_off_sends_the_same_prompts(monkeypatch, tmp_path):
-    def off(cfg):
-        cfg.mask_batch_at = 0.0
-
-    assert [receipts(r) for r in run_session(monkeypatch, tmp_path, off)] == PER_TURN
+    assert [receipts(r) for r in run_session(monkeypatch, tmp_path, set_off)] == PER_TURN
 
 
 @pytest.mark.parametrize("value, expected", [
@@ -166,15 +185,15 @@ def batching_manager(tmp_path, batch_at: float = 0.45) -> Manager:
 async def seed(m: Manager, sid: str, count: int, start: int = 1, text: str = RESULT) -> None:
     for i in range(start, start + count):
         c = call("read_file", i, path=f"f{i}.txt")
-        s = m.db.get_session(sid)
-        m.db.update_session(sid, context=s["context"] + [{"role": "assistant", "content": None, "tool_calls": [c]}])
+        s = m.db.sessions.get_session(sid)
+        m.db.sessions.update_session(sid, context=s["context"] + [{"role": "assistant", "content": None, "tool_calls": [c]}])
         await m.runner._record_result(sid, c, "read_file", f"{i} {text}", ok=True)
-    s = m.db.get_session(sid)
-    m.db.update_session(sid, context=s["context"] + [{"role": "assistant", "content": "used them"}])
+    s = m.db.sessions.get_session(sid)
+    m.db.sessions.update_session(sid, context=s["context"] + [{"role": "assistant", "content": "used them"}])
 
 
 def masked_count(m: Manager, sid: str) -> int:
-    return sum(1 for message in m.db.get_session(sid)["context"] if message["role"] == "tool"
+    return sum(1 for message in m.db.sessions.get_session(sid)["context"] if message["role"] == "tool"
                and message["content"].startswith(compaction.RECEIPT_PREFIX))
 
 
@@ -184,18 +203,18 @@ def test_below_the_threshold_nothing_is_rewritten_then_everything_eligible_is(tm
         await m.start()
         sid = (await wait_status(m, m.create("task")["id"], "done"))["id"]
         await seed(m, sid, 1)
-        before = m.db.get_session(sid)["context"]
-        await m.runner._maybe_compact(m.db.get_session(sid))
-        assert m.db.get_session(sid)["context"] == before and not events(m, sid, "compaction")
+        before = m.db.sessions.get_session(sid)["context"]
+        await m.runner._maybe_compact(m.db.sessions.get_session(sid))
+        assert m.db.sessions.get_session(sid)["context"] == before and not events(m, sid, "compaction")
 
         await seed(m, sid, 3, start=2)  # about 21,000 estimated tokens with the schemas: past 0.45 of the window
-        await m.runner._maybe_compact(m.db.get_session(sid))
+        await m.runner._maybe_compact(m.db.sessions.get_session(sid))
         assert masked_count(m, sid) == 4
         [mask] = [e for e in events(m, sid, "compaction") if e["tier"] == "mask"]  # one rewrite, one event
         assert mask["characters_saved"] > 4 * 14000
         for i in (1, 4):  # recoverable like any receipt
             digest = hashlib.sha256(f"{i} {RESULT}".encode("utf-8")).hexdigest()
-            assert m.db.full_artifact(sid, digest) == f"{i} {RESULT}"
+            assert m.db.sessions.full_artifact(sid, digest) == f"{i} {RESULT}"
         await m.stop()
     asyncio.run(body())
 
@@ -207,16 +226,16 @@ def test_a_small_batch_waits_above_the_threshold_until_elide_at(tmp_path):
         m = batching_manager(tmp_path, 0.20)
         await m.start()
         sid = (await wait_status(m, m.create("task")["id"], "done"))["id"]
-        s = m.db.get_session(sid)
+        s = m.db.sessions.get_session(sid)
         stuck = [{"role": "user", "content": "note " * 6000}]  # 30,000 characters: masking can't touch it
-        m.db.update_session(sid, context=s["context"] + stuck)
+        m.db.sessions.update_session(sid, context=s["context"] + stuck)
         await seed(m, sid, 1, text="y" * 3000)                  # worth about 1,000 tokens: under the 10% minimum
-        await m.runner._maybe_compact(m.db.get_session(sid))
+        await m.runner._maybe_compact(m.db.sessions.get_session(sid))
         assert masked_count(m, sid) == 0
 
-        s = m.db.get_session(sid)
-        m.db.update_session(sid, context=s["context"] + [{"role": "user", "content": "note " * 18000}])  # past elide_at
-        await m.runner._maybe_compact(m.db.get_session(sid))
+        s = m.db.sessions.get_session(sid)
+        m.db.sessions.update_session(sid, context=s["context"] + [{"role": "user", "content": "note " * 18000}])  # past elide_at
+        await m.runner._maybe_compact(m.db.sessions.get_session(sid))
         assert [e["tier"] for e in events(m, sid, "compaction")][0] == "mask"  # ahead of the trim and elide it heads off
         await m.stop()
     asyncio.run(body())
@@ -230,12 +249,12 @@ def test_a_batch_that_frees_the_context_does_not_also_reset_it(tmp_path, batch_a
         m = batching_manager(tmp_path, batch_at)
         await m.start()
         sid = (await wait_status(m, m.create("task")["id"], "done"))["id"]
-        s = m.db.get_session(sid)
+        s = m.db.sessions.get_session(sid)
         state = {"goal": "g", "plan": "p", "next_step": "n"}
-        m.db.update_session(sid, run={**s["run"], "state": state})
-        assert m.runner.has_valid_saved_state(m.db.get_session(sid))
+        m.db.sessions.update_session(sid, run={**s["run"], "state": state})
+        assert m.runner.has_valid_saved_state(m.db.sessions.get_session(sid))
         await seed(m, sid, 5)  # about 25,000 estimated tokens plus schemas: past 0.60 of 32,768
-        await m.runner._maybe_compact(m.db.get_session(sid))
+        await m.runner._maybe_compact(m.db.sessions.get_session(sid))
         tiers = {e["tier"] for e in events(m, sid, "compaction")}
         assert ("round_reset" in tiers) is resets
         assert (not tiers & {"elide", "summary"}) if not resets else True
@@ -256,13 +275,13 @@ def test_an_overflow_masks_what_a_batch_had_not_reached_before_it_summarizes(tmp
         sid = (await wait_status(m, m.create("task")["id"], "done"))["id"]
         await seed(m, sid, 2, text="z" * 3000)
         await seed(m, sid, 1, start=3, text="z" * 3000)
-        await m.runner._compact_on_overflow(m.db.get_session(sid))
+        await m.runner._compact_on_overflow(m.db.sessions.get_session(sid))
         tiers = [e["tier"] for e in events(m, sid, "compaction")]
         assert ("mask" in tiers) is masked and tiers[-1] == "summary"
         summary_request = next(r for r in script.requests if r[0]["content"] == compaction.SUMMARY_SYSTEM)
         assert (compaction.RECEIPT_PREFIX in summary_request[1]["content"]) is masked
         digest = hashlib.sha256(f"1 {'z' * 3000}".encode("utf-8")).hexdigest()
-        assert (m.db.full_artifact(sid, digest) is not None) is masked
+        assert (m.db.sessions.full_artifact(sid, digest) is not None) is masked
         await m.stop()
     asyncio.run(body())
 

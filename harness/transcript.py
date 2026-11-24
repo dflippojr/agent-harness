@@ -247,7 +247,7 @@ _RENDERERS = {
 
 
 def render(db: Database, sid: str) -> str:
-    s = db.get_session(sid)
+    s = db.sessions.get_session(sid)
     if s is None:
         raise KeyError(sid)
     created = time.strftime("%Y-%m-%d %H:%M", time.localtime(s["created_at"]))
@@ -268,7 +268,7 @@ def render(db: Database, sid: str) -> str:
         lines += [f"- Frozen skills: {names}"]
     lines += ["",]
     last_content = ""
-    for e in db.events(sid):
+    for e in db.sessions.events(sid):
         d, t, at = e["data"], e["type"], _clock(e["ts"])
         if t == "assistant":
             last_content = d.get("content", "").strip()

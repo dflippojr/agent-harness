@@ -29,6 +29,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .api import RouteTable, mgr
 from .api_models import ApprovalResponse, SessionResponse
+from . import response_docs as docs
+from .response_docs import documented
 from .fileops import ToolError
 from .manager import HarnessError, public_approval
 from .modules import principal_capabilities
@@ -71,16 +73,16 @@ def cors_origin_allowed(m, request: Request, origin: str) -> bool:
         return False
     path = request.scope.get("harness_original_path", request.url.path)
     if path == "/api/v1/pair":
-        return m.db.pairing_origin_active(origin)
+        return m.db.credentials.pairing_origin_active(origin)
     if path == "/api/v1/pair/requests":
         return True  # any exact origin may ask to pair (#519): the owner approves, and the request stays bound to it
     if path.startswith("/api/v1/pair/requests/"):
         # Any origin with a request on record, finished ones included, so a browser App can read a denial or expiry.
-        return m.db.pairing_request_origin_known(origin)
+        return m.db.credentials.pairing_request_origin_known(origin)
     ticket = request.query_params.get("ticket", "")
-    if ticket and m.db.stream_ticket_origin_active(ticket, origin):
+    if ticket and m.db.credentials.stream_ticket_origin_active(ticket, origin):
         return True
-    return m.db.origin_allowed(origin, kind="owner" if path.startswith("/api/admin/") else None)
+    return m.db.credentials.origin_allowed(origin, kind="owner" if path.startswith("/api/admin/") else None)
 
 
 def owner_key(key: dict | None) -> bool:
@@ -331,12 +333,12 @@ class AppToolBroker:
     async def call(self, s: dict, call_id: str, name: str, args: dict, on_wait=None, on_resume=None) -> str:
         sid = s["id"]
         tool = next(t for t in s["app_tools"] if t["name"] == name)
-        row = self.db.get_app_tool_call(sid, call_id)
+        row = self.db.sessions.get_app_tool_call(sid, call_id)
         if row is None:
-            self.db.insert_app_tool_call(sid, call_id, name, args)
+            self.db.sessions.insert_app_tool_call(sid, call_id, name, args)
             self.bus.emit(sid, "app_tool_call", {"call_id": call_id, "name": name, "args": args,
                                                  "timeout_seconds": tool["timeout_seconds"]})
-            row = self.db.get_app_tool_call(sid, call_id)
+            row = self.db.sessions.get_app_tool_call(sid, call_id)
         key = f"{sid}:{call_id}"
         event = self._events.setdefault(key, asyncio.Event())
         deadline = row["created_at"] + tool["timeout_seconds"]
@@ -346,7 +348,7 @@ class AppToolBroker:
             while row["status"] == "pending":
                 remaining = deadline - time.time()
                 if remaining <= 0:
-                    self.db.finish_app_tool_call(sid, call_id, "expired", "", False)
+                    self.db.sessions.finish_app_tool_call(sid, call_id, "expired", "", False)
                     raise ToolError(f"the app didn't return a result for {name} within {tool['timeout_seconds']} s")
                 # Quick answers keep the GPU slot (and llama-server's prompt cache); slow ones give it up.
                 if not waited and on_wait and time.monotonic() - started >= HOLD_SLOT_SECONDS:
@@ -357,7 +359,7 @@ class AppToolBroker:
                 except asyncio.TimeoutError:
                     pass
                 event.clear()
-                row = self.db.get_app_tool_call(sid, call_id)
+                row = self.db.sessions.get_app_tool_call(sid, call_id)
         except asyncio.CancelledError:
             cancelled = True  # the run is ending (a cancel, a deadline): it does not wait for its GPU slot again
             raise
@@ -371,9 +373,9 @@ class AppToolBroker:
 
     def submit(self, sid: str, call_id: str, output: str, ok: bool, *, context=None) -> bool:
         def commit():
-            if not self.db.finish_app_tool_call(sid, call_id, "done", output, ok):
+            if not self.db.sessions.finish_app_tool_call(sid, call_id, "done", output, ok):
                 return False
-            namespace_audit.record(self.db, self.db.get_session(sid), context, "tool_result.submit", target=call_id,
+            namespace_audit.record(self.db, self.db.sessions.get_session(sid), context, "tool_result.submit", target=call_id,
                                    kind="call", metadata={"fields": ["output", "ok"]})
             return True
         if not self.db.for_session(sid).write(commit):
@@ -414,7 +416,7 @@ def auth(request: Request, scope: str) -> dict:
     m = mgr(request)
     header = request.headers.get("authorization", "")
     token = header[7:].strip() if header.lower().startswith("bearer ") else ""
-    key = m.db.api_key_by_secret(token)
+    key = m.db.credentials.api_key_by_secret(token)
     if key is None:
         return _bundled_identity(request, m, token)
     scopes = set((key.get("scopes") or "").split())
@@ -436,7 +438,7 @@ def _owned_session(request: Request, key: dict, ref: str) -> dict:
     app = key.get("kind") == "app"
     mine = calling_app(key)
     try:
-        s = m.db.get_session(m.resolve_id(ref, user_id=user_id, kind=None if app else "agent", app=mine,
+        s = m.db.sessions.get_session(m.resolve_id(ref, user_id=user_id, kind=None if app else "agent", app=mine,
                                           app_only=not reaches_web(key)))
     except HarnessError as e:
         if e.status in (400, 404):
@@ -496,7 +498,7 @@ def view(m, s: dict) -> dict:
 @route_table.get("/pairing-codes")
 async def pairing_codes(request: Request):
     """Owner view. Codes themselves are shown only by the create response."""
-    return mgr(request).db.list_pairing_codes()
+    return mgr(request).db.credentials.list_pairing_codes()
 
 
 @route_table.post("/pairing-codes", status_code=201)
@@ -528,7 +530,7 @@ async def create_pairing_code(body: PairingCodeRequest, request: Request):
     scopes = " ".join(dict.fromkeys(body.scopes))
 
     def commit():
-        row, code = m.db.main.create_pairing_code(name, origin, scopes, body.ttl_seconds, catalog_app_id)
+        row, code = m.db.main.credentials.create_pairing_code(name, origin, scopes, body.ttl_seconds, catalog_app_id)
         credential_audit.record(m.db, ctx, "pairing.create", row["id"], "ok", "pairing",
                                 {"pairing_id": row["id"], "scopes": scopes.split(),
                                  "catalog_app_id": catalog_app_id})
@@ -545,7 +547,7 @@ async def revoke_pairing_code(pid: str, request: Request):
     ctx = credential_audit.request_context(request, m)
 
     def commit() -> bool:
-        if m.db.main.revoke_pairing_code(pid):
+        if m.db.main.credentials.revoke_pairing_code(pid):
             credential_audit.record(m.db, ctx, "pairing.revoke", pid, "ok", "pairing", {"pairing_id": pid})
             return True
         credential_audit.record(m.db, ctx, "pairing.revoke", "", "noop", "pairing", {"reason": "not_found"})
@@ -567,12 +569,12 @@ async def pair_browser(body: PairRequest, request: Request):
     m = mgr(request)
 
     def commit():
-        key, secret, error = m.db.main.redeem_pairing_code(body.code, origin)
+        key, secret, error = m.db.main.credentials.redeem_pairing_code(body.code, origin)
         if key is None:  # no supplied code, origin or guessed id is recorded: only which kind of refusal it was
             credential_audit.record(m.db, credential_audit.unknown_context(), "pairing.redeem", "", "denied",
                                     "pairing", {"reason": credential_audit.pairing_reason(error)})
         else:
-            pid = m.db.main.pairing_id_for_key(key["id"])
+            pid = m.db.main.credentials.pairing_id_for_key(key["id"])
             credential_audit.record(m.db, credential_audit.device_context(key["id"], key["kind"]),
                                     "pairing.redeem", key["id"], "ok", "api_key",
                                     {"key_id": key["id"], "pairing_id": pid, "kind": key["kind"],
@@ -603,7 +605,7 @@ async def api_root(request: Request):
                 **m.modules.features(),
                 "inference": module_effective(m.cfg, "endpoint"), "web": module_effective(m.cfg, "web"),
                 "browser_pairing": True, "pairing_requests": True, "idempotent_create": True,
-                "hub_claim": True, "hub_claimed": m.db.main.hub_claim() is not None,
+                "hub_claim": True, "hub_claimed": m.db.main.credentials.hub_claim() is not None,
                 "stream_tickets": True, "scoped_projects": True, "household_accounts": True},
             **await m.modules.app_root()}
 
@@ -626,7 +628,7 @@ async def backends(request: Request):
 
 def _member_me(m, key: dict, ident) -> dict:
     from .storage import account_usage_bytes, quota_message
-    account = m.db.account_by_id(key["user_id"])
+    account = m.db.accounts.account_by_id(key["user_id"])
     used = account_usage_bytes(m.cfg, key["user_id"]) if account else 0
     limit = int(account["disk_quota_bytes"]) if account else 0
     return {
@@ -640,13 +642,13 @@ def _member_me(m, key: dict, ident) -> dict:
         },
         "usage": {"disk_used_bytes": used, "disk_quota_bytes": limit,
                   "disk_note": quota_message(used, limit) if limit else "",
-                  "running": m.db.count_sessions(key["user_id"], "running"),
-                  "queued": m.db.count_sessions(key["user_id"], "queued"),
+                  "running": m.db.sessions.count_sessions(key["user_id"], "running"),
+                  "queued": m.db.sessions.count_sessions(key["user_id"], "queued"),
                   "account_hint": key["user_id"][2:10] if key["user_id"].startswith("u-") else key["user_id"][:8]},
     }
 
 
-@route_table.get("/api/v1/me")
+@route_table.get("/api/v1/me", responses=documented(docs.AppMeResponse))
 async def api_me(request: Request):
     """Authenticated principal. Unauthenticated callers receive 401 rather than a project list."""
     key = auth(request, "sessions")
@@ -838,7 +840,7 @@ async def api_queue(request: Request):
             continue
         if not m.db.app_of(sid) and not reaches_web(key):  # in Web's store, which this App never reads
             continue
-        session = m.db.get_session(sid) or {}
+        session = m.db.sessions.get_session(sid) or {}
         if session.get("owner_id", "owner") != user_id or (session.get("kind") or "agent") != "agent":
             continue
         out.append({"session_id": sid, "position": pos})
@@ -860,7 +862,7 @@ def _stream_active(m, key: dict, user_id: str, epoch: int) -> bool:
         return False
     if key.get("bundled"):
         return True
-    current = m.db.get_api_key(key["id"])
+    current = m.db.credentials.get_api_key(key["id"])
     return (current is not None and current.get("revoked_at") is None
             and current["hash"] == key["hash"])
 
@@ -886,7 +888,7 @@ async def _global_events_stream(request: Request, m, user_id: str, key: dict, ep
                 continue
             if not m.db.app_of(e["session_id"]) and not reaches_web(key):  # Web's store: unread without sessions:all
                 continue
-            if _global_event_visible(e, m.db.get_session(e["session_id"]), user_id, key, global_types):
+            if _global_event_visible(e, m.db.sessions.get_session(e["session_id"]), user_id, key, global_types):
                 # Live-only list stream: drop the global seq so gaps cannot reveal other accounts.
                 yield sse({**e, "seq": None})
     finally:
@@ -1010,7 +1012,7 @@ def _replay(m, key: dict, record: dict | None) -> JSONResponse | None:
     sid = idempotency.replayed_session(m.db.for_app(key["id"]), record)
     if sid is None:
         return None
-    session = m.db.get_session(sid)
+    session = m.db.sessions.get_session(sid)
     if session is None:
         raise HarnessError(410, f"the session this {idempotency.HEADER} created was erased; it is not created again",
                            idempotency.ERASED)
@@ -1136,7 +1138,7 @@ async def delete_session(ref: str, request: Request):
         s = own_session(request, key, ref)
     except HarnessError as e:
         # Gone from everywhere (an id this App erased before): done. Another App's or the owner's: 404.
-        if e.status == 404 and not m.db.app_of(ref) and m.db.for_app("").get_session(ref) is None:
+        if e.status == 404 and not m.db.app_of(ref) and m.db.for_app("").sessions.get_session(ref) is None:
             return None
         raise
     if s.get("app_id") != mine:
@@ -1158,10 +1160,10 @@ async def scoped_audit(request: Request, limit: int = 200, before_id: int | None
         store, scope = m.db.for_app(""), key["user_id"]
     else:
         raise HarnessError(403, "private audit is available only to its App or member")
-    return await store.aio.namespace_audit_page(scope, limit, before_id, target_id=target_id, action=action,
-                                                actor_id=actor_id, key_id=key_id,
-                                                login_days=key.get("retention_days") or 30,
-                                                outcome=outcome, since=since, until=until)
+    return await store.sessions.aio.namespace_audit_page(scope, limit, before_id, target_id=target_id, action=action,
+                                                         actor_id=actor_id, key_id=key_id,
+                                                         login_days=key.get("retention_days") or 30,
+                                                         outcome=outcome, since=since, until=until)
 
 
 @route_table.get("/api/v1/sessions", response_model=list[SessionResponse], response_model_exclude_unset=True)
@@ -1170,13 +1172,13 @@ async def list_sessions(request: Request, limit: int = 50):
     m = mgr(request)
     key = auth(request, "sessions")
     if key.get("kind") == "member":
-        return await m.list_summaries(m.db.list_sessions(limit, owner_id=key["user_id"]))
+        return await m.list_summaries(m.db.sessions.list_sessions(limit, owner_id=key["user_id"]))
     if owner_key(key) or SESSIONS_ALL in key["scope_set"]:  # the owner's sessions, and an App's own (#330)
-        mine = m.db.scope(calling_app(key)).list_sessions(limit * 5, owner_id="owner")
+        mine = m.db.scope(calling_app(key)).sessions.list_sessions(limit * 5, owner_id="owner")
     else:  # this App's own store only
-        mine = m.db.for_app(key["id"]).list_sessions(limit * 5, owner_id="owner") if key.get("kind") == "app" else []
+        mine = m.db.for_app(key["id"]).sessions.list_sessions(limit * 5, owner_id="owner") if key.get("kind") == "app" else []
     if key.get("kind") == "app":  # an App's tools-only sessions are listed to that App alone (#329)
-        mine += m.db.for_app(key["id"]).list_sessions(limit * 5, owner_id="owner", kind=TOOLS_ONLY)
+        mine += m.db.for_app(key["id"]).sessions.list_sessions(limit * 5, owner_id="owner", kind=TOOLS_ONLY)
         mine.sort(key=lambda r: r["created_at"], reverse=True)
     return await m.list_summaries(mine[:limit])
 
@@ -1243,7 +1245,7 @@ async def tool_calls(ref: str, request: Request, status: str = "pending"):
     """Tool calls the agent made to this session's app tools, filtered by status (default pending), oldest first; an empty status lists all."""
     m = mgr(request)
     s = visible_session(request, auth(request, "sessions"), ref)
-    return m.db.app_tool_calls(s["id"], status or None)
+    return m.db.sessions.app_tool_calls(s["id"], status or None)
 
 
 @route_table.post("/api/v1/sessions/{ref}/tool_calls/{call_id}", response_model=AcceptedResponse)
@@ -1266,7 +1268,7 @@ async def approvals(ref: str, request: Request):
     """Approvals in this session that still await a decision."""
     m = mgr(request)
     s = visible_session(request, auth(request, "sessions"), ref)
-    return [public_approval(a) for a in m.db.pending_approvals(s["id"])]
+    return [public_approval(a) for a in m.db.sessions.pending_approvals(s["id"])]
 
 
 @route_table.post("/api/v1/sessions/{ref}/approvals/{approval_id}", response_model=ApprovalResponse)
@@ -1301,7 +1303,7 @@ async def event_ticket(ref: str, request: Request):
         raise HarnessError(400, "stream tickets require the paired browser Origin header") from exc
     if origin not in (key.get("origins") or []):
         raise HarnessError(403, "stream tickets are only available to a paired browser origin")
-    ticket, expires_at = m.db.create_stream_ticket(key["id"], s["id"], origin, STREAM_TICKET_TTL_SECONDS)
+    ticket, expires_at = m.db.credentials.create_stream_ticket(key["id"], s["id"], origin, STREAM_TICKET_TTL_SECONDS)
     return JSONResponse({"ticket": ticket, "expires_at": expires_at,
                          "events_url": f"/api/v1/sessions/{s['id']}/events?ticket={ticket}"}, status_code=201,
                         headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
@@ -1314,7 +1316,7 @@ def _ticket_key(request: Request, m, ref: str, ticket: str) -> dict:
         origin = normalize_origin(raw_origin)
     except ValueError:
         origin = ""
-    key = m.db.stream_ticket_key(ticket, ref, origin)
+    key = m.db.credentials.stream_ticket_key(ticket, ref, origin)
     if key is None:
         raise HarnessError(401, "invalid or expired stream ticket")
     key["scope_set"] = set((key.get("scopes") or "").split())
@@ -1331,7 +1333,7 @@ async def _session_events_stream(request: Request, m, sid: str, owner: str, afte
     epoch = m.stream_epoch.get(owner, 0)
     try:
         yield ": connected\n\n"
-        for e in m.db.events(sid, after):
+        for e in m.db.sessions.events(sid, after):
             if not _stream_active(m, key, owner, epoch):
                 return
             last = e["seq"]

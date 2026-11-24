@@ -21,6 +21,7 @@ from harness import api as harness_api, audit_context, cli, local_owner, migrati
 from harness import pairing_requests as pr
 from harness.admin import PREFIX
 from harness.db import Database
+from harness_modules.runners.store import RunnerPairingStore
 import sdk.harness_client as sdk_module
 from sdk.harness_client import Harness
 
@@ -85,7 +86,7 @@ def _audit(client, action: str, **params) -> list[dict]:
 
 
 def _keys(m) -> list[dict]:
-    return [k for k in m.db.list_api_keys() if k["kind"] == "owner"]
+    return [k for k in m.db.listed_api_keys() if k["kind"] == "owner"]
 
 
 def _claim(client, m, origin=HUB_ORIGIN) -> tuple[str, dict, str]:
@@ -253,7 +254,7 @@ def test_many_app_requests_never_hide_an_open_hub_claim(hh):
     client, m = hh
     asked, _ = _ask(client)
     for n in range(101):
-        m.db.main.insert_pairing_request({
+        m.db.main.credentials.insert_pairing_request({
             "id": f"pr-app{n:03d}", "kind": "app", "name": "an app", "scopes": "sessions", "state": pr.ARMED,
             "armed": 1, "created_at": pr.clock() + 1 + n, "expires_at": pr.clock() + 600, "key_id": ""})
     assert [r["id"] for r in client.get(CLAIM).json()["requests"]] == [asked.json()["id"]]
@@ -310,7 +311,7 @@ def test_hub_key_cannot_decide_claims_mint_hub_keys_or_be_revoked_by_id(hh):
     for body in ({"name": "x", "kind": "hub"}, {"name": "x", "scopes": ["admin"], "role": "hub"}):
         assert client.post(f"{PREFIX}/keys", headers=hub, json=body).status_code == 400
         assert client.post(f"{PREFIX}/keys", json=body).status_code == 400   # nobody can
-    assert [k["role"] for k in m.db.list_api_keys() if k["role"]] == ["hub"]
+    assert [k["role"] for k in m.db.listed_api_keys() if k["role"]] == ["hub"]
 
     for headers in (hub, {}):
         r = client.delete(f"{PREFIX}/keys/{key['id']}", headers=headers)
@@ -334,7 +335,7 @@ def test_hub_key_reaches_every_owner_route_the_owner_token_does(tmp_path, monkey
     app, cfg = _owner_app(tmp_path)
     with TestClient(app) as client:
         m = app.state.manager
-        _, owner = m.db.main.create_api_key("owner tool", "admin", "owner")
+        _, owner = m.db.main.credentials.create_api_key("owner tool", "admin", "owner")
         token, _, _ = _claim(client, m, origin="")
         routes = sorted(_mounted_owner_routes(app, cfg), key=lambda r: (r[1], r[0]))
         checked = 0
@@ -492,10 +493,10 @@ def test_migration_adds_the_role_and_the_record(tmp_path):
     old.close()
     db = Database(path, migrations=shipped)
     assert db.conn.execute("PRAGMA user_version").fetchone()[0] == 57
-    assert next(k for k in db.list_api_keys() if k["id"] == "k-old")["role"] == ""
+    assert next(k for k in db.credentials.list_api_keys() if k["id"] == "k-old")["role"] == ""
     columns = {r["name"] for r in db.conn.execute("PRAGMA table_info(hub_claim)")}
     assert columns == {"slot", "key_id", "name", "kind", "origin", "request_id", "claimed_at"}
-    assert db.hub_claim() is None
+    assert db.credentials.hub_claim() is None
     db.conn.execute("INSERT INTO hub_claim (slot, key_id, name, kind, claimed_at) VALUES (1, 'k', 'n', 'native', 1)")
     with pytest.raises(sqlite3.IntegrityError):   # never a second row
         db.conn.execute("INSERT INTO hub_claim (slot, key_id, name, kind, claimed_at) VALUES (2, 'k', 'n', 'native', 1)")
@@ -523,8 +524,8 @@ def test_hub_key_cannot_mint_an_owner_key_and_release_names_any_it_did(hh):
     assert client.post(f"{PREFIX}/keys", headers=hub, json={"name": "dev", "scopes": ["inference"]}).status_code == 201
 
     # An owner key a Hub minted before this rule existed is named by release, for the owner to revoke.
-    row, _ = m.db.main.create_api_key("legacy spare", "admin", "owner")
-    m.db.main.write(lambda: m.db.main.insert_audit(
+    row, _ = m.db.main.credentials.create_api_key("legacy spare", "admin", "owner")
+    m.db.main.write(lambda: m.db.main.accounts.insert_audit(
         "owner", row["id"], "key.create", "ok", context=audit_context.owner_context(key), target_kind="api_key"))
     released = client.post(f"{CLAIM}/release", headers=_host(m), json={"confirm": True})
     assert released.status_code == 200, released.text
@@ -549,7 +550,7 @@ def test_hub_key_cannot_make_a_runner_pairing_code(tmp_path):
         token, key, _ = _claim(client, m, origin="")
         r = client.post(f"{PREFIX}/runner-pairing-codes", headers=_bearer(token), json={"runner": "mac"})
         assert r.status_code == 403 and r.json()["error"]["code"] == "hub_key", r.text
-        assert m.db.list_runner_pairing_codes() == []
+        assert RunnerPairingStore(m.db).list_runner_pairing_codes() == []
         denied = _audit(client, "runner_pairing.create", outcome="denied")
         assert [(r["actor_kind"], r["key_id"], r["metadata"]["reason"]) for r in denied] == [
             ("hub", key["id"], "hub_key")]

@@ -63,8 +63,8 @@ def test_the_key_is_sealed_in_the_database_and_bound_to_its_member(tmp_path, mon
         assert m.member_keys.get(a, "claude") == CANARY
         assert m.member_keys.get(b, "claude") == ""
         # The row moved to another member does not open: the ciphertext is bound to (member, backend).
-        row = m.db.member_api_key(a, "claude")
-        m.db.set_member_api_key(b, "claude", bytes(row["ciphertext"]), "xxxx")
+        row = m.db.accounts.member_api_key(a, "claude")
+        m.db.accounts.set_member_api_key(b, "claude", bytes(row["ciphertext"]), "xxxx")
         assert m.member_keys.get(b, "claude") == ""
         # A lost or replaced master key leaves the member without a key rather than with a wrong one.
         (m.cfg.data_dir / member_keys.KEY_FILE).unlink()
@@ -146,7 +146,7 @@ def test_a_member_with_a_key_runs_on_that_key_alone(tmp_path, monkeypatch):
         assert put(client, BOB, "claude", OTHER).status_code == 200
         r = client.post("/api/v1/sessions", json={"prompt": "hi", "backend": "claude"}, headers=H(ALICE))
         assert r.status_code == 201, r.text
-        row = m.db.get_session(r.json()["id"])
+        row = m.db.sessions.get_session(r.json()["id"])
         assert row["end_user"] == member_keys.end_user_id(ids[ALICE]) and row["app_id"] == ""
         # The key the runner uses is proved through the runner in the next test.
         # Codex needs its own key.
@@ -183,7 +183,7 @@ def test_deleting_the_key_stops_new_sessions_and_removes_it(tmp_path, monkeypatc
         assert client.post("/api/v1/sessions", json={"prompt": "hi", "backend": "claude"},
                            headers=H(ALICE)).status_code == 201
         assert client.delete(f"{KEYS}/claude", headers=H(ALICE)).status_code == 200
-        assert m.db.member_api_keys(ids[ALICE]) == []
+        assert m.db.accounts.member_api_keys(ids[ALICE]) == []
         assert removed == [("", [member_keys.end_user_id(ids[ALICE])], ("claude",))]
         r = client.post("/api/v1/sessions", json={"prompt": "hi", "backend": "claude"}, headers=H(ALICE))
         assert r.status_code == 403 and r.json()["error"]["code"] == "member_api_key_required"
@@ -198,7 +198,7 @@ def test_disabling_a_member_deletes_their_keys(tmp_path, monkeypatch):
         assert put(client, BOB, "claude", OTHER).status_code == 200
         r = client.patch(f"{PREFIX}/accounts/{ids[ALICE]}", json={"enabled": False}, headers=H(OWNER))
         assert r.status_code == 200, r.text
-        assert m.db.member_api_keys(ids[ALICE]) == []
+        assert m.db.accounts.member_api_keys(ids[ALICE]) == []
         assert m.member_keys.get(ids[BOB], "claude") == OTHER
 
 
@@ -207,8 +207,8 @@ def test_disabling_a_member_deletes_their_keys(tmp_path, monkeypatch):
 def test_a_members_usage_is_tallied_on_their_own_id(tmp_path, monkeypatch):
     with setup(tmp_path, monkeypatch) as (client, m, ids):
         mine = member_keys.end_user_id(ids[ALICE])
-        m.db.record_usage("claude", "s1", "", 100, 20, 0.5, "api_key", "member_api_key", mine)
-        m.db.record_usage("claude", "s2", "", 7, 3, 0.1, "api_key", "member_api_key", member_keys.end_user_id(ids[BOB]))
+        m.db.usage.record_usage("claude", "s1", "", 100, 20, 0.5, "api_key", "member_api_key", mine)
+        m.db.usage.record_usage("claude", "s2", "", 7, 3, 0.1, "api_key", "member_api_key", member_keys.end_user_id(ids[BOB]))
         body = client.get(KEYS, headers=H(ALICE)).json()
         assert body["usage"]["claude"] == {"sessions": 1, "prompt_tokens": 100, "completion_tokens": 20}
         assert body["usage"]["codex"]["sessions"] == 0
@@ -240,7 +240,7 @@ def test_a_members_hosted_session_runs_through_the_runner_on_their_key(tmp_path,
             return sid
         sid = asyncio.run(run())
         assert started == {"api_key": CANARY, "end_user": member_keys.end_user_id(ids[ALICE]), "app_id": ""}
-        run_row = m.db.get_session(sid)["run"]
+        run_row = m.db.sessions.get_session(sid)["run"]
         assert run_row["credential_source"] == "member_api_key" and run_row["billing_mode"] == "api_key"
 
 

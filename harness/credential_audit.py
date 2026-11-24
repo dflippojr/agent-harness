@@ -1,7 +1,8 @@
 """Audit rows for credential, pairing and provider-grant lifecycle changes (#468).
 
-Every helper writes one `account_audit` row through `Database.insert_audit`, so inside `db.write`/`awrite` the row
-commits or rolls back with the change it describes. A failure to write the row raises, and the change is undone.
+Every helper writes one `account_audit` row through `AccountStore.insert_audit` (`db.accounts`), so inside
+`db.write`/`awrite` the row commits or rolls back with the change it describes. A failure to write the row
+raises, and the change is undone.
 Only opaque ids, enums and names go in (see `audit_context.METADATA_ALLOWLIST`), never a secret or caller input.
 """
 from __future__ import annotations
@@ -25,7 +26,7 @@ def request_context(request, m, *, source: str | None = None) -> audit_context.A
     src = source or ("admin_api" if path.startswith("/api/admin/") else "legacy_api")
     header = request.headers.get("authorization") or ""
     token = header[7:].strip() if header.lower().startswith("bearer ") else ""
-    key = m.db.api_key_by_secret(token) if token else None
+    key = m.db.credentials.api_key_by_secret(token) if token else None
     if key is not None and key.get("kind") == "owner" and "admin" in (key.get("scopes") or "").split():
         return audit_context.owner_context(key, src)
     return audit_context.access_context(getattr(request.state, "access", None), src)
@@ -51,8 +52,8 @@ def record(db, ctx, action: str, target_id: str, outcome: str, target_kind: str,
     try:
         if ctx.actor_kind == audit_context.UNKNOWN and outcome == "denied" and _flooded(main, action):
             return
-        main.insert_audit(ctx.actor_id, target_id, action, outcome, detail, context=ctx,
-                          target_kind=target_kind, metadata=metadata)
+        main.accounts.insert_audit(ctx.actor_id, target_id, action, outcome, detail, context=ctx,
+                                   target_kind=target_kind, metadata=metadata)
     except Exception:
         log.exception("audit write failed for %s", action)
         from .manager import HarnessError  # manager imports this module's users, so import it late
@@ -71,4 +72,4 @@ def pairing_reason(error: str) -> str:
 
 
 def _flooded(main, action: str) -> bool:
-    return main.unknown_denials_since(action, time.time() - 3600) >= UNKNOWN_DENIAL_HOURLY_CAP
+    return main.accounts.unknown_denials_since(action, time.time() - 3600) >= UNKNOWN_DENIAL_HOURLY_CAP

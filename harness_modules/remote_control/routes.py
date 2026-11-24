@@ -1,9 +1,42 @@
 """Existing owner and App Remote Control contracts."""
+from typing import NotRequired, TypedDict
+
 from fastapi import Request
-from harness.modules import RouteTable, manager, HarnessError, ToolError, app_auth
+from pydantic import ConfigDict, with_config
+from harness.modules import RouteTable, documented, manager, HarnessError, ToolError, app_auth
 
 owner_routes = RouteTable()
 app_routes = RouteTable()
+
+
+
+@with_config(ConfigDict(extra="allow"))  # documentation only: a reply may carry more fields
+class _Reply(TypedDict):
+    pass
+
+
+class RemoteFolder(_Reply):
+    project: str
+    path: str
+    managed: NotRequired[bool]
+    trusted: NotRequired[bool]
+    git: NotRequired[bool]
+    running: NotRequired[bool]
+    status: NotRequired[str]
+    reason: NotRequired[str]
+
+
+class RemoteDiscovery(_Reply):
+    supported: bool
+    enabled: bool
+
+
+class RemoteControlStatus(_Reply):
+    """Whether Remote Control is enabled and each project's state; `discovery` only on the owner API."""
+    enabled: bool
+    projects: list[RemoteFolder]
+    discovery: NotRequired[RemoteDiscovery]
+
 
 # Claude Code Remote Control servers
 def remote_control(m):
@@ -16,7 +49,7 @@ def rc_owner_surface(request):
     return request.scope.get('harness_original_path', '').startswith('/api/admin/v1/')
 
 
-@owner_routes.get("/remote-control")
+@owner_routes.get("/remote-control", responses=documented(RemoteControlStatus))
 async def rc_status(request: Request):
     """Report whether Remote Control is enabled and each project's state."""
     m = manager(request)

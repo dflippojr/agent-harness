@@ -12,7 +12,8 @@ class NotificationsRuntime(ModuleRuntime):
 
     def __init__(self, manager, module):
         super().__init__(manager, module)
-        self.service = Notifier(manager.cfg, manager.db)
+        # The host is built after this runtime: the lookup resolves it when a job's run finishes.
+        self.service = Notifier(manager.cfg, manager.db, scheduled_job=lambda jid: manager.modules.scheduled_job(jid))
         manager.bus.add_listener(self.service.listener)
 
     def status(self) -> dict:

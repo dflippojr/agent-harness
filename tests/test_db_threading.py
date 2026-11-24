@@ -10,6 +10,7 @@ import pytest
 from harness import metrics
 from harness.bus import EventBus
 from harness.db import Database
+from harness_modules.skills.store import SkillRecordStore
 from waits import scaled
 
 
@@ -22,7 +23,7 @@ def _session(sid: str) -> dict:
 @pytest.fixture
 def db(tmp_path):
     d = Database(tmp_path / "t.db")
-    d.insert_session(_session("s1"))
+    d.sessions.insert_session(_session("s1"))
     yield d
     d.close()
 
@@ -39,23 +40,23 @@ def test_writes_run_on_the_writer_thread_and_reads_on_a_read_only_connection(db)
         assert conn is not db._wconn
         with pytest.raises(sqlite3.OperationalError):
             conn.execute("DELETE FROM sessions")
-    assert db.get_session("s1")["status"] == "running"
+    assert db.sessions.get_session("s1")["status"] == "running"
 
 
 def test_write_is_one_transaction_and_rolls_back_on_error(db):
     def fail():
-        db.update_session("s1", status="done")
-        db.insert_event("s1", "status", {"status": "done"})
+        db.sessions.update_session("s1", status="done")
+        db.sessions.insert_event("s1", "status", {"status": "done"})
         raise RuntimeError("boom")
     with pytest.raises(RuntimeError):
         db.write(fail)
-    assert db.get_session("s1")["status"] == "running"
-    assert db.events("s1") == []
+    assert db.sessions.get_session("s1")["status"] == "running"
+    assert db.sessions.events("s1") == []
 
 
 def test_nested_write_joins_the_outer_transaction(db):
     def inner():
-        db.update_session("s1", status="queued")
+        db.sessions.update_session("s1", status="queued")
 
     def outer():
         db.write(inner)
@@ -63,13 +64,13 @@ def test_nested_write_joins_the_outer_transaction(db):
         raise RuntimeError("undo both")
     with pytest.raises(RuntimeError):
         db.write(outer)
-    assert db.get_session("s1")["status"] == "running"
+    assert db.sessions.get_session("s1")["status"] == "running"
 
 
 def test_reads_inside_a_write_see_its_uncommitted_changes(db):
     def change_and_read():
-        db.update_session("s1", status="queued")
-        return db.get_session("s1")["status"]
+        db.sessions.update_session("s1", status="queued")
+        return db.sessions.get_session("s1")["status"]
     assert db.write(change_and_read) == "queued"
 
 
@@ -77,10 +78,10 @@ def test_emit_inside_a_transaction_publishes_after_commit_in_the_caller_thread(d
     bus = EventBus(db)
     heard = []
     bus.add_listener(lambda e: heard.append((e["type"], threading.current_thread().name,
-                                             db.get_session("s1")["status"])))
+                                             db.sessions.get_session("s1")["status"])))
 
     def change():
-        db.update_session("s1", status="done")
+        db.sessions.update_session("s1", status="done")
         bus.emit("s1", "status", {"status": "done"})
         assert heard == []  # not before the commit
     db.write(change)
@@ -97,7 +98,7 @@ def test_emit_is_dropped_with_a_rolled_back_transaction(db):
         raise RuntimeError("abort")
     with pytest.raises(RuntimeError):
         db.write(change)
-    assert heard == [] and db.events("s1") == []
+    assert heard == [] and db.sessions.events("s1") == []
 
 
 def test_a_slow_write_does_not_block_reads_or_the_event_loop(db):
@@ -106,14 +107,14 @@ def test_a_slow_write_does_not_block_reads_or_the_event_loop(db):
 
         def slow():
             started.set()
-            db.update_session("s1", status="done")
+            db.sessions.update_session("s1", status="done")
             released.append(release.wait(scaled(30)))  # the transaction stays open until the loop has read
 
         write = asyncio.create_task(db.awrite(slow))
         assert await asyncio.to_thread(started.wait, scaled(10))
         for _ in range(5):  # the loop keeps turning while the writer is busy
             await asyncio.sleep(0)
-        status = (await asyncio.wait_for(db.aio.get_session("s1"), scaled(10)))["status"]
+        status = (await asyncio.wait_for(db.sessions.aio.get_session("s1"), scaled(10)))["status"]
         still_writing = not write.done()
         release.set()
         await write
@@ -130,30 +131,30 @@ def test_aio_methods_and_aemit(db):
 
     async def run():
         event = await bus.aemit("s1", "user_message", {"content": "parser cache"})
-        await db.aio.update_session("s1", status="done")
-        return event, await db.aio.get_session("s1"), sub.queue.get_nowait()
+        await db.sessions.aio.update_session("s1", status="done")
+        return event, await db.sessions.aio.get_session("s1"), sub.queue.get_nowait()
 
     event, s, published = asyncio.run(run())
     assert s["status"] == "done"
-    assert published["seq"] == event["seq"] == db.last_event_seq("s1")
+    assert published["seq"] == event["seq"] == db.sessions.last_event_seq("s1")
 
 
 def test_awrite_returns_the_callable_result(db):
     async def run():
-        return await db.awrite(lambda: db.insert_event("s1", "note", {"text": "x"})["seq"])
-    assert asyncio.run(run()) == db.last_event_seq("s1")
+        return await db.awrite(lambda: db.sessions.insert_event("s1", "note", {"text": "x"})["seq"])
+    assert asyncio.run(run()) == db.sessions.last_event_seq("s1")
 
 
 def test_cancelling_an_awrite_still_delivers_its_events_once(db):
     """The commit happens on the writer whether or not its awaiter is still there, so its events must too."""
     bus = EventBus(db)
     heard = []
-    bus.add_listener(lambda e: heard.append((e["type"], db.get_session("s1")["status"])))
+    bus.add_listener(lambda e: heard.append((e["type"], db.sessions.get_session("s1")["status"])))
     release = threading.Event()
 
     def finish():
         release.wait(5)
-        db.update_session("s1", status="done")
+        db.sessions.update_session("s1", status="done")
         bus.emit("s1", "status", {"status": "done"})
 
     async def run():
@@ -170,7 +171,7 @@ def test_cancelling_an_awrite_still_delivers_its_events_once(db):
 
     asyncio.run(run())
     assert heard == [("status", "done")]
-    assert [e["type"] for e in db.events("s1")] == ["status"]
+    assert [e["type"] for e in db.sessions.events("s1")] == ["status"]
 
 
 def test_cancelling_aemit_still_publishes_the_event(db):
@@ -190,7 +191,7 @@ def test_cancelling_aemit_still_publishes_the_event(db):
 
     cancelled, published = asyncio.run(run())
     assert cancelled
-    assert published["type"] == "run_finished" and published["seq"] == db.last_event_seq("s1")
+    assert published["type"] == "run_finished" and published["seq"] == db.sessions.last_event_seq("s1")
     assert sub.queue.empty()
 
 
@@ -200,7 +201,7 @@ def test_close_stops_the_writer_and_refuses_new_work(tmp_path):
     d.close()
     assert not writer.is_alive()
     with pytest.raises(sqlite3.ProgrammingError):
-        d.insert_session(_session("s2"))
+        d.sessions.insert_session(_session("s2"))
     d.close()  # idempotent
 
 
@@ -215,7 +216,7 @@ def test_metrics_aggregates_run_on_a_read_connection_and_are_cached(db, monkeypa
     monkeypatch.setattr(metrics, "_core_rows", counting)
     with db.reading():
         metrics._cached_core_rows(db)
-        db.insert_event("s1", "error", {"message": "x"})
+        db.sessions.insert_event("s1", "error", {"message": "x"})
         rows = metrics._cached_core_rows(db)
     assert calls == [True]
     assert rows["kinds"].get("error", 0) == 0  # served from the cache
@@ -242,20 +243,22 @@ def _observe_between_statements(db, marker: str, look):
 
 def test_a_reader_never_sees_an_event_without_its_search_index_row(db):
     def look():
-        return (len(db.events("s1")),
+        return (len(db.sessions.events("s1")),
                 db.conn.execute("SELECT COUNT(*) FROM search_index WHERE session_id = 's1'").fetchone()[0])
     seen = _observe_between_statements(db, "INSERT INTO search_index", look)
-    db.insert_event("s1", "tool_result", {"name": "run_cmd", "output": "needle"})
+    db.sessions.insert_event("s1", "tool_result", {"name": "run_cmd", "output": "needle"})
     assert seen == [(0, 0)]  # not (1, 0): the event and its index row commit together
-    assert db.read(look) == (1, 1) and [h["seq"] for h in db.search_events("needle")]
-    asyncio.run(db.aio.insert_event("s1", "tool_result", {"name": "run_cmd", "output": "haystack"}))
+    assert db.read(look) == (1, 1) and [h["seq"] for h in db.sessions.search_events("needle")]
+    asyncio.run(db.sessions.aio.insert_event("s1", "tool_result", {"name": "run_cmd", "output": "haystack"}))
     assert seen == [(0, 0), (1, 1)] and db.read(look) == (2, 2)  # the awaitable path is atomic too
 
 
 def test_a_reader_never_sees_an_empty_allowlist_mid_save(db):
-    db.set_skill_allowlist("commit-style", ["alpha", "beta"])
+    """A module store's multi-statement write is one transaction on the core writer, as a Database method's is."""
+    skills = SkillRecordStore(db)
+    skills.set_skill_allowlist("commit-style", ["alpha", "beta"])
     seen = _observe_between_statements(db, "INSERT INTO skill_project_allowlist",
-                                       lambda: db.skill_allowlist("commit-style"))
-    db.set_skill_allowlist("commit-style", ["alpha", "beta", "gamma"])
+                                       lambda: skills.skill_allowlist("commit-style"))
+    skills.set_skill_allowlist("commit-style", ["alpha", "beta", "gamma"])
     assert seen and all(s == ["alpha", "beta"] for s in seen)  # never [] or part-way between DELETE and INSERTs
-    assert db.skill_allowlist("commit-style") == ["alpha", "beta", "gamma"]
+    assert skills.skill_allowlist("commit-style") == ["alpha", "beta", "gamma"]

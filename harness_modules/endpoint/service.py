@@ -31,6 +31,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from harness.modules import ModelConfig, GpuExclusive, QueueFull
 
+from .store import EndpointRequestStore
+
 log = logging.getLogger("harness.endpoint")
 
 EMBEDDINGS_PATH = "/v1/embeddings"
@@ -105,7 +107,7 @@ def resolve_model(m, requested: str, path: str) -> ModelConfig | None:
 def authenticate(m, request: Request) -> dict | None:
     auth = request.headers.get("authorization", "")
     key = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("x-api-key", "").strip()
-    row = m.db.api_key_by_secret(key)
+    row = m.db.credentials.api_key_by_secret(key)
     if row is None or "inference" not in (row.get("scopes") or "").split():
         return None
     request.state.authenticated_key_id = row["id"]
@@ -193,7 +195,7 @@ def _request_log(m, record: dict, started: float):
         record.update(status=status, prompt_tokens=prompt, completion_tokens=completion, wait_ms=wait_ms,
                       total_ms=int((time.monotonic() - started) * 1000))
         try:
-            m.db.log_endpoint_request(record)
+            EndpointRequestStore(m.db).log_endpoint_request(record)
         except Exception:  # noqa: BLE001 - accounting must not break a response
             log.exception("could not log endpoint request")
     return finish

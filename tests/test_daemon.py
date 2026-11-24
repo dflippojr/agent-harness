@@ -89,10 +89,10 @@ async def wait_status(m: Manager, sid: str, *statuses: str, timeout: float = 30)
     sub = m.bus.subscribe(sid)
     try:
         while True:
-            s = m.db.get_session(sid)
+            s = m.db.sessions.get_session(sid)
             task = m.tasks.get(sid) if s["status"] in ("done", "failed", "cancelled") else None
             if s["status"] in statuses and (task is None or task.done()):
-                return m.db.get_session(sid) if task is not None else s
+                return m.db.sessions.get_session(sid) if task is not None else s
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 reason = f": {s['stop_reason']}" if s.get("stop_reason") else ""
@@ -107,7 +107,7 @@ async def wait_status(m: Manager, sid: str, *statuses: str, timeout: float = 30)
 
 
 def events(m: Manager, sid: str, type_: str) -> list[dict]:
-    return [e["data"] for e in m.db.events(sid) if e["type"] == type_]
+    return [e["data"] for e in m.db.sessions.events(sid) if e["type"] == type_]
 
 
 # policy
@@ -234,7 +234,7 @@ def test_approval_survives_restart(tmp_path):
         await m.start()
         s = m.create("write secret", project="guarded")
         await wait_status(m, s["id"], "waiting_approval")
-        pending = m.db.pending_approvals(s["id"])
+        pending = m.db.sessions.pending_approvals(s["id"])
         assert len(pending) == 1
         assert "+x" in pending[0]["detail"]
         assert m.scheduler.holder is None  # the GPU is free while waiting
@@ -246,7 +246,7 @@ def test_approval_survives_restart(tmp_path):
         m = Manager(cfg, chat=script)
         await m.start()
         await asyncio.sleep(0.1)
-        assert m.db.get_session(sid)["status"] == "waiting_approval"
+        assert m.db.sessions.get_session(sid)["status"] == "waiting_approval"
         m.decide(sid, None, approve=True)
         s = await wait_status(m, sid, "done")
         assert (Path(s["workspace"]) / "secret" / "a.txt").read_text() == "x"
@@ -292,10 +292,10 @@ def test_interrupted_tool_call_is_marked_after_restart(tmp_path):
         m.tasks[s["id"]].cancel()
         await asyncio.sleep(0.05)
         # Simulate a crash mid-tool-call: assistant message stored, tool marked as executing, no result.
-        s = m.db.get_session(s["id"])
+        s = m.db.sessions.get_session(s["id"])
         ctx = s["context"] + [{"role": "assistant", "content": "", "tool_calls": [call("list_files", 0)]}]
         run = s["run"] | {"executing": {"id": "c0-list_files", "name": "list_files"}}
-        m.db.update_session(s["id"], context=ctx, run=run, status="running")
+        m.db.sessions.update_session(s["id"], context=ctx, run=run, status="running")
         m2 = Manager(cfg, db=m.db, chat=script)
         await m2.start()
         s = await wait_status(m2, s["id"], "done")
@@ -368,14 +368,14 @@ def test_a_saved_stuck_stop_runs_no_pending_call_after_restart(tmp_path):
         s = m.create("go")
         m.tasks[s["id"]].cancel()
         await asyncio.sleep(0.05)
-        s = m.db.get_session(s["id"])
+        s = m.db.sessions.get_session(s["id"])
         calls = [call("read_file", 0, path="missing.txt"), call("write_file", 1, path="a.txt", content="x"),
                  call("finish", 2, answer="done")]
         ctx = s["context"] + [{"role": "assistant", "content": "", "tool_calls": calls},
                               {"role": "tool", "tool_call_id": calls[0]["id"], "content": "Error: not found"}]
         run = s["run"] | {"stuck": {"failures": {}, "invalid_streak": 0,
                                     "stop": {"reason": "stuck_repeat", "tool": "read_file", "count": 8}}}
-        m.db.update_session(s["id"], context=ctx, run=run, status="running")
+        m.db.sessions.update_session(s["id"], context=ctx, run=run, status="running")
         m2 = Manager(cfg, db=m.db, chat=script)
         await m2.start()
         s = await wait_status(m2, s["id"], "done")
@@ -400,7 +400,7 @@ def test_cancel_and_follow_up_message(tmp_path):
         s = await m.cancel(s["id"])
         assert s["status"] == "cancelled"
         assert s["context"][-1]["content"].startswith("Not run")
-        assert m.db.pending_approvals(s["id"]) == []
+        assert m.db.sessions.pending_approvals(s["id"]) == []
         await m.send(s["id"], "never mind, just say hi")
         s = await wait_status(m, s["id"], "done")
         assert s["answer"] == "continued"
@@ -421,7 +421,7 @@ def test_cancel_during_the_final_writes_still_ends_the_run(tmp_path, final_write
         m = Manager(make_cfg(tmp_path), chat=script)
         await m.start()
         entered, release = threading.Event(), threading.Event()
-        update_session, insert_event = m.db.update_session, m.db.insert_event
+        update_session, insert_event = m.db.sessions.update_session, m.db.sessions.insert_event
 
         def hold(name: str) -> None:
             if name == final_write:
@@ -437,7 +437,7 @@ def test_cancel_during_the_final_writes_still_ends_the_run(tmp_path, final_write
             if type_ == "run_finished":
                 hold("run_finished")
             return insert_event(sid, type_, data)
-        m.db.update_session, m.db.insert_event = slow_update, slow_insert
+        m.db.sessions.update_session, m.db.sessions.insert_event = slow_update, slow_insert
         saved = []
         save_branch = m.runner.save_branch
 
@@ -454,7 +454,7 @@ def test_cancel_during_the_final_writes_still_ends_the_run(tmp_path, final_write
         task.cancel()
         release.set()
         await asyncio.gather(task, return_exceptions=True)
-        s = m.db.get_session(s["id"])
+        s = m.db.sessions.get_session(s["id"])
         assert s["status"] == "done" and s["answer"] == "all done"
         assert [e["status"] for e in events(m, s["id"], "run_finished")] == ["done"]
         assert saved == [s["id"]]
@@ -473,14 +473,14 @@ def test_daemon_stop_during_the_final_status_write_ends_the_run(tmp_path):
         m = Manager(make_cfg(tmp_path), chat=script)
         await m.start()
         entered, release = threading.Event(), threading.Event()
-        update_session = m.db.update_session
+        update_session = m.db.sessions.update_session
 
         def slow_update(sid, **fields):
             if fields.get("status") == "done":
                 entered.set()
                 release.wait(scaled(10))
             return update_session(sid, **fields)
-        m.db.update_session = slow_update
+        m.db.sessions.update_session = slow_update
         s = m.create("say done")
         await asyncio.to_thread(entered.wait, scaled(10))
         task = m.tasks[s["id"]]
@@ -490,7 +490,7 @@ def test_daemon_stop_during_the_final_status_write_ends_the_run(tmp_path):
         release.set()
         await stopping
         assert task.done()
-        s = m.db.get_session(s["id"])
+        s = m.db.sessions.get_session(s["id"])
         assert s["status"] == "done"
         assert [e["status"] for e in events(m, s["id"], "run_finished")] == ["done"]
         assert (m.cfg.transcripts_dir / f"{s['id']}.md").exists()
@@ -510,21 +510,21 @@ def test_shutdown_during_a_user_cancel_still_ends_the_run(tmp_path):
         sid = m.create("x", project="guarded")["id"]
         await wait_status(m, sid, "waiting_approval")
         entered, release = threading.Event(), threading.Event()
-        update_session = m.db.update_session
+        update_session = m.db.sessions.update_session
 
         def slow_update(sid_, **fields):
             if fields.get("status") == "cancelled":
                 entered.set()
                 release.wait(scaled(10))
             return update_session(sid_, **fields)
-        m.db.update_session = slow_update
+        m.db.sessions.update_session = slow_update
         task = m.tasks[sid]
         cancelling = asyncio.create_task(m.cancel(sid))
         await asyncio.to_thread(entered.wait, scaled(10))
         task.cancel()  # Manager.stop()
         release.set()
         await cancelling
-        s = m.db.get_session(sid)
+        s = m.db.sessions.get_session(sid)
         assert s["status"] == "cancelled"
         assert [e["status"] for e in events(m, sid, "run_finished")] == ["cancelled"]
         assert END_PENDING not in s["run"]
@@ -554,7 +554,7 @@ def test_next_start_ends_a_run_the_daemon_stopped_before_its_end(tmp_path, died)
         sid = m.create("say done")["id"]
         await asyncio.gather(m.tasks[sid], return_exceptions=True)
         await m.stop()
-        assert END_PENDING in m.db.get_session(sid)["run"]
+        assert END_PENDING in m.db.sessions.get_session(sid)["run"]
         assert len(events(m, sid, "run_finished")) == (died == "before_branch_save")
         assert not (cfg.transcripts_dir / f"{sid}.md").exists()
         m.db.close()
@@ -595,21 +595,21 @@ def test_follow_up_cancelled_mid_write_still_runs(tmp_path):
         sid = s["id"]
         await wait_status(m, sid, "done")
         entered, release = threading.Event(), threading.Event()
-        update_session = m.db.update_session
+        update_session = m.db.sessions.update_session
 
         def slow_update(sid_, **fields):
             if fields.get("status") == "queued":
                 entered.set()
                 release.wait(scaled(10))
             return update_session(sid_, **fields)
-        m.db.update_session = slow_update
+        m.db.sessions.update_session = slow_update
         request = asyncio.create_task(m.send(sid, "now say second"))
         await asyncio.to_thread(entered.wait, scaled(10))
         request.cancel()
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await request
-        m.db.update_session = update_session
+        m.db.sessions.update_session = update_session
         s = await wait_status(m, sid, "done", timeout=10)
         assert s["answer"] == "second"
         await m.stop()
@@ -674,7 +674,7 @@ def test_compaction_summarizes_long_context(tmp_path):
         # summaries count toward the session's cumulative tokens (the fake summarizer reports 100 in / 10 out)
         assert summarized["prompt_tokens"] == 100
         assert summarized["totals"]["completion_tokens"] >= 10
-        assert m.summary(m.db.get_session(s["id"]))["context_limit"] == 8000
+        assert m.summary(m.db.sessions.get_session(s["id"]))["context_limit"] == 8000
         assert any((x.get("content") or "").startswith(compaction.SUMMARY_TAG) for x in s["context"])
         assert s["context"][1]["content"] == "long task"
         await m.stop()

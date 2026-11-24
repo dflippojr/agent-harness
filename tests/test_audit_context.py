@@ -7,6 +7,7 @@ import time
 
 from harness import audit_context, migrations, operation_audit
 from harness.admin import PREFIX
+from harness.account_store import AccountStore
 from harness.db import Database
 import pytest
 
@@ -46,13 +47,13 @@ def test_legacy_rows_survive_migration(tmp_path):
     assert db.conn.execute("PRAGMA user_version").fetchone()[0] == 52
     db.close()
     db = Database(path)
-    row = db.audit_page()["items"][0]
+    row = db.accounts.audit_page()["items"][0]
     assert (row["actor_id"], row["detail"], row["actor_kind"], row["source"], row["key_id"], row["metadata"]) == (
         "owner", "old", "unknown", "unknown", "", {})
-    db.insert_audit("owner", "u2", "create", "ok", context=audit_context.owner_context({"id": "k1"}))
+    db.accounts.insert_audit("owner", "u2", "create", "ok", context=audit_context.owner_context({"id": "k1"}))
     db.close()
     db = Database(path)
-    assert [r["key_id"] for r in db.audit_page()["items"]] == ["k1", ""]
+    assert [r["key_id"] for r in db.accounts.audit_page()["items"]] == ["k1", ""]
     db.close()
 
 
@@ -61,20 +62,20 @@ def test_pagination_same_timestamp_inserts_and_clock_step(tmp_path, monkeypatch)
     base = time.time()
     monkeypatch.setattr(time, "time", lambda: base)
     for i in range(13):  # the cursor logic is the same at any size; a page of 5 takes three pages
-        db.insert_audit("owner", f"t{i}", "quota", "ok")
-    first = db.audit_page(5)
+        db.accounts.insert_audit("owner", f"t{i}", "quota", "ok")
+    first = db.accounts.audit_page(5)
     seen = [r["id"] for r in first["items"]]
     monkeypatch.setattr(time, "time", lambda: base - 3600)  # the clock steps backwards
-    db.insert_audit("owner", "late", "quota", "ok")
+    db.accounts.insert_audit("owner", "late", "quota", "ok")
     page = first
     while page["next_before_id"] is not None:
-        page = db.audit_page(5, page["next_before_id"])
+        page = db.accounts.audit_page(5, page["next_before_id"])
         seen += [r["id"] for r in page["items"]]
     assert len(seen) == len(set(seen)) == 13
     assert seen == sorted(seen, reverse=True)
-    assert db.audit_page(5, actor_id="owner", target_id="t7")["items"][0]["target_id"] == "t7"
-    assert db.audit_page(5, since=base, until=base + 1)["items"]
-    assert db.audit_page(5, until=base)["items"][0]["target_id"] == "late"
+    assert db.accounts.audit_page(5, actor_id="owner", target_id="t7")["items"][0]["target_id"] == "t7"
+    assert db.accounts.audit_page(5, since=base, until=base + 1)["items"]
+    assert db.accounts.audit_page(5, until=base)["items"][0]["target_id"] == "late"
     db.close()
 
 
@@ -155,13 +156,13 @@ def test_audit_failure_rolls_back_account_change(hh, monkeypatch):
 
     def boom(*_args, **_kwargs):
         raise sqlite3.OperationalError("disk full")
-    monkeypatch.setattr(Database, "insert_audit", boom)
+    monkeypatch.setattr(AccountStore, "insert_audit", boom)
     r = client.patch(f"{PREFIX}/accounts/{a['user_id']}", json={"disk_quota_bytes": 123}, headers=H(OWNER))
     assert r.status_code == 503
-    assert m.db.account_by_id(a["user_id"])["disk_quota_bytes"] != 123
+    assert m.db.accounts.account_by_id(a["user_id"])["disk_quota_bytes"] != 123
     r = client.post(f"{PREFIX}/accounts", json={"login": "carol@example.com", "display_name": "C"},
                     headers=H(OWNER))
-    assert r.status_code == 503 and m.db.account_by_login("carol@example.com") is None
+    assert r.status_code == 503 and m.db.accounts.account_by_login("carol@example.com") is None
 
 
 def test_denial_rows_carry_context_and_reason(hh):
@@ -177,17 +178,17 @@ def test_denial_rows_carry_context_and_reason(hh):
 def test_retention_prunes_on_insert(tmp_path, monkeypatch):
     db = Database(tmp_path / "x.sqlite3")
     monkeypatch.setattr(time, "time", lambda: 1.0)
-    db.insert_audit("owner", "old", "quota", "ok")
+    db.accounts.insert_audit("owner", "old", "quota", "ok")
     monkeypatch.setattr(time, "time", lambda: 400 * 86400.0)
-    db.insert_audit("owner", "new", "quota", "ok")
-    assert [r["target_id"] for r in db.audit_page()["items"]] == ["new"]
+    db.accounts.insert_audit("owner", "new", "quota", "ok")
+    assert [r["target_id"] for r in db.accounts.audit_page()["items"]] == ["new"]
     db.close()
 
 
 def test_failed_create_leaves_no_directories(hh, monkeypatch):
     client, m = hh
     before = set(p.name for p in m.cfg.data_dir.rglob("u-*"))
-    monkeypatch.setattr(Database, "insert_audit", lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("x")))
+    monkeypatch.setattr(AccountStore, "insert_audit", lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("x")))
     r = client.post(f"{PREFIX}/accounts", json={"login": "dave@example.com", "display_name": "D"}, headers=H(OWNER))
     assert r.status_code == 503
     assert set(p.name for p in m.cfg.data_dir.rglob("u-*")) == before

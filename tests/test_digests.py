@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from harness.db import Database
+from harness_modules.runners.store import RunnerPairingStore
 from harness.delegate_edit import text_digest
 from harness.digests import sha256_hex
 
@@ -32,7 +33,7 @@ def test_sha256_hex_matches_fixed_vectors(text: str, expected: str):
 
 @pytest.fixture
 def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Database:
-    monkeypatch.setattr("harness.db.secrets.token_urlsafe", lambda n=None: "fixed")
+    monkeypatch.setattr("harness.credential_store.secrets.token_urlsafe", lambda n=None: "fixed")  # mints them
     return Database(tmp_path / "harness.sqlite3")
 
 
@@ -42,38 +43,38 @@ def _hash(db: Database, table: str, column: str, value: str) -> str:
 
 
 def test_api_key_hash_is_the_literal_digest(db: Database):
-    row, key = db.create_api_key("laptop")
+    row, key = db.credentials.create_api_key("laptop")
     assert key == "hk-fixed"
     assert _hash(db, "api_keys", "id", row["id"]) == HK_FIXED
-    found = db.api_key_by_secret(key)
+    found = db.credentials.api_key_by_secret(key)
     assert found is not None and found["id"] == row["id"]
 
 
 def test_pairing_code_and_its_key_hash_to_the_literal_digests(db: Database):
-    row, code = db.create_pairing_code("app", "https://app.example", "inference", 600)
+    row, code = db.credentials.create_pairing_code("app", "https://app.example", "inference", 600)
     assert code == "hp-fixed"
     assert _hash(db, "pairing_codes", "id", row["id"]) == HP_FIXED
-    key, secret, error = db.redeem_pairing_code(code, "https://app.example")
+    key, secret, error = db.credentials.redeem_pairing_code(code, "https://app.example")
     assert error == "" and key is not None and secret == "ha-fixed"
     assert _hash(db, "api_keys", "id", key["id"]) == HA_FIXED
 
 
 def test_runner_pairing_code_and_its_key_hash_to_the_literal_digests(db: Database):
-    row, code = db.create_runner_pairing_code("mac", "macrunner", 600)
+    row, code = RunnerPairingStore(db).create_runner_pairing_code("mac", "macrunner", 600)
     assert code == "hrp-fixed"
     assert _hash(db, "runner_pairing_codes", "id", row["id"]) == HRP_FIXED
-    _pairing, key, secret, error = db.redeem_runner_pairing_code(code)
+    _pairing, key, secret, error = RunnerPairingStore(db).redeem_runner_pairing_code(code)
     assert error == "" and key is not None and secret == "ho-fixed"
     assert _hash(db, "api_keys", "id", key["id"]) == HO_FIXED
 
 
 def test_stream_ticket_hash_is_the_literal_digest(db: Database):
-    row, _key = db.create_api_key("laptop")
-    ticket, _expires = db.create_stream_ticket(row["id"], "s1", "https://app.example")
+    row, _key = db.credentials.create_api_key("laptop")
+    ticket, _expires = db.credentials.create_stream_ticket(row["id"], "s1", "https://app.example")
     assert ticket == "hs-fixed"
     with db.lock:
         stored = db.conn.execute("SELECT hash FROM stream_tickets").fetchone()["hash"]
     assert stored == HS_FIXED
-    found = db.stream_ticket_key(ticket, "s1", "https://app.example")
+    found = db.credentials.stream_ticket_key(ticket, "s1", "https://app.example")
     assert found is not None and found["id"] == row["id"]
-    assert db.stream_ticket_origin_active(ticket, "https://app.example")
+    assert db.credentials.stream_ticket_origin_active(ticket, "https://app.example")

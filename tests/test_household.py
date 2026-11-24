@@ -64,8 +64,8 @@ def test_open_owner_legacy_only_without_members(tmp_path):
     cfg = make_cfg(tmp_path)
     assert cfg.allowed_logins == []
     db = Database(cfg.db_path)
-    assert open_owner_mode(cfg, db.member_count())
-    ident = resolve_human(cfg, "anyone@example.com", db)
+    assert open_owner_mode(cfg, db.accounts.member_count())
+    ident = resolve_human(cfg, "anyone@example.com", db.accounts)
     assert ident.kind == "owner"
     assert ident.allowed
     db.close()
@@ -100,7 +100,7 @@ def test_migration_keeps_owner_paths_and_user_id(tmp_path):
     client, m = household(tmp_path)
     with client:
         s = client.post("/sessions", json={"prompt": "hello"}, headers=H(OWNER)).json()
-        row = m.db.get_session(s["id"])
+        row = m.db.sessions.get_session(s["id"])
         assert row["owner_id"] == OWNER_USER_ID
         ws = Path(row["workspace"])
         assert ws.parent == m.cfg.workspaces_dir
@@ -191,8 +191,8 @@ def test_two_member_adversarial_matrix(tmp_path):
         bob_s = client.post("/api/v1/sessions", json={"prompt": "bob unique papaya prompt"},
                             headers=bh).json()
         assert owner_s["id"] != alice_s["id"] != bob_s["id"]
-        assert m.db.get_session(alice_s["id"])["owner_id"] == alice["user_id"]
-        assert Path(m.db.get_session(alice_s["id"])["workspace"]).is_relative_to(
+        assert m.db.sessions.get_session(alice_s["id"])["owner_id"] == alice["user_id"]
+        assert Path(m.db.sessions.get_session(alice_s["id"])["workspace"]).is_relative_to(
             user_root(m.cfg, alice["user_id"]))
 
         def same_404(resp):
@@ -272,7 +272,7 @@ def test_two_member_adversarial_matrix(tmp_path):
         assert client.get("/api/v1/sessions", headers={"Authorization": f"Bearer {device['key']}"}).status_code == 403
         created_app = client.post("/api/v1/sessions", headers=bearer, json={"prompt": "app work"})
         assert created_app.status_code == 201
-        assert m.db.get_session(created_app.json()["id"])["owner_id"] == OWNER_USER_ID
+        assert m.db.sessions.get_session(created_app.json()["id"])["owner_id"] == OWNER_USER_ID
         assert client.post("/api/v1/projects", headers=bearer, json={"name": "from-app"}).status_code == 403
 
         extra = [client.post("/api/v1/sessions", json={"prompt": f"alice extra {i}"}, headers=ah).json()
@@ -346,7 +346,7 @@ def test_device_keys_cannot_start_hosted_sessions_whatever_identity_comes_with_t
             r = client.post("/api/v1/sessions", headers=headers, json={"prompt": "hello", "backend": "opencode"})
             assert r.status_code == 403, r.text
             assert r.json()["error"]["message"] == "this app is not allowed to use backend 'opencode'"
-        assert device_sessions.list_sessions(50, owner_id="owner") == []
+        assert device_sessions.sessions.list_sessions(50, owner_id="owner") == []
         local = client.post("/api/v1/sessions", headers=bearer, json={"prompt": "hello", "backend": "local"})
         assert local.status_code == 201, local.text
         for key in (app, owner):
@@ -354,12 +354,12 @@ def test_device_keys_cannot_start_hosted_sessions_whatever_identity_comes_with_t
                                  json={"prompt": "hello", "backend": "claude"})
             assert hosted.status_code == 201, hosted.text
             assert hosted.json()["backend"] == "claude"
-            assert m.runner._backend_credential(m.db.get_session(hosted.json()["id"]))["policy"] != "denied"
+            assert m.runner._backend_credential(m.db.sessions.get_session(hosted.json()["id"]))["policy"] != "denied"
         # A device's hosted session from before this check (a message or an approval resumes it) is refused when
         # it runs, not only when it is created.
         sid = local.json()["id"]
-        device_sessions.update_session(sid, backend="claude", model="claude-opus-5")
-        s = m.db.get_session(sid)
+        device_sessions.sessions.update_session(sid, backend="claude", model="claude-opus-5")
+        s = m.db.sessions.get_session(sid)
         assert m.runner._backend_credential(s)["policy"] == "denied"
         with pytest.raises(CliBackendError, match="device tokens cannot use claude"):
             m.runner._cli_credentials(sid, s, "claude")
@@ -405,19 +405,19 @@ def test_device_keys_reach_no_built_in_hosted_backend_by_any_route(tmp_path, mon
         local = client.post("/api/v1/sessions", headers=bearer, json={"prompt": "hello", "backend": "local"})
         assert local.status_code == 201, local.text
         sid = local.json()["id"]
-        m.db.for_app(device["id"]).update_session(sid, backend="claude", model="claude-opus-5")
-        before = m.db.get_session(sid)
-        events = len(m.db.events(sid))
+        m.db.for_app(device["id"]).sessions.update_session(sid, backend="claude", model="claude-opus-5")
+        before = m.db.sessions.get_session(sid)
+        events = len(m.db.sessions.events(sid))
         for path, body in (("messages", {"content": "go on"}), ("rerun", None)):
             r = client.post(f"/api/v1/sessions/{sid}/{path}", headers=bearer, json=body)
             assert r.status_code == 403, (path, r.text)
             error = r.json()["error"]
             assert (error["code"], error["message"]) == refusal, path
-        after = m.db.get_session(sid)
+        after = m.db.sessions.get_session(sid)
         assert (after["inbox"], after["context"], after["status"]) == (before["inbox"], before["context"],
                                                                         before["status"])
-        assert len(m.db.events(sid)) == events
-        assert [s["id"] for s in m.db.for_app(device["id"]).list_sessions(50, owner_id="owner")] == [sid]
+        assert len(m.db.sessions.events(sid)) == events
+        assert [s["id"] for s in m.db.for_app(device["id"]).sessions.list_sessions(50, owner_id="owner")] == [sid]
 
         m.cfg.modules.local_model = False  # no backend named: the default is the first enabled hosted one
         r = client.post("/api/v1/sessions", headers=bearer, json={"prompt": "hello"})
@@ -437,7 +437,7 @@ def test_member_cannot_use_hosted_or_owner_modules(tmp_path):
         assert client.post("/api/v1/images", json={"prompt": "cat"}, headers=ah).status_code == 403
         assert client.get("/api/v1/remote-control", headers=ah).status_code == 403
         s = client.post("/api/v1/sessions", json={"prompt": "list files"}, headers=ah).json()
-        row = m.db.get_session(s["id"])
+        row = m.db.sessions.get_session(s["id"])
         schemas = m.runner.tool_schemas(row, m.runner.workspace(row))
         names = {t["function"]["name"] for t in schemas}
         for banned in ("homelab_services", "restart_service", "memory_search", "memory_read", "memory_write",
@@ -490,7 +490,7 @@ def test_member_clone_allows_only_public_https(tmp_path):
                 "name": "pub", "repo": "https://github.com/org/repo",
             }, headers=ah)
             assert created.status_code == 201, created.text
-            dest = Path(m.db.get_member_project(
+            dest = Path(m.db.accounts.get_member_project(
                 client.get("/api/v1/me", headers=ah).json()["user_id"], "pub")["repo"])
             assert dest.is_relative_to(user_root(m.cfg, client.get("/api/v1/me", headers=ah).json()["user_id"]))
             assert dest.name == "pub"
@@ -533,7 +533,7 @@ def test_project_clone_is_removed_when_it_exceeds_quota(tmp_path):
                 "name": "linux", "repo": "https://github.com/org/repo",
             }, headers=ah)
             assert r.status_code == 507, r.text
-            assert m.db.get_member_project(alice["user_id"], "linux") is None
+            assert m.db.accounts.get_member_project(alice["user_id"], "linux") is None
             dest = repos_dir(m.cfg, alice["user_id"]) / "linux"
             assert not dest.exists()
         finally:
@@ -547,8 +547,8 @@ def test_filesystem_isolation_duplicate_slugs_and_containment(tmp_path):
         bob = create_member(client, BOB, "Bob")
         client.post("/api/v1/projects", json={"name": "notes"}, headers=H(ALICE))
         client.post("/api/v1/projects", json={"name": "notes"}, headers=H(BOB))
-        assert m.db.get_member_project(alice["user_id"], "notes")
-        assert m.db.get_member_project(bob["user_id"], "notes")
+        assert m.db.accounts.get_member_project(alice["user_id"], "notes")
+        assert m.db.accounts.get_member_project(bob["user_id"], "notes")
         ar = user_root(m.cfg, alice["user_id"])
         br = user_root(m.cfg, bob["user_id"])
         assert ar != br
@@ -624,7 +624,7 @@ def test_quota_and_concurrency_and_disable(tmp_path):
             sid = f"q{i}queuedxx"
             ws = m.cfg.data_dir / "users" / alice["user_id"] / "workspaces" / sid
             ws.mkdir(parents=True, exist_ok=True)
-            m.db.insert_session({
+            m.db.sessions.insert_session({
                 "id": sid, "project": "scratch", "target": "tower", "model": "fake", "backend": "local",
                 "title": sid, "status": "queued", "workspace": str(ws), "created_at": now, "updated_at": now,
                 "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": alice["user_id"],
@@ -635,7 +635,7 @@ def test_quota_and_concurrency_and_disable(tmp_path):
         running = "runalice01"
         rws = m.cfg.data_dir / "users" / alice["user_id"] / "workspaces" / running
         rws.mkdir(parents=True, exist_ok=True)
-        m.db.insert_session({
+        m.db.sessions.insert_session({
             "id": running, "project": "scratch", "target": "tower", "model": "fake", "backend": "local",
             "title": running, "status": "running", "workspace": str(rws), "created_at": now, "updated_at": now,
             "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": alice["user_id"],
@@ -645,7 +645,7 @@ def test_quota_and_concurrency_and_disable(tmp_path):
         assert disabled["enabled"] is False
         denied = client.get("/api/v1/me", headers=ah)
         assert denied.status_code == 403
-        assert m.db.get_session(running)["status"] == "cancelled"
+        assert m.db.sessions.get_session(running)["status"] == "cancelled"
         assert rws.exists()
         audit = client.get(f"{PREFIX}/accounts/audit", headers=H(OWNER)).json()
         actions = {a["action"] for a in audit}
@@ -665,7 +665,7 @@ def test_member_followup_send_respects_queue_and_quota(tmp_path):
         def insert(sid, status):
             ws = workspaces_dir(m.cfg, uid) / sid
             ws.mkdir(parents=True, exist_ok=True)
-            m.db.insert_session({
+            m.db.sessions.insert_session({
                 "id": sid, "project": "scratch", "target": "tower", "model": "fake", "backend": "local",
                 "title": sid, "status": status, "workspace": str(ws), "created_at": now, "updated_at": now,
                 "context": [{"role": "user", "content": "hi"}], "run": {}, "totals": {}, "inbox": [],
@@ -676,15 +676,15 @@ def test_member_followup_send_respects_queue_and_quota(tmp_path):
         insert("qalice00001", "queued")
         blocked = client.post("/api/v1/sessions/donealice01/messages", json={"content": "again"}, headers=ah)
         assert blocked.status_code == 429, blocked.text
-        assert m.db.get_session("donealice01")["status"] == "done"
+        assert m.db.sessions.get_session("donealice01")["status"] == "done"
 
-        m.db.update_session("qalice00001", status="done")
+        m.db.sessions.update_session("qalice00001", status="done")
         fat = ensure_user_dirs(m.cfg, uid) / "artifacts" / "blob.bin"
         fat.parent.mkdir(parents=True, exist_ok=True)
         fat.write_bytes(b"x" * 120_000)
         over = client.post("/api/v1/sessions/donealice01/messages", json={"content": "again"}, headers=ah)
         assert over.status_code == 507, over.text
-        assert m.db.get_session("donealice01")["status"] == "done"
+        assert m.db.sessions.get_session("donealice01")["status"] == "done"
 
 
 def test_max_queued_zero_is_rejected(tmp_path):
@@ -698,7 +698,7 @@ def test_max_queued_zero_is_rejected(tmp_path):
         patch = client.patch(f"{PREFIX}/accounts/{alice['user_id']}",
                              json={"max_queued": 0}, headers=H(OWNER))
         assert patch.status_code == 400, patch.text
-        assert m.db.account_by_id(alice["user_id"])["max_queued"] == 2
+        assert m.db.accounts.account_by_id(alice["user_id"])["max_queued"] == 2
 
 
 def test_disable_member_awaits_cancel_before_granting_gpu(tmp_path):
@@ -709,7 +709,7 @@ def test_disable_member_awaits_cancel_before_granting_gpu(tmp_path):
         ws = workspaces_dir(m.cfg, alice["user_id"]) / sid
         ws.mkdir(parents=True, exist_ok=True)
         now = 1_700_000_000.0
-        m.db.insert_session({
+        m.db.sessions.insert_session({
             "id": sid, "project": "scratch", "target": "tower", "model": "fake", "backend": "local",
             "title": sid, "status": "running", "workspace": str(ws), "created_at": now, "updated_at": now,
             "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": alice["user_id"],
@@ -754,28 +754,28 @@ def test_disable_member_cancelled_mid_write_still_cancels_all_its_work(tmp_path)
         alice = AccountService(m).create(OWNER_USER_ID, ALICE, "Alice")
         now = 1_700_000_000.0
         for sid in ("aliceq01", "aliceq02"):
-            m.db.insert_session({
+            m.db.sessions.insert_session({
                 "id": sid, "project": "scratch", "target": "tower", "model": "fake", "backend": "local",
                 "title": sid, "status": "queued", "workspace": "", "created_at": now, "updated_at": now,
                 "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": alice["user_id"],
             })
         entered, release = threading.Event(), threading.Event()
-        update_session = m.db.update_session
+        update_session = m.db.sessions.update_session
 
         def slow_update(sid, **fields):
             if fields.get("status") == "cancelled" and not entered.is_set():
                 entered.set()
                 release.wait(scaled(10))
             return update_session(sid, **fields)
-        m.db.update_session = slow_update
+        m.db.sessions.update_session = slow_update
         request = asyncio.create_task(m.disable_member(alice["user_id"]))
         await asyncio.to_thread(entered.wait, scaled(10))
         request.cancel()
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await request
-        assert [m.db.get_session(sid)["status"] for sid in ("aliceq01", "aliceq02")] == ["cancelled", "cancelled"]
-        assert sum(1 for a in m.db.list_audit() if a["action"] == "cancel") == 2
+        assert [m.db.sessions.get_session(sid)["status"] for sid in ("aliceq01", "aliceq02")] == ["cancelled", "cancelled"]
+        assert sum(1 for a in m.db.accounts.list_audit() if a["action"] == "cancel") == 2
     asyncio.run(body())
 
 
@@ -938,7 +938,7 @@ def test_quota_ignores_links_and_cleanup_stays_contained(tmp_path):
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "notes.txt").write_text("keep", encoding="utf-8")
         now = 1_700_000_000.0
-        m.db.insert_session({
+        m.db.sessions.insert_session({
             "id": sid, "project": "scratch", "target": "tower", "model": "fake", "backend": "local",
             "title": sid, "status": "cancelled", "workspace": str(ws), "created_at": now, "updated_at": now,
             "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": alice["user_id"],
@@ -948,7 +948,7 @@ def test_quota_ignores_links_and_cleanup_stays_contained(tmp_path):
         planted = m.cfg.workspaces_dir / "owner-ws"
         planted.mkdir(parents=True, exist_ok=True)
         (planted / "secret.txt").write_text("owner", encoding="utf-8")
-        m.db.update_session(sid, workspace=str(planted))
+        m.db.sessions.update_session(sid, workspace=str(planted))
         m.maintenance.remove_workspace(sid)
         assert planted.exists()
         assert (planted / "secret.txt").read_text(encoding="utf-8") == "owner"
@@ -1031,7 +1031,7 @@ def test_guest_stays_non_durable(tmp_path):
         assert me["role"] == "guest"
         assert me["user_id"] is None
         assert client.post("/sessions", json={"prompt": "x"}, headers=H(GUEST)).status_code == 403
-        assert m.db.member_count() == 0
+        assert m.db.accounts.member_count() == 0
         assert client.post("/api/v1/projects", json={"name": "g"}, headers=H(GUEST)).status_code in (401, 403)
 
 
@@ -1044,7 +1044,7 @@ def test_no_secrets_in_sqlite(tmp_path):
         raw = m.cfg.db_path.read_bytes()
         assert app["key"].encode() not in raw
         assert b"Tailscale" not in raw
-        accounts = list(m.db.list_accounts())
+        accounts = list(m.db.accounts.list_accounts())
         assert "token" not in accounts[0]
         assert ALICE in accounts[0]["login"]
 
@@ -1123,11 +1123,11 @@ def test_member_refresh_passes_remaining_quota_as_max_bytes(tmp_path):
         (ws_path / "keep.txt").write_text("stay", encoding="utf-8")
         repo = repos_dir(m.cfg, uid) / "notes"
         repo.mkdir(parents=True, exist_ok=True)
-        m.db.insert_member_project({
+        m.db.accounts.insert_member_project({
             "user_id": uid, "slug": "notes", "description": "", "repo": str(repo), "source_url": "",
         })
         now = 1_700_000_000.0
-        m.db.insert_session({
+        m.db.sessions.insert_session({
             "id": sid, "project": "notes", "target": "tower", "model": "fake", "backend": "local",
             "title": sid, "status": "queued", "workspace": str(ws_path), "created_at": now, "updated_at": now,
             "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": uid,
@@ -1144,7 +1144,7 @@ def test_member_refresh_passes_remaining_quota_as_max_bytes(tmp_path):
         orig = clone_mod.isolated_refresh_origin
         clone_mod.isolated_refresh_origin = fake_refresh
         try:
-            asyncio.run(m.runner._prepare_repo(m.db.get_session(sid)))
+            asyncio.run(m.runner._prepare_repo(m.db.sessions.get_session(sid)))
         finally:
             clone_mod.isolated_refresh_origin = orig
         from harness.fileops import dir_size
@@ -1167,12 +1167,12 @@ def test_member_approval_cannot_grant_owner_only_tool(tmp_path):
         "title": sid, "status": "running", "workspace": str(ws_path), "created_at": now, "updated_at": now,
         "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": alice["user_id"],
     }
-    m.db.insert_session(row)
-    m.db.insert_approval({
+    m.db.sessions.insert_session(row)
+    m.db.sessions.insert_approval({
         "id": "a-fake01", "session_id": sid, "tool_call_id": "c1",
         "tool": "homelab_services", "args": {}, "reason": "injected",
     })
-    assert m.db.decide_approval("a-fake01", "approved", "")
+    assert m.db.sessions.decide_approval("a-fake01", "approved", "")
     ws = m.runner.workspace(row)
     out = asyncio.run(m.runner._authorize(row, {"id": "c1"}, "homelab_services", {}, ws))
     assert out

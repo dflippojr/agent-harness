@@ -1,8 +1,10 @@
 """Owner memory management, also exposed through the admin API."""
 import asyncio
+from typing import NotRequired, TypedDict
+
 from fastapi import Request
-from pydantic import BaseModel
-from harness.modules import HarnessError, RouteTable, ToolError, manager
+from pydantic import BaseModel, ConfigDict, with_config
+from harness.modules import HarnessError, RouteTable, ToolError, documented, manager
 
 owner_routes = RouteTable()
 
@@ -11,7 +13,44 @@ class MemoryProfileUpdate(BaseModel):
     summary: str = "Update agent profile"
 
 
-@owner_routes.get("/memory")
+@with_config(ConfigDict(extra="allow"))  # documentation only: a reply may carry more fields
+class _Reply(TypedDict):
+    pass
+
+
+class MemoryCommit(_Reply):
+    head: NotRequired[str]
+    path: NotRequired[str]
+    summary: NotRequired[str]
+    at: NotRequired[float]
+    pushed: NotRequired[bool]
+
+
+class MemoryResponse(_Reply):
+    """The memory library's state; with the library switched off, only `enabled` (false)."""
+    enabled: bool
+    writes: NotRequired[bool]
+    categories: NotRequired[list[str]]
+    profile_path: NotRequired[str]
+    profile: NotRequired[str]
+    profile_chars: NotRequired[int]
+    profile_max_chars: NotRequired[int]
+    last_commit: NotRequired[MemoryCommit | None]
+    refresh_error: NotRequired[str | None]
+    refresh_state: NotRequired[str]
+    changed_paths: NotRequired[list[str]]
+    refresh_failures: NotRequired[int]
+    last_success: NotRequired[float | None]
+
+
+class MemoryProfileResponse(_Reply):
+    profile: str
+    profile_chars: int
+    profile_max_chars: int
+    last_commit: MemoryCommit | None
+
+
+@owner_routes.get("/memory", responses=documented(MemoryResponse))
 async def memory(request: Request):
     """The agent profile new sessions get, and the latest change agents saved to the memory library."""
     m = manager(request)
@@ -26,7 +65,7 @@ async def memory(request: Request):
             "refresh_failures": lib.failures, "last_success": lib.last_success}
 
 
-@owner_routes.put("/memory/profile")
+@owner_routes.put("/memory/profile", responses=documented(MemoryProfileResponse))
 async def update_memory_profile(body: MemoryProfileUpdate, request: Request):
     """Owner edit of the agent profile from Settings. Commits and pushes like an approved memory write."""
     m = manager(request)

@@ -124,7 +124,7 @@ def test_changes_command_writes_the_output(repo, monkeypatch, tmp_path_factory):
 def _needs(tests: str = "true", changes: str = "success", **results: str) -> dict:
     needs = {"changes": {"result": changes, "outputs": {"tests": tests}}}
     for job in ("lint", "test", "test-linux", "coverage", "test-py313", "review-linux", "sonar", "openapi", "ui-tests",
-                "hub-contract", "deploy-linux"):
+                "hub-contract", "deploy-linux", "server-image"):
         needs[job] = {"result": results.get(job.replace("-", "_"), "success"), "outputs": {}}
     return needs
 

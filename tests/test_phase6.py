@@ -163,11 +163,11 @@ def test_web_tools_reach_sessions_and_projects_can_opt_out(tmp_path):
         result = events(m, s["id"], "tool_result")[0]
         assert result["ok"]
         assert "https://x.example/" in result["output"]
-        assert "web_fetch" in m.db.get_session(s["id"])["context"][0]["content"]
+        assert "web_fetch" in m.db.sessions.get_session(s["id"])["context"][0]["content"]
         offline = m.create("no web", project="offline")
-        assert "web_fetch" not in m.db.get_session(offline["id"])["context"][0]["content"]
-        names = {t["function"]["name"] for t in m.runner.tool_schemas(m.db.get_session(offline["id"]),
-                                                                       m.runner.workspace(m.db.get_session(offline["id"])))}
+        assert "web_fetch" not in m.db.sessions.get_session(offline["id"])["context"][0]["content"]
+        names = {t["function"]["name"] for t in m.runner.tool_schemas(m.db.sessions.get_session(offline["id"]),
+                                                                       m.runner.workspace(m.db.sessions.get_session(offline["id"])))}
         assert "web_search" not in names
         await m.stop()
     asyncio.run(body())
@@ -942,7 +942,7 @@ def test_app_session_with_context_and_app_tool(tmp_path):
         sid = s["id"]
         assert s["app_tools"] == ["lookup_order"]
         assert s["metadata"] == {"ticket": 991}
-        system = m.db.get_session(sid)["context"][0]["content"]
+        system = m.db.sessions.get_session(sid)["context"][0]["content"]
         assert 'Context from the app "shop-bot"' in system
         assert "Dana, premium plan" in system
 
@@ -959,7 +959,7 @@ def test_app_session_with_context_and_app_tool(tmp_path):
         done = wait_for(lambda: (lambda d: d if d["status"] == "done" else None)(
             client.get(f"/api/v1/sessions/{sid}", headers=auth).json()))
         assert done["answer"] == "Order A-17 ships Friday."
-        tool_msg = [c for c in m.db.get_session(sid)["context"] if c["role"] == "tool"][0]
+        tool_msg = [c for c in m.db.sessions.get_session(sid)["context"] if c["role"] == "tool"][0]
         assert tool_msg["content"] == "ships Friday"
 
         text = client.get(f"/api/v1/sessions/{sid}/events?follow=false", headers=auth).text
@@ -969,7 +969,7 @@ def test_app_session_with_context_and_app_tool(tmp_path):
         # context mid-session, delivered as its own event
         client.post(f"/api/v1/sessions/{sid}/context", headers=auth,
                     json={"context": [{"title": "Update", "content": "carrier changed"}]})
-        assert any(e["type"] == "app_context" for e in m.db.events(sid))
+        assert any(e["type"] == "app_context" for e in m.db.sessions.events(sid))
 
 
 def test_sessions_all_read_vs_mutation_matrix(tmp_path):
@@ -1000,10 +1000,10 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
         b_sid = client.post("/api/v1/sessions", headers=H(b), json={"prompt": "b task"}).json()["id"]
         sessions = {"owner": owner_sid, "a": a_sid, "b": b_sid}
         for sid in sessions.values():
-            wait_for(lambda sid=sid: m.db.get_session(sid)["status"] == "done")
+            wait_for(lambda sid=sid: m.db.sessions.get_session(sid)["status"] == "done")
 
         def event_count(sid, type_):
-            return sum(1 for e in m.db.events(sid) if e["type"] == type_)
+            return sum(1 for e in m.db.sessions.events(sid) if e["type"] == type_)
 
         read_rows = [
             ("a", a, {"owner": 404, "a": 200, "b": 404}, {a_sid}),
@@ -1047,7 +1047,7 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
                     assert cancel.status_code == 404
                     assert event_count(sid, "user_message") == before_msg
                     assert event_count(sid, "app_context") == before_ctx
-                    assert not any(payload in (e["data"].get("content") or "") for e in m.db.events(sid)
+                    assert not any(payload in (e["data"].get("content") or "") for e in m.db.sessions.events(sid)
                                    if e["type"] in ("user_message", "app_context"))
 
         reader_msg, reader_ctx = {"content": "reader-inject"}, {"context": [{"title": "x", "content": "y"}]}
@@ -1060,7 +1060,7 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
             assert client.post(f"/api/v1/sessions/{sid}/cancel", headers=H(reader)).status_code == 403
             assert event_count(sid, "user_message") == before
 
-        m.db.insert_app_tool_call(a_sid, "call-a", "lookup", {"x": 1})
+        m.db.sessions.insert_app_tool_call(a_sid, "call-a", "lookup", {"x": 1})
         assert client.get(f"/api/v1/sessions/{a_sid}/tool_calls", headers=H(broad)).status_code == 404
         assert client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(broad),
                            json={"output": "nope"}).status_code == 404
@@ -1072,9 +1072,9 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
         assert client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(a),
                            json={"output": "yes"}).status_code == 200
 
-        m.db.insert_approval({"id": "appr-a", "session_id": a_sid, "tool_call_id": "native-1",
+        m.db.sessions.insert_approval({"id": "appr-a", "session_id": a_sid, "tool_call_id": "native-1",
                               "tool": "run_shell", "args": {"command": "echo"}, "reason": "ask"})
-        m.db.insert_approval({"id": "appr-o", "session_id": owner_sid, "tool_call_id": "native-2",
+        m.db.sessions.insert_approval({"id": "appr-o", "session_id": owner_sid, "tool_call_id": "native-2",
                               "tool": "run_shell", "args": {"command": "echo"}, "reason": "ask"})
         assert client.get(f"/api/v1/sessions/{a_sid}/approvals", headers=H(broad)).status_code == 404
         assert client.post(f"/api/v1/sessions/{a_sid}/approvals/appr-a", headers=H(wide),

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from typing import Callable
 
 import httpx
 
@@ -51,9 +52,11 @@ def describe_call(tool: str, args: dict) -> str:
 
 
 class Notifier:
-    def __init__(self, cfg: Config, db: Database):
+    def __init__(self, cfg: Config, db: Database, scheduled_job: Callable[[str], dict | None] | None = None):
         self.cfg = cfg
         self.db = db
+        # A scheduled job by id, from the module that schedules jobs (ModuleHost.scheduled_job); no lookup, no job.
+        self.scheduled_job = scheduled_job or (lambda jid: None)
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=500)
         self._task: asyncio.Task | None = None
         self.sent: list[dict] = []  # last payloads, for tests and /notify/test
@@ -75,7 +78,7 @@ class Notifier:
             return
         sid = event.get("session_id")
         if sid:
-            session = self.db.get_session(sid)
+            session = self.db.sessions.get_session(sid)
             if session and session.get("kind") == "chat":
                 return  # Chat replies are read live, not pushed
             if session and (session.get("kind") == TOOLS_ONLY or session.get("app_id")):
@@ -157,7 +160,7 @@ class Notifier:
 
     def build(self, event: dict) -> dict | None:
         sid, d = event["session_id"], event["data"]
-        session = self.db.get_session(sid)
+        session = self.db.sessions.get_session(sid)
         if session is None:
             return None
         if (session.get("owner_id") or "owner") != "owner":
@@ -169,7 +172,7 @@ class Notifier:
         return handler(self, sid, title, d, base, session) if handler else None
 
     def _approval_requested(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
-        approval = self.db.get_approval(d["id"])
+        approval = self.db.sessions.get_approval(d["id"])
         if approval is None or approval["status"] != "pending":
             return None
         payload = {
@@ -238,7 +241,7 @@ class Notifier:
                 "message": f"Memory recovered after {waited}; the task continues."}
 
     def _approval_decided(self, sid: str, title: str, d: dict, base: dict, session: dict) -> dict | None:
-        approval = self.db.get_approval(d["id"])
+        approval = self.db.sessions.get_approval(d["id"])
         if approval is None:
             return None
         mark = "✅ Approved" if d["status"] == "approved" else "🚫 Denied"
@@ -279,10 +282,10 @@ class Notifier:
         app_id = session.get("app_id") or ""
         if not app_id:
             return False
-        key = self.db.get_api_key(app_id)
+        key = self.db.credentials.get_api_key(app_id)
         snapshot = session.get("app_defaults") if isinstance(session.get("app_defaults"), dict) else {}
         if use_live_app_settings(key):
-            row = self.db.get_app_settings(app_id)
+            row = self.db.apps.get_app_settings(app_id)
             values = (row or {}).get("values") or {}
         else:
             values = frozen_app_defaults(snapshot)
@@ -290,7 +293,7 @@ class Notifier:
 
     def _job_finished(self, sid: str, title: str, d: dict, base: dict) -> dict | None:
         """Scheduled jobs are quiet unless something needs attention (user decision, Phase 7d)."""
-        job = self.db.get_job(d["job_id"]) or {}
+        job = self.scheduled_job(d["job_id"]) or {}
         name = _short(job.get("name") or title, 60)
         click = self.link(f"/#/s/{sid}")
         if d["status"] == "cancelled":

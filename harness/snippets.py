@@ -482,7 +482,7 @@ class SnippetService:
         if self.stopping and "cancelled" in result["reasons"]:
             result["reasons"] = ["daemon_restart"]
             result["status"] = "interrupted"
-        if self.db.get_session(sid) is not None:
+        if self.db.sessions.get_session(sid) is not None:
             self.bus.emit(sid, "snippet_result", result)
 
     def cancel(self, sid: str, run_id: str) -> dict:
@@ -496,7 +496,7 @@ class SnippetService:
     def recover(self) -> list[str]:
         """At startup: give every run the last daemon left unfinished an 'interrupted' result. Returns their ids."""
         started, finished = {}, set()
-        for e in self.db.snippet_events():
+        for e in self.db.sessions.snippet_events():
             if e["type"] == "snippet_started":
                 started[e["data"]["id"]] = e
             else:
@@ -519,7 +519,7 @@ class SnippetService:
 
     def context_for(self, sid: str) -> str:
         """Runs finished since the user's last message, for the model to read with the next one."""
-        events = self.db.events(sid)
+        events = self.db.sessions.events(sid)
         last_user = max((e["seq"] for e in events if e["type"] == "user_message"), default=0)
         started = {e["data"]["id"]: e["data"] for e in events if e["type"] == "snippet_started"}
         notes = [context_note(started.get(e["data"].get("id"), {}), e["data"]) for e in events

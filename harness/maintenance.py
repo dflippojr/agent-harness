@@ -123,7 +123,7 @@ class Maintenance:
                 continue
             labels = {k: v for k, _, v in (kv.partition("=") for kv in item.get("Labels", "").split(",") if "=" in kv)}
             sid = labels.get("agent-harness.session", "")
-            s = self.db.get_session(sid) if sid else None
+            s = self.db.sessions.get_session(sid) if sid else None
             if item.get("State") == "running" and s is not None:
                 continue
             if s is not None and (s["status"] in ACTIVE or now - s["updated_at"] < idle):
@@ -171,7 +171,7 @@ class Maintenance:
                 self._clean_workspace(path, now, retention, report)
 
     def _clean_workspace(self, path, now: float, retention: float, report: dict) -> None:
-        s = self.db.get_session(path.name)
+        s = self.db.sessions.get_session(path.name)
         if s is None:
             if now - path.stat().st_mtime > 3600:  # never race a session being created
                 remove_tree(path)
@@ -190,7 +190,7 @@ class Maintenance:
     async def _remote_workspaces(self, now: float, report: dict) -> None:
         retention = self.cfg.cleanup.workspace_retention_days * 86400
         hub = self.runner.hub
-        for s in self.db.sessions_with_status("done", "failed", "cancelled"):
+        for s in self.db.sessions.sessions_with_status("done", "failed", "cancelled"):
             target = s["target"]
             if target == "tower" or s["workspace_removed"] or now - s["updated_at"] < retention:
                 continue
@@ -213,7 +213,7 @@ class Maintenance:
             report["kept"].append({"session": s["id"], "reason": f"{type(e).__name__}: {e}"})
             return
         if result.get("removed"):
-            self.db.update_session(s["id"], workspace_removed=1)
+            self.db.sessions.update_session(s["id"], workspace_removed=1)
             report["workspaces_removed"].append(s["id"])
         else:
             report["kept"].append({"session": s["id"], "reason": result.get("reason", "kept by the runner")})
@@ -244,7 +244,7 @@ class Maintenance:
 
     def remove_workspace(self, sid: str) -> None:
         from . import storage
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         path = Path(s["workspace"])
         dirs = storage.session_dirs(self.cfg, s)
         root = dirs["workspaces"]
@@ -255,8 +255,8 @@ class Maintenance:
             return
         remove_tree(path)
         remove_tree(dirs["checkpoints"] / sid)
-        self.db.delete_checkpoints(sid, [c["turn"] for c in self.db.checkpoints(sid, hidden=None)])
-        self.db.update_session(sid, workspace_removed=1)
+        self.db.sessions.delete_checkpoints(sid, [c["turn"] for c in self.db.sessions.checkpoints(sid, hidden=None)])
+        self.db.sessions.update_session(sid, workspace_removed=1)
 
     # reporting
     async def usage(self) -> dict:

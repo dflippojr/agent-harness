@@ -41,8 +41,8 @@ def test_group_starts_one_session_per_choice(tmp_path):
     view = run(m.create_compare("do it", CHOICES, "repo"))
     assert [r["backend"] for r in view["members"]] == ["claude", "codex"]
     ids = [r["id"] for r in view["members"]]
-    assert {m.db.get_session(i)["compare_group"] for i in ids} == {view["group"]}
-    assert len({m.db.get_session(i)["workspace"] for i in ids}) == 2
+    assert {m.db.sessions.get_session(i)["compare_group"] for i in ids} == {view["group"]}
+    assert len({m.db.sessions.get_session(i)["workspace"] for i in ids}) == 2
 
 
 def test_group_size_project_and_owner_rules(tmp_path):
@@ -63,13 +63,13 @@ def test_group_size_project_and_owner_rules(tmp_path):
 
 def test_reported_limit_refuses_but_unknown_usage_allows(tmp_path):
     m = make_manager(tmp_path)
-    m.db.set_backend_usage("codex", {"status": "rejected"})
+    m.db.usage.set_backend_usage("codex", {"status": "rejected"})
     coro = m.create_compare("p", CHOICES, "repo")
     with pytest.raises(HarnessError) as e:
         run(coro)
     assert e.value.status == 429
-    assert m.db.list_sessions() == []
-    m.db.set_backend_usage("codex", {})
+    assert m.db.sessions.list_sessions() == []
+    m.db.usage.set_backend_usage("codex", {})
     run(m.create_compare("p", CHOICES, "repo"))
 
 
@@ -80,7 +80,7 @@ def test_pick_reviews_winner_and_discards_rest(tmp_path):
 
     async def fake_review(sid, action, *, context=None):
         calls.append((sid, action))
-        m.db.update_session(sid, review={"merge": "merged", "push": "pushed", "discard": "discarded"}[action])
+        m.db.sessions.update_session(sid, review={"merge": "merged", "push": "pushed", "discard": "discarded"}[action])
 
     m.review = fake_review
     a, b = (r["id"] for r in view["members"])
@@ -99,14 +99,14 @@ def test_failed_later_member_discards_the_earlier_ones(tmp_path):
 
     async def fake_review(sid, action, *, context=None):
         discarded.append((sid, action))
-        m.db.update_session(sid, review="discarded")
+        m.db.sessions.update_session(sid, review="discarded")
 
     m.review = fake_review
     coro = m.create_compare("p", CHOICES, "repo")
     with pytest.raises(HarnessError):
         run(coro)
-    (s,) = m.db.list_sessions()
-    s = m.db.get_session(s["id"])
+    (s,) = m.db.sessions.list_sessions()
+    s = m.db.sessions.get_session(s["id"])
     assert discarded == [(s["id"], "discard")]
     assert s["status"] == "cancelled"
     assert s["compare_group"] == ""
@@ -129,8 +129,8 @@ def test_rollback_covers_non_harness_errors_and_failed_discard(tmp_path):
     coro = m.create_compare("p", CHOICES, "repo")
     with pytest.raises(RuntimeError):
         run(coro)
-    (s,) = m.db.list_sessions()
-    s = m.db.get_session(s["id"])
+    (s,) = m.db.sessions.list_sessions()
+    s = m.db.sessions.get_session(s["id"])
     assert s["review"] == "discarded"
     assert s["workspace_removed"]
     assert s["compare_group"] == ""
@@ -146,14 +146,14 @@ def test_pick_retry_skips_merged_winner_and_reports_discard_failures(tmp_path):
         calls.append((sid, action))
         if action == "discard" and fail["on"]:
             raise HarnessError(500, "disk")
-        m.db.update_session(sid, review={"merge": "merged", "discard": "discarded"}[action])
+        m.db.sessions.update_session(sid, review={"merge": "merged", "discard": "discarded"}[action])
 
     m.review = fake_review
     coro = m.compare_pick(view["group"], a, "merge", True)
     with pytest.raises(HarnessError) as e:
         run(coro)
     assert b in str(e.value)
-    assert m.db.get_session(a)["review"] == "merged"
+    assert m.db.sessions.get_session(a)["review"] == "merged"
     fail["on"] = False
     out = run(m.compare_pick(view["group"], a, "merge", True))
     assert calls == [(a, "merge"), (b, "discard"), (b, "discard")]
@@ -172,7 +172,7 @@ def test_pick_that_does_not_complete_discards_nobody(tmp_path, action):
         # a conflicted merge returns normally with review="" ; a failed push raises
         if act == "push":
             raise HarnessError(502, "push rejected")
-        m.db.update_session(sid, review="", review_detail="merge conflict in a.py")
+        m.db.sessions.update_session(sid, review="", review_detail="merge conflict in a.py")
 
     m.review = fake_review
     coro = m.compare_pick(view["group"], a, action, True)
@@ -182,7 +182,7 @@ def test_pick_that_does_not_complete_discards_nobody(tmp_path, action):
     if action == "merge":
         assert "did not complete" in str(e.value)
         assert "conflict" in str(e.value)
-    assert m.db.get_session(b)["review"] != "discarded"
+    assert m.db.sessions.get_session(b)["review"] != "discarded"
 
 
 def test_pick_after_conflict_can_succeed_on_retry(tmp_path):
@@ -193,9 +193,9 @@ def test_pick_after_conflict_can_succeed_on_retry(tmp_path):
 
     async def fake_review(sid, act, *, context=None):
         if act == "merge":
-            m.db.update_session(sid, review="merged" if state["ok"] else "")
+            m.db.sessions.update_session(sid, review="merged" if state["ok"] else "")
         else:
-            m.db.update_session(sid, review="discarded")
+            m.db.sessions.update_session(sid, review="discarded")
 
     m.review = fake_review
     coro = m.compare_pick(view["group"], a, "merge", True)
@@ -216,7 +216,7 @@ def test_group_discard_continues_past_a_failure(tmp_path):
         seen.append(sid)
         if sid == a:
             raise HarnessError(500, "disk")
-        m.db.update_session(sid, review="discarded")
+        m.db.sessions.update_session(sid, review="discarded")
 
     m.review = fake_review
     coro = m.compare_discard(view["group"])
@@ -242,8 +242,8 @@ def test_rollback_falls_back_when_discard_fails_for_a_checked_out_member(tmp_pat
     coro = m.create_compare("p", CHOICES, "repo")
     with pytest.raises(RuntimeError):
         run(coro)
-    (s,) = m.db.list_sessions()
-    s = m.db.get_session(s["id"])
+    (s,) = m.db.sessions.list_sessions()
+    s = m.db.sessions.get_session(s["id"])
     assert s["status"] == "cancelled"
     assert s["review"] == "discarded"
     assert s["workspace_removed"]
@@ -262,8 +262,8 @@ def test_rollback_falls_back_when_discard_fails_for_a_checked_out_member(tmp_pat
     coro = m.create_compare("p", CHOICES, "repo")
     with pytest.raises(RuntimeError):
         run(coro)
-    (s,) = m.db.list_sessions()
-    assert m.db.get_session(s["id"])["compare_group"] == ""
+    (s,) = m.db.sessions.list_sessions()
+    assert m.db.sessions.get_session(s["id"])["compare_group"] == ""
 
 
 def test_group_discard_reports_a_member_that_cannot_be_stopped(tmp_path):
@@ -285,9 +285,9 @@ def test_group_discard_reports_a_member_that_cannot_be_stopped(tmp_path):
     assert "stuck" in str(e.value)
     assert b not in str(e.value)
     # the one that could not be stopped is left alone and retryable; the other was still discarded
-    assert m.db.get_session(a)["status"] == "queued"
-    assert m.db.get_session(a)["review"] == ""
-    assert m.db.get_session(b)["review"] == "discarded"
+    assert m.db.sessions.get_session(a)["status"] == "queued"
+    assert m.db.sessions.get_session(a)["review"] == ""
+    assert m.db.sessions.get_session(b)["review"] == "discarded"
     m.cancel = real_cancel
     out = run(m.compare_discard(view["group"]))
     assert [r["review"] for r in out["members"]] == ["discarded", "discarded"]
@@ -344,10 +344,10 @@ def real_manager(tmp_path):
 async def one_runs_one_queues(m, *sids):
     """The GPU runs one local session at a time: one takes it, the other waits behind it."""
     for _ in range(500):
-        if sorted(m.db.get_session(s)["status"] for s in sids) == ["queued", "running"]:
+        if sorted(m.db.sessions.get_session(s)["status"] for s in sids) == ["queued", "running"]:
             return
         await asyncio.sleep(0.02)
-    raise AssertionError([m.db.get_session(s)["status"] for s in sids])
+    raise AssertionError([m.db.sessions.get_session(s)["status"] for s in sids])
 
 
 async def running_group(tmp_path, monkeypatch):
@@ -356,7 +356,7 @@ async def running_group(tmp_path, monkeypatch):
     gate, real_prepare = threading.Event(), projects.prepare
 
     def prepare(project, ws, sid):
-        if m.db.get_session(sid)["model"] != "fake":
+        if m.db.sessions.get_session(sid)["model"] != "fake":
             gate.wait(10)  # the losers are not checked out until the winner has finished
         return real_prepare(project, ws, sid)
 
@@ -375,13 +375,13 @@ async def running_group(tmp_path, monkeypatch):
 def assert_gone(src, m, *sids):
     """Each member was stopped and fully discarded: nothing active, no branch, no workspace, nothing to resume."""
     for sid in sids:
-        s = m.db.get_session(sid)
+        s = m.db.sessions.get_session(sid)
         assert s["status"] not in ACTIVE, sid
         assert s["review"] == "discarded", sid
         assert s["workspace_removed"], sid
         assert not Path(s["workspace"]).exists(), sid
         assert sh(src, "branch", "--list", s["branch"]) == "", sid
-    assert m.db.sessions_with_status(*ACTIVE) == []
+    assert m.db.sessions.sessions_with_status(*ACTIVE) == []
     assert m.scheduler.holder is None
     assert not m.runner.user_cancelled
 
@@ -440,14 +440,14 @@ def test_member_that_finishes_before_the_cancel_lands_is_still_discarded(tmp_pat
 def test_pick_of_a_running_winner_cancels_and_discards_nobody(tmp_path, monkeypatch):
     async def body():
         src, m, group, a, b, c = await running_group(tmp_path, monkeypatch)
-        before = [m.db.get_session(s)["status"] for s in (a, b, c)]
-        running = next(s for s in (b, c) if m.db.get_session(s)["status"] == "running")
+        before = [m.db.sessions.get_session(s)["status"] for s in (a, b, c)]
+        running = next(s for s in (b, c) if m.db.sessions.get_session(s)["status"] == "running")
         with pytest.raises(HarnessError) as e:
             await m.compare_pick(group, running, "merge", True)
         assert e.value.status == 409
         assert "still working" in str(e.value)
-        assert [m.db.get_session(s)["status"] for s in (a, b, c)] == before
-        assert [m.db.get_session(s)["review"] for s in (a, b, c)] == ["", "", ""]
+        assert [m.db.sessions.get_session(s)["status"] for s in (a, b, c)] == before
+        assert [m.db.sessions.get_session(s)["review"] for s in (a, b, c)] == ["", "", ""]
         assert (src / "app.py").read_text() == "VALUE = 1\n"
         await m.stop()
     asyncio.run(body())
@@ -468,10 +468,10 @@ def test_discard_retry_after_a_failure_finishes_the_group(tmp_path, monkeypatch)
         with pytest.raises(HarnessError) as e:
             await m.compare_pick(group, a, "merge", True)
         assert b in str(e.value)
-        assert m.db.get_session(a)["review"] == "merged"
-        assert m.db.get_session(b)["status"] == "cancelled"
-        assert m.db.get_session(c)["review"] == "discarded"
-        assert not m.db.get_session(b)["workspace_removed"]
+        assert m.db.sessions.get_session(a)["review"] == "merged"
+        assert m.db.sessions.get_session(b)["status"] == "cancelled"
+        assert m.db.sessions.get_session(c)["review"] == "discarded"
+        assert not m.db.sessions.get_session(b)["workspace_removed"]
         fail["on"] = False
         await m.compare_pick(group, a, "merge", True)
         assert_gone(src, m, b, c)
@@ -486,7 +486,7 @@ def test_group_discard_before_members_are_checked_out(tmp_path):
     out = run(m.compare_discard(view["group"]))
     assert [(r["status"], r["review"]) for r in out["members"]] == [("cancelled", "discarded")] * 2
     for r in out["members"]:
-        s = m.db.get_session(r["id"])
+        s = m.db.sessions.get_session(r["id"])
         assert s["workspace_removed"]
         assert not Path(s["workspace"]).exists()
 
@@ -519,9 +519,9 @@ def test_rollback_stops_members_that_never_ran_and_leaves_none_resumable(tmp_pat
             with pytest.raises(HarnessError) as e:
                 await m.create_compare("bump", bad, "repo")
             assert e.value.status == 400
-            ids = [r["id"] for r in m.db.list_sessions()]
+            ids = [r["id"] for r in m.db.sessions.list_sessions()]
             assert len(ids) == 2
-            assert {m.db.get_session(s)["compare_group"] for s in ids} == {""}
+            assert {m.db.sessions.get_session(s)["compare_group"] for s in ids} == {""}
             assert_gone(src, m, *ids)
         finally:
             projects.prepare = real_prepare
@@ -556,7 +556,7 @@ def test_cancel_during_clone_leaves_no_workspace_or_branch(tmp_path, monkeypatch
         assert_gone(src, m, b, c)
         for sid in (b, c):
             # the clone that finished after the cancel was recorded, so discard removed its branch and workspace
-            assert m.db.get_session(sid)["base_commit"], sid
+            assert m.db.sessions.get_session(sid)["base_commit"], sid
         await m.stop()
     asyncio.run(body())
 

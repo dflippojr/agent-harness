@@ -3,17 +3,16 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
-from harness.modules import ROOT, normalize_catalog_app_id, normalize_origin
+from harness.modules import normalize_catalog_app_id, normalize_origin, repo_file, resolve_config_dir
 
-SCHEMA = ROOT / "docs" / "marketplace-manifest.schema.json"
-EXAMPLE = ROOT / "docs" / "hub.entries.example.json"
+SCHEMA = repo_file(__package__, "docs/marketplace-manifest.schema.json")
+EXAMPLE = repo_file(__package__, "docs/hub.entries.example.json")
 FILENAME = "hub.entries.json"
 
 
@@ -81,7 +80,7 @@ def initialize(config_dir: Path) -> Path:
 
 
 def _command(args):
-    config_dir = Path(args.config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config").expanduser()
+    config_dir = resolve_config_dir(args.config_dir).expanduser()
     try:
         if args.entries_action == "init":
             print(initialize(config_dir))

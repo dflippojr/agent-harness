@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from harness.db import Database
+from harness_modules.runners.store import RunnerPairingStore
 
 APP_ORIGIN = "https://app.example"
 EMPTY = {"last_used_at": None, "revoked_at": None, "retention_days": None, "erase_after": None, "erased_at": None}
@@ -22,21 +23,21 @@ def db(tmp_path: Path) -> Database:
 
 
 def _request(db: Database, rid: str, kind: str, origin: str, now: float, catalog_app_id: str = "") -> None:
-    db.insert_pairing_request({"id": rid, "kind": kind, "name": f"{kind} request", "scopes": "sessions",
+    db.credentials.insert_pairing_request({"id": rid, "kind": kind, "name": f"{kind} request", "scopes": "sessions",
                                "catalog_app_id": catalog_app_id, "origin": origin, "state": "approved",
                                "created_at": now, "expires_at": now + 600, "key_id": ""})
 
 
 def _create(kind: str, origins: list[str] | None, catalog_app_id: str):
     def mint(db: Database):
-        return db.create_api_key("laptop", "inference sessions", kind, origins, catalog_app_id)
+        return db.credentials.create_api_key("laptop", "inference sessions", kind, origins, catalog_app_id)
     return mint
 
 
 def _pairing_code(catalog_app_id: str):
     def mint(db: Database):
-        _row, code = db.create_pairing_code("paired app", APP_ORIGIN, "inference", 600, catalog_app_id)
-        key, secret, error = db.redeem_pairing_code(code, APP_ORIGIN)
+        _row, code = db.credentials.create_pairing_code("paired app", APP_ORIGIN, "inference", 600, catalog_app_id)
+        key, secret, error = db.credentials.redeem_pairing_code(code, APP_ORIGIN)
         assert error == ""
         return key, secret
     return mint
@@ -46,7 +47,7 @@ def _pairing_request(origin: str, catalog_app_id: str):
     def mint(db: Database):
         now = time.time()
         _request(db, "pr-app", "app", origin, now, catalog_app_id)
-        return db.redeem_pairing_request("pr-app", now)
+        return db.credentials.redeem_pairing_request("pr-app", now)
     return mint
 
 
@@ -54,15 +55,15 @@ def _hub_claim(origin: str):
     def mint(db: Database):
         now = time.time()
         _request(db, "pr-hub", "hub", origin, now, "hub-app")
-        key, secret, error = db.redeem_hub_claim("pr-hub", now)
+        key, secret, error = db.credentials.redeem_hub_claim("pr-hub", now)
         assert error == ""
         return key, secret
     return mint
 
 
 def _runner_code(db: Database):
-    _row, code = db.create_runner_pairing_code("mac", "macrunner", 600)
-    _pairing, key, secret, error = db.redeem_runner_pairing_code(code)
+    _row, code = RunnerPairingStore(db).create_runner_pairing_code("mac", "macrunner", 600)
+    _pairing, key, secret, error = RunnerPairingStore(db).redeem_runner_pairing_code(code)
     assert error == ""
     return key, secret
 

@@ -336,7 +336,7 @@ def test_cleanup_removes_a_left_over_proxy_network(monkeypatch):
     monkeypatch.setattr(maintenance, "run_cmd", docker)
     service = SimpleNamespace(
         cfg=SimpleNamespace(fake_model=None, cleanup=SimpleNamespace(container_idle_hours=24), sandbox=SandboxConfig()),
-        db=SimpleNamespace(get_session=lambda sid: None), runner=SimpleNamespace(_sandboxes={}))
+        db=SimpleNamespace(sessions=SimpleNamespace(get_session=lambda sid: None)), runner=SimpleNamespace(_sandboxes={}))
     report = {"containers_removed": []}
     asyncio.run(maintenance.Maintenance._containers(service, time.time(), report))
     assert calls[1:] == [["docker", "rm", "-f", "harness-gone1"],

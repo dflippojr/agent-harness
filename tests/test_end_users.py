@@ -138,7 +138,7 @@ def test_a_linked_end_user_session_records_the_person_and_runs_on_no_other_crede
                               json={"prompt": "hi", "backend": "claude", "end_user": "dana"})
         assert created.status_code == 201, created.text
         assert created.json()["end_user"] == "dana"
-        s = manager.db.get_session(created.json()["id"])
+        s = manager.db.sessions.get_session(created.json()["id"])
         assert s["end_user"] == "dana"
         # The App's API key and its fallback never apply to an end user's request.
         credential = manager.runner._backend_credential(s)
@@ -148,8 +148,8 @@ def test_a_linked_end_user_session_records_the_person_and_runs_on_no_other_crede
         assert plain["policy"] == "subscription_then_api_key" and plain["key"] == "app-key-plaintext"
         # An App the owner has not granted the backend stays denied.
         manager.set_app_provider_credential(app["id"], "claude", "billing", "api_key", [])
-        manager.db.revoke_app_provider_credential(
-            manager.db.app_provider_credential(app["id"], "claude")["id"])
+        manager.db.credentials.revoke_app_provider_credential(
+            manager.db.credentials.app_provider_credential(app["id"], "claude")["id"])
         assert manager.runner._backend_credential(s)["policy"] == "denied"
 
 
@@ -345,7 +345,7 @@ def test_the_claude_popup_flow_url_out_code_in_once_then_linked(tmp_path, monkey
         assert all(CANARY not in str(x) for x in everything)
     assert CANARY not in caplog.text
     assert CANARY.encode() not in _durable(manager)
-    assert manager.db.for_app(app["id"]).end_users() == ["dana"]
+    assert manager.db.for_app(app["id"]).sessions.end_users() == ["dana"]
     events = manager.db.conn.execute("SELECT COUNT(*) FROM events WHERE data LIKE ?", (f"%{CANARY}%",)).fetchone()[0]
     assert events == 0
 
@@ -478,7 +478,7 @@ def test_two_concurrent_sessions_of_one_end_user_never_run_at_once(tmp_path, mon
 
     with TestClient(create_app(manager)) as client:
         row, headers = _app(client)
-    app_row = manager.db.get_api_key(row["id"])
+    app_row = manager.db.credentials.get_api_key(row["id"])
 
     async def run():
         first = manager.create("one", backend="claude", app=app_row, end_user="dana")["id"]
@@ -488,7 +488,7 @@ def test_two_concurrent_sessions_of_one_end_user_never_run_at_once(tmp_path, mon
         await _alive(manager, third)                              # another person's session runs beside it
         await asyncio.sleep(0.6)
         assert second not in manager.runner._cli_sessions         # the same person's next one waits its turn
-        assert manager.db.get_session(second)["status"] == "queued"
+        assert manager.db.sessions.get_session(second)["status"] == "queued"
         await manager.cancel(first)
         await _alive(manager, second)                             # and runs once the first has ended
         await manager.cancel(second)
@@ -561,9 +561,9 @@ def test_app_erase_removes_every_end_users_volumes_and_the_registry(tmp_path, mo
         app, _ = _app(client)
         store = manager.db.for_app(app["id"])
         for person in ("dana", "erin"):
-            store.register_end_user(person)
-        store.register_end_user("dana")  # registering twice is harmless
-        assert store.end_users() == ["dana", "erin"]
+            store.sessions.register_end_user(person)
+        store.sessions.register_end_user("dana")  # registering twice is harmless
+        assert store.sessions.end_users() == ["dana", "erin"]
         asyncio.run(manager.erase_app(app["id"]))
     names = {n for command in removed if command[:4] == ["docker", "volume", "rm", "-f"] for n in command[4:]}
     expected = {v for person in ("dana", "erin") for v in cli_domains.end_user_volumes(app["id"], person)}
@@ -573,12 +573,12 @@ def test_app_erase_removes_every_end_users_volumes_and_the_registry(tmp_path, mo
 
 def test_usage_is_tallied_per_end_user(tmp_path):
     manager = _manager(tmp_path)
-    manager.db.record_usage("claude", "s1", "app-1", 10, 5, 0.5, "subscription", "end_user_login", "dana")
-    manager.db.record_usage("claude", "s2", "app-1", 7, 3, 0.25, "subscription", "end_user_login", "dana")
-    manager.db.record_usage("claude", "s3", "app-1", 100, 50, 5.0, "subscription", "end_user_login", "erin")
-    tally = manager.db.end_user_usage("app-1", "dana")
+    manager.db.usage.record_usage("claude", "s1", "app-1", 10, 5, 0.5, "subscription", "end_user_login", "dana")
+    manager.db.usage.record_usage("claude", "s2", "app-1", 7, 3, 0.25, "subscription", "end_user_login", "dana")
+    manager.db.usage.record_usage("claude", "s3", "app-1", 100, 50, 5.0, "subscription", "end_user_login", "erin")
+    tally = manager.db.usage.end_user_usage("app-1", "dana")
     assert (tally["sessions"], tally["prompt_tokens"], tally["completion_tokens"]) == (2, 17, 8)
-    assert manager.db.end_user_usage("app-2", "dana")["sessions"] == 0
+    assert manager.db.usage.end_user_usage("app-2", "dana")["sessions"] == 0
 
 
 # --- Docker: temporary volumes, a network-less container ---------------------------------------------------------

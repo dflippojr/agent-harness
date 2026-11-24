@@ -192,7 +192,7 @@ def test_explicit_reset_keeps_dead_end_and_files_and_grounding(tmp_path):
         await m.start()
         s = await wait_status(m, m.create("quote the license")["id"], "done")
         await asyncio.gather(*m.tasks.values())
-        s = m.db.get_session(s["id"])
+        s = m.db.sessions.get_session(s["id"])
         ctx = s["context"]
         payload = _state_from_context(ctx)
         assert payload["goal"] == "quote the license"
@@ -232,7 +232,7 @@ def test_reset_lists_files_after_commit(tmp_path):
     box: dict = {}
 
     def commit_then_reset(_msgs):
-        ws = Path(box["m"].db.get_session(box["id"])["workspace"])
+        ws = Path(box["m"].db.sessions.get_session(box["id"])["workspace"])
         subprocess.run(["git", "-C", str(ws), "add", "a.py", "b.py"], check=True, capture_output=True)
         subprocess.run(["git", "-C", str(ws), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "work"],
                        check=True, capture_output=True)
@@ -258,7 +258,7 @@ def test_reset_lists_files_after_commit(tmp_path):
         box["id"] = s["id"]
         s = await wait_status(m, s["id"], "done")
         await asyncio.gather(*m.tasks.values())
-        payload = _state_from_context(m.db.get_session(s["id"])["context"])
+        payload = _state_from_context(m.db.sessions.get_session(s["id"])["context"])
         assert "a.py" in payload["files_modified"]
         assert "b.py" in payload["files_modified"]
         await m.stop()
@@ -282,7 +282,7 @@ def test_threshold_resets_the_round_only_when_state_is_saved(tmp_path):
         sid = m.create(prompt)["id"]
         await wait_status(m, sid, "done")
         await asyncio.gather(*m.tasks.values())
-        log = m.db.events(sid)
+        log = m.db.sessions.events(sid)
         start = next((i for i, e in enumerate(log) if e["type"] == "tool_result" and e["data"]["name"] == after_tool), 0)
         return sid, [e["data"]["tier"] for e in log[start:] if e["type"] == "compaction"]
 
@@ -292,7 +292,7 @@ def test_threshold_resets_the_round_only_when_state_is_saved(tmp_path):
         # the window is tiny, so the first pass (before any state exists) elides; once state is saved it resets
         sid, saved_tiers = await tiers(m, "task with state", after_tool="update_state")
         assert saved_tiers == ["round_reset"]
-        context = m.db.get_session(sid)["context"]
+        context = m.db.sessions.get_session(sid)["context"]
         assert _state_from_context(context)["goal"] == "g"
         _assert_tool_groups_intact(context)
 
@@ -315,7 +315,7 @@ def test_reset_round_without_state_is_tool_error(tmp_path):
         await m.start()
         s = await wait_status(m, m.create("reset with nothing saved")["id"], "done")
         await asyncio.gather(*m.tasks.values())
-        s = m.db.get_session(s["id"])
+        s = m.db.sessions.get_session(s["id"])
         resets = [item for item in events(m, s["id"], "tool_result") if item["name"] == "reset_round"]
         assert len(resets) == 1
         assert resets[0]["ok"] is False
@@ -340,7 +340,7 @@ def test_reset_round_after_rejected_state_is_tool_error(tmp_path):
         await m.start()
         s = await wait_status(m, m.create("reject then reset")["id"], "done")
         await asyncio.gather(*m.tasks.values())
-        s = m.db.get_session(s["id"])
+        s = m.db.sessions.get_session(s["id"])
         results = events(m, s["id"], "tool_result")
         update = [item for item in results if item["name"] == "update_state"]
         reset = [item for item in results if item["name"] == "reset_round"]
@@ -360,18 +360,18 @@ def test_scheduled_reset_skipped_if_state_cleared(tmp_path):
         await m.start()
         s = await wait_status(m, m.create("task")["id"], "done")
         sid = s["id"]
-        run = {**m.db.get_session(sid)["run"], "pending_round_reset": True, "chars_per_token": 3.0}
+        run = {**m.db.sessions.get_session(sid)["run"], "pending_round_reset": True, "chars_per_token": 3.0}
         run.pop("state", None)
         padded = s["context"] + [
             {"role": "assistant", "content": "x" * 4000, "tool_calls": [call("read_file", 9, path="a")]},
             {"role": "tool", "tool_call_id": "c9-read_file", "content": "y" * 4000},
             {"role": "assistant", "content": "used it"},
         ]
-        m.db.update_session(sid, context=padded, run=run)
-        before = len(m.db.events(sid))
-        await m.runner._maybe_compact(m.db.get_session(sid))
-        s = m.db.get_session(sid)
-        tiers = [e["data"]["tier"] for e in m.db.events(sid)[before:] if e["type"] == "compaction"]
+        m.db.sessions.update_session(sid, context=padded, run=run)
+        before = len(m.db.sessions.events(sid))
+        await m.runner._maybe_compact(m.db.sessions.get_session(sid))
+        s = m.db.sessions.get_session(sid)
+        tiers = [e["data"]["tier"] for e in m.db.sessions.events(sid)[before:] if e["type"] == "compaction"]
         assert "round_reset" not in tiers
         assert any(tier in ("elide", "summary") for tier in tiers)
         assert "pending_round_reset" not in s["run"]

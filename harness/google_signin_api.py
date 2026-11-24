@@ -15,7 +15,9 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from . import google_signin as gs
+from . import response_docs as docs
 from .manager import HarnessError
+from .response_docs import documented
 
 log = logging.getLogger("harness.google_signin")
 
@@ -64,7 +66,7 @@ def register(app: FastAPI, mgr) -> list[dict]:
     """Install the routes. Returns the owner admin operations for the admin API index."""
     from .admin import PREFIX, require_admin
 
-    @app.get("/api/v1/auth/session")
+    @app.get("/api/v1/auth/session", responses=documented(docs.AuthSessionResponse))
     async def auth_session(request: Request):
         """Report Google sign-in availability and this browser's sign-in state; the CSRF token appears only with a session."""
         m = mgr(request)
@@ -105,12 +107,12 @@ def register(app: FastAPI, mgr) -> list[dict]:
         try:
             user_id, token = await asyncio.to_thread(m.google_signin.finish, request, request.state.access, params)
         except gs.GoogleSigninError as e:
-            m.db.insert_audit(_actor(request), "", "google_callback", "denied", e.reason)
+            m.db.accounts.insert_audit(_actor(request), "", "google_callback", "denied", e.reason)
             target = FAILED
             token = ""
         except Exception as e:  # noqa: BLE001 - never surface details (or a traceback) from the callback
             log.warning("Google sign-in callback failed (%s)", type(e).__name__)
-            m.db.insert_audit(_actor(request), "", "google_callback", "denied", "internal_error")
+            m.db.accounts.insert_audit(_actor(request), "", "google_callback", "denied", "internal_error")
             target = FAILED
             token = ""
         else:
@@ -160,14 +162,15 @@ def register(app: FastAPI, mgr) -> list[dict]:
         AccountService(mgr(request))._require(user_id)
         return mgr(request).google_signin
 
-    @app.get(PREFIX + "/google-signin")
+    @app.get(PREFIX + "/google-signin", responses=documented(docs.GoogleSigninResponse))
     async def google_status(request: Request, refresh: bool = False):
         """Return Google sign-in configuration and readiness; `refresh` re-runs the OpenID discovery check, not the cached result."""
         require_admin(request, mgr)
         svc = mgr(request).google_signin
         return await asyncio.to_thread(svc.owner_view, refresh)
 
-    @app.post(PREFIX + "/accounts/{user_id}/google/invitation", status_code=201)
+    @app.post(PREFIX + "/accounts/{user_id}/google/invitation", status_code=201,
+              responses=documented(docs.GoogleInvitationResponse, 201))
     async def google_invite(user_id: str, request: Request):
         """Create a one-time link code, replacing any pending one; 409 if the member is linked or disabled, and it expires in 15 minutes."""
         require_admin(request, mgr)
@@ -177,7 +180,7 @@ def register(app: FastAPI, mgr) -> list[dict]:
         except gs.GoogleSigninError as e:
             raise _error(e) from None
 
-    @app.delete(PREFIX + "/accounts/{user_id}/google/invitation")
+    @app.delete(PREFIX + "/accounts/{user_id}/google/invitation", responses=documented(docs.GoogleLink))
     async def google_invite_cancel(user_id: str, request: Request):
         """Cancel a member's pending link code; the call succeeds even when none is pending."""
         require_admin(request, mgr)
@@ -185,7 +188,8 @@ def register(app: FastAPI, mgr) -> list[dict]:
         svc.cancel_invitation(_actor(request), user_id)
         return svc.owner_member_view(user_id)
 
-    @app.post(PREFIX + "/accounts/{user_id}/google/revoke-sessions")
+    @app.post(PREFIX + "/accounts/{user_id}/google/revoke-sessions",
+              responses=documented(docs.GoogleRevokedResponse))
     async def google_revoke(user_id: str, request: Request):
         """Sign the member out of all Web sessions, leaving the Google link in place; returns the number revoked."""
         require_admin(request, mgr)
@@ -193,7 +197,7 @@ def register(app: FastAPI, mgr) -> list[dict]:
         revoked = svc.revoke_sessions(_actor(request), user_id)
         return {**svc.owner_member_view(user_id), "revoked": revoked}
 
-    @app.delete(PREFIX + "/accounts/{user_id}/google")
+    @app.delete(PREFIX + "/accounts/{user_id}/google", responses=documented(docs.GoogleLink))
     async def google_unlink(user_id: str, body: ConfirmRequest, request: Request):
         """Unlink a member's Google account, cancel any pending link code, and end their Web sessions; `confirm` must be true."""
         require_admin(request, mgr)

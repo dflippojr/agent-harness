@@ -143,7 +143,9 @@ agent-harness/
 │   ├── scheduler.py       single-slot GPU queue that keeps the prompt cache warm
 │   ├── policy.py          deterministic allow / ask / deny rules
 │   ├── sandbox.py         per-session Docker containers, internal network only
-│   ├── cli_backends.py    Claude Code / Codex / Cursor CLIs as session backends
+│   ├── backends/          hosted CLIs (Claude Code, Codex, Cursor, print mode): transport + pure translator each
+│   ├── hosted_runs.py     a hosted session's run and the one applier of its neutral events
+│   ├── cli_backends.py    what the hosted CLI backends share: container conventions, domains, the local-model route
 │   ├── compaction.py      context compaction before each model call
 │   ├── state.py           structured per-round agent state + reset_round
 │   ├── grounding.py       checks that quoted text in answers was actually read
@@ -304,6 +306,10 @@ Stables, the browser client and installable PWA, is the owner's private add-on a
 The install works without it: the server, the `harness` CLI and the SDK run as documented, and `/` returns 404 instead
 of a web page.
 
+The Server core is moving to a repository of its own, `dflippojr/agent-harness-server` (#334; private for now), and
+the add-on modules under [`harness_modules/`](harness_modules) stay here. Until the move is finished, install and
+deploy from this repository.
+
 ### Quick start (development)
 
 ```powershell
@@ -349,6 +355,7 @@ gives up the GPU.
 | Topic | Doc |
 | --- | --- |
 | Installation and profiles | [INSTALL](docs/INSTALL.md) · [service profile](docs/service-profile.md) |
+| Packaging, the Server as wheels and as a Docker image | [INSTALL, from wheels](docs/INSTALL.md#install-the-server-from-wheels-pip) · [INSTALL, Docker](docs/INSTALL.md#run-the-server-in-docker) · [modules, packaging](docs/modules.md#packaging) |
 | App API and SDK | [app-api](docs/app-api.md) · [`sdk/`](sdk) |
 | Owner API, members, per-app provider keys | [admin-api](docs/admin-api.md) |
 | Configuration registry | [config-registry](docs/config-registry.md) |

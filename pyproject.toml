@@ -1,7 +1,78 @@
+# Packaging (#334, stage e): the core wheel and one wheel per add-on module, built by scripts/packaging/
+# agent_harness_build.py (standard library only, so builds need no network). docs/INSTALL.md has the commands.
 [project]
 name = "agent-harness"
-version = "0.0.0"
+dynamic = ["version"]  # the Server's release, RELEASE in harness/compat.py
+description = "Agent Harness Server: agent sessions on a local model or hosted CLI subscriptions, behind one API"
+readme = "README.md"
+# No license-files yet: the license file is on CI_SKIP_UNREAD_PATHS in .github/workflows/ci.yml, so no build or test
+# may read it until that entry goes (an owner change to the workflow). The metadata still says MIT.
+license = "MIT"
 requires-python = ">=3.12"
+# requirements.txt's lines, except pytest, which is under the test extra because the daemon never imports it.
+# tests/test_packaging.py fails when the two lists differ.
+dependencies = [
+    "httpx>=0.28.1",
+    "pyyaml>=6.0.3",
+    "fastapi>=0.163.1",
+    "uvicorn>=0.54.0",
+    "jsonschema>=4.26.0",
+    "trafilatura>=2.3.1",
+    "lxml_html_clean>=0.4.6",
+    "pypdf>=7.0.0",
+    "psutil>=7.2.2",
+    "pillow>=13.0.0",
+    "python-multipart>=0.0.33",
+    "PyJWT[crypto]>=2.15.1",
+    "cryptography>=50.0.2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=9.2.0"]
+
+[project.scripts]
+harness = "harness.cli:main"
+harness-server = "harness.__main__:main"
+
+[build-system]
+requires = []
+build-backend = "agent_harness_build"
+backend-path = ["scripts/packaging"]
+
+# The core wheel: the harness package, its data files, and the one-file SDK as the top-level module harness_client
+# (its documented import). A wheel holds .py sources and the files listed here, nothing else; from a git checkout,
+# only files git tracks.
+[tool.agent-harness.build]
+version-from = "harness/compat.py"
+packages = ["harness"]
+modules = { harness_client = "sdk/harness_client.py" }
+package-data = [
+    "harness/cli_home/*/*",
+    "harness/fake_fixtures/*.yaml",
+    "harness/gitleaks/*.json",
+    "harness/gitleaks/*.toml",
+    "harness/mcp_relay.js",
+]
+# Besides pyproject.toml and the packages: what building the wheel again from the source distribution needs.
+sdist = ["README.md", "scripts/packaging/agent_harness_build.py", "sdk/harness_client.py"]
+
+# The add-ons: each package under the namespace is its own wheel, requiring the same core version.
+[tool.agent-harness.addons]
+namespace = "harness_modules"
+distribution = "agent-harness-module-{name}"
+package-data = { images = ["flux_fast.json"] }
+
+# Repository files a module reads from outside its package. Its wheel carries them in <package>/_repo_files/, where
+# harness.modules.repo_file finds them when there is no checkout.
+[tool.agent-harness.addons.repo-files]
+hub = ["docs/marketplace-manifest.schema.json", "docs/hub.entries.example.json"]
+runners = [
+    "macrunner/harness_runner.py",
+    "macrunner/sandbox.sb",
+    "macrunner/dev.agent-harness.runner.plist",
+    "macrunner/install.sh",
+    "sdk/harness_client.py",
+]
 
 # Lint (#729): a small, high-signal rule set, and no formatter or import sorting. The CI `lint` job runs
 # `ruff check .`; AGENTS.md has the local commands. Fix a finding, or silence one line with `# noqa: <rule>` and a

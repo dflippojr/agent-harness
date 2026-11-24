@@ -220,7 +220,7 @@ def test_a_large_web_fetch_is_stored_whole_and_returned_as_head_tail_with_a_foot
             assert seen == bound_shell_text(PAGE, 20000, digest) and seen.endswith(footer)
             assert seen.startswith(PAGE[:5000]) and seen.removesuffix("\n" + footer).endswith(PAGE[-5000:])
             assert fetched["artifact_id"] == digest and fetched["output_chars"] == len(seen)
-            assert m.db.full_artifact(sid, digest) == PAGE
+            assert m.db.sessions.full_artifact(sid, digest) == PAGE
             # The footer's id recovers the full text; the recovered range is never stored again.
             assert recovered["ok"] and recovered["output"] == PAGE[:20000] and recovered["artifact_id"] is None
             assert script.requests[2][-1]["content"] == PAGE[:20000]
@@ -252,7 +252,7 @@ def test_a_project_lowers_result_chars_and_read_artifact_output_is_not_bounded_a
             # read_artifact is the recovery path: 9000 characters come back whole, above the project's 3000.
             assert script.requests[2][-1]["content"] == PAGE[:9000]
             assert recovered["artifact_id"] is None and "output truncated" not in recovered["output"]
-            assert m.db.full_artifact(sid, hashlib.sha256(PAGE[:9000].encode("utf-8")).hexdigest()) is None
+            assert m.db.sessions.full_artifact(sid, hashlib.sha256(PAGE[:9000].encode("utf-8")).hexdigest()) is None
         finally:
             await m.stop()
     asyncio.run(body())
@@ -274,7 +274,7 @@ def test_a_session_without_read_artifact_gets_plain_middle_truncation(tmp_path):
             assert seen == truncate_middle(PAGE, 20000)
             assert "read_artifact" not in seen
             assert events(m, sid, "tool_result")[0]["artifact_id"] is None
-            assert m.db.full_artifact(sid, hashlib.sha256(PAGE.encode("utf-8")).hexdigest()) is None
+            assert m.db.sessions.full_artifact(sid, hashlib.sha256(PAGE.encode("utf-8")).hexdigest()) is None
         finally:
             await m.stop()
     asyncio.run(body())
@@ -303,7 +303,7 @@ def test_result_chars_of_one_still_bounds_a_large_result(tmp_path):
             digest = hashlib.sha256(PAGE.encode("utf-8")).hexdigest()
             seen = script.requests[1][-1]["content"]
             assert seen.endswith(ARTIFACT_FOOTER.format(total=len(PAGE), artifact_id=digest))
-            assert len(seen) < 300 and m.db.full_artifact(sid, digest) == PAGE
+            assert len(seen) < 300 and m.db.sessions.full_artifact(sid, digest) == PAGE
         finally:
             await m.stop()
     asyncio.run(body())
@@ -318,7 +318,7 @@ def test_bookkeeping_results_are_bounded_like_every_other_result(tmp_path):
                      Completion(content="done")])
 
     def assert_bounded(result: dict, seen: str) -> None:
-        full = m.db.full_artifact(sid, result["artifact_id"]) if result["artifact_id"] else None
+        full = m.db.sessions.full_artifact(sid, result["artifact_id"]) if result["artifact_id"] else None
         assert result["ok"] and full and len(full) > 8, result
         assert seen == bound_shell_text(full, 8, result["artifact_id"])
 
@@ -334,7 +334,7 @@ def test_bookkeeping_results_are_bounded_like_every_other_result(tmp_path):
             assert_bounded(notes, script.requests[2][-1]["content"])
             # reset_round restarts the context, which a step-indexed Script would replay, so it is called directly.
             await m.runner._reset_round_call(sid, call("reset_round", 9), {})
-            assert_bounded(events(m, sid, "tool_result")[-1], m.db.get_session(sid)["context"][-1]["content"])
+            assert_bounded(events(m, sid, "tool_result")[-1], m.db.sessions.get_session(sid)["context"][-1]["content"])
         finally:
             await m.stop()
     m = sid = None
@@ -344,7 +344,7 @@ def test_bookkeeping_results_are_bounded_like_every_other_result(tmp_path):
 def _assert_recoverable(m: Manager, sid: str, seen: str, digest: str) -> None:
     """A result cut to fit the turn keeps its read_artifact footer, and the footer's id recovers the whole page."""
     assert ARTIFACT_FOOTER.format(total=len(PAGE), artifact_id=digest) in seen, seen[-400:]
-    assert seen.startswith(PAGE[:200]) and m.db.full_artifact(sid, digest) == PAGE
+    assert seen.startswith(PAGE[:200]) and m.db.sessions.full_artifact(sid, digest) == PAGE
 
 
 def test_a_bounded_result_cut_to_fit_a_small_context_keeps_its_footer(tmp_path):

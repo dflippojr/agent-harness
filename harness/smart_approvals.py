@@ -977,7 +977,7 @@ class SmartReviewer:
 
 def persist_review(db, sid: str, approval_id: str, record: dict) -> str:
     rid = "sr-" + uuid.uuid4().hex[:12]
-    db.insert_smart_review(rid, sid, approval_id, record)
+    db.sessions.insert_smart_review(rid, sid, approval_id, record)
     return rid
 
 
@@ -985,7 +985,7 @@ def public_status(manager) -> dict:
     reviewer = manager.runner.smart
     settings = reviewer.settings(manager.db)
     view = settings.public()
-    stats = manager.db.smart_review_stats()
+    stats = manager.db.sessions.smart_review_stats()
     view.update(stats)
     view["policy_fingerprint"] = Policy().fingerprint()
     return view

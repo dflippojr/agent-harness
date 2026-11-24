@@ -44,13 +44,17 @@ class CanaryConfigError(Exception):
 
 
 def deployed_sha(root: Path | None = None) -> str:
-    """The commit this daemon runs: what the deployer told it, else the checkout's HEAD."""
+    """The commit this daemon runs: what the deployer told it, else the checkout's HEAD. Installed from the wheel there
+    is no checkout to ask (#334): git must not answer for whatever repository site-packages happens to sit in."""
     sha = os.environ.get("HARNESS_BUILD_COMMIT", "").strip()
     if sha:
         return sha
+    from .config import CHECKOUT
+    root = root or CHECKOUT
+    if root is None:
+        return ""
     try:
-        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root or Path(__file__).resolve().parent.parent,
-                             capture_output=True, text=True, timeout=10)
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, timeout=10)
         return out.stdout.strip() if out.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -65,9 +69,11 @@ class Report:
 
 
 WALL_LIMIT = "wall_limit"  # the canary stopped the attempt at the task's wall-clock limit: a graded fail
+# The attempt asked for an approval, which nobody answers in a canary: stopped at once, a graded fail (#1026)
+APPROVAL_NEEDED = "approval_needed"
 # The only attempts that are evidence (pass rate, regression rule, confirmation): finished and graded. Everything else
 # (timeout, suspended, blocked, cancelled by someone other than the canary) is neither a pass nor a fail.
-EVIDENCE = ("done", "failed", WALL_LIMIT)
+EVIDENCE = ("done", "failed", WALL_LIMIT, APPROVAL_NEEDED)
 
 
 def valid(outcomes: list[dict]) -> list[dict]:

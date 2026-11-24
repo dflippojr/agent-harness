@@ -111,7 +111,7 @@ def test_unverified_peer_refuses_tailnet_identity(tmp_path, variant):
             assert client.get("/me", headers=owner).status_code == 401
             assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
                                headers=owner).status_code == 401
-    assert m.db.list_api_keys() == []
+    assert m.db.listed_api_keys() == []
     if "lookups" in spec:  # a failure is not cached, so each of the two requests asks; an unsupported platform never asks
         assert check.lookups == spec["lookups"]
     if spec.get("uncached"):
@@ -186,7 +186,7 @@ def test_tailscaled_forwarding_this_node_itself_is_not_the_owner(tmp_path):
         self_node = {"Tailscale-User-Login": LOGIN, "X-Forwarded-For": FAKE_NODE_IPS[0]}
         assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
                            headers=self_node).status_code == 401
-        assert m.db.list_api_keys() == []
+        assert m.db.listed_api_keys() == []
         # The local owner token still works for a program on this machine, and the forged name is not shown.
         me = client.get("/me", headers={"Tailscale-User-Login": LOGIN, "Tailscale-User-Name": "Self",
                                         "X-Forwarded-For": FAKE_NODE_IPS[0], local_owner.HEADER: m.local_owner_token})
@@ -223,7 +223,7 @@ def test_a_subnet_routed_connection_to_a_non_loopback_address_is_refused(tmp_pat
         assert routed.get("/me", headers={**owner, **loopback_host}).status_code == 401
         assert routed.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
                            headers={**owner, **loopback_host}).status_code == 401
-        assert m.db.list_api_keys() == []
+        assert m.db.listed_api_keys() == []
         assert client.get("/me", headers=owner).json()["role"] == "owner"
 
 

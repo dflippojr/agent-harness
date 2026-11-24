@@ -96,7 +96,7 @@ def admitted(request, m, path: str) -> bool:
     token = _bearer(request)
     if path.startswith("/v1/") and (token or request.headers.get("x-api-key")):
         return True  # the inference endpoint checks its keys itself
-    key = m.db.api_key_by_secret(token) if token else None
+    key = m.db.credentials.api_key_by_secret(token) if token else None
     if key is not None:
         # The owner's admin token is the owner anywhere. Other tokens only reach the API routes that check them.
         return api or (key.get("kind") == "owner" and "admin" in (key.get("scopes") or "").split())

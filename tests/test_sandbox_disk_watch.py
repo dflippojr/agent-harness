@@ -290,7 +290,7 @@ def test_runner_disk_limits(monkeypatch):
                 "gone": {"id": "gone", "owner_id": "u2"}}
     accounts = {"u1": {"disk_quota_bytes": 100 * MB}}
     fake = SimpleNamespace(
-        db=SimpleNamespace(get_session=sessions.get, account_by_id=accounts.get),
+        db=SimpleNamespace(sessions=SimpleNamespace(get_session=sessions.get), accounts=SimpleNamespace(account_by_id=accounts.get)),
         cfg=SimpleNamespace(cleanup=SimpleNamespace(min_free_gb=2)), quota_mb=lambda s: 300)
     own = asyncio.run(runner.Runner._disk_limits(fake, "own"))
     assert own == disk_watch.DiskLimits(300 * MB, 2 * 2**30)

@@ -472,7 +472,7 @@ def test_full_stack_approval_and_compaction(monkeypatch, fake_manager):
     from harness import sandbox
     monkeypatch.setattr(sandbox, "run_cmd", fail_on_docker)
     m = fake_manager
-    _, token = m.db.main.create_api_key("ui-testing", "admin", "owner")
+    _, token = m.db.main.credentials.create_api_key("ui-testing", "admin", "owner")
     headers = {"Authorization": f"Bearer {token}", **fake_instance.CLIENT}
     with TestClient(create_app(m)) as client:
         made = client.post("/api/v1/sessions", headers=headers,
@@ -487,16 +487,16 @@ def test_full_stack_approval_and_compaction(monkeypatch, fake_manager):
         assert decided.status_code == 200, decided.text
         done = wait_session(client, sid, headers, "done", "failed")
         assert done["status"] == "done", done
-        workspace = Path(m.db.get_session(sid)["workspace"])
+        workspace = Path(m.db.sessions.get_session(sid)["workspace"])
         assert json.loads((workspace / "protected" / "settings.json").read_text(encoding="utf-8"))["theme"] == "system"
 
         made = client.post("/api/v1/sessions", headers=headers, json={
             "prompt": "Run a long task that triggers compaction.", "project": fake_instance.PROJECT})
         sid = made.json()["id"]
         assert wait_session(client, sid, headers, "done", "failed")["status"] == "done"
-        tiers = [e["data"]["tier"] for e in m.db.events(sid) if e["type"] == "compaction"]
+        tiers = [e["data"]["tier"] for e in m.db.sessions.events(sid) if e["type"] == "compaction"]
         assert "summary" in tiers
-        assert m.db.get_session(sid)["answer"].startswith("Done.")
+        assert m.db.sessions.get_session(sid)["answer"].startswith("Done.")
 
 
 def test_full_stack_stuck_loop_nudges_then_ends_the_run(monkeypatch, fake_manager):
@@ -505,7 +505,7 @@ def test_full_stack_stuck_loop_nudges_then_ends_the_run(monkeypatch, fake_manage
     from harness import sandbox
     monkeypatch.setattr(sandbox, "run_cmd", fail_on_docker)
     m = fake_manager
-    _, token = m.db.main.create_api_key("ui-testing", "admin", "owner")
+    _, token = m.db.main.credentials.create_api_key("ui-testing", "admin", "owner")
     headers = {"Authorization": f"Bearer {token}", **fake_instance.CLIENT}
     with TestClient(create_app(m)) as client:
         made = client.post("/api/v1/sessions", headers=headers,
@@ -514,14 +514,14 @@ def test_full_stack_stuck_loop_nudges_then_ends_the_run(monkeypatch, fake_manage
         sid = made.json()["id"]
         done = wait_session(client, sid, headers, "done", "failed")
     assert (done["status"], done["stop_reason"]) == ("done", "stuck_repeat"), done
-    events = m.db.events(sid)
+    events = m.db.sessions.events(sid)
     results = [e["data"] for e in events if e["type"] == "tool_result"]
     assert len(results) == 8 and not any(r["ok"] for r in results)
     assert "will not work" not in results[1]["output"]
     assert "failed 3 times" in results[2]["output"] and "will not work" in results[2]["output"]
     assert [e["data"] for e in events if e["type"] == "stuck"] == [
         {"reason": "stuck_repeat", "tool": "read_file", "count": 8}]
-    context = m.db.get_session(sid)["context"]
+    context = m.db.sessions.get_session(sid)["context"]
     assert "will not work" in [msg for msg in context if msg["role"] == "tool"][2]["content"]
 
 
@@ -565,7 +565,7 @@ def test_full_stack_trim_runs_before_the_summary(monkeypatch, tmp_path):
     monkeypatch.setattr(fake_model.FakeModel, "__call__", recording)
     m = Manager(config_mod.load(config_dir, data_dir))
     try:
-        _, token = m.db.main.create_api_key("ui-testing", "admin", "owner")
+        _, token = m.db.main.credentials.create_api_key("ui-testing", "admin", "owner")
         headers = {"Authorization": f"Bearer {token}", **fake_instance.CLIENT}
         with TestClient(create_app(m)) as client:
             made = client.post("/api/v1/sessions", headers=headers,
@@ -574,7 +574,7 @@ def test_full_stack_trim_runs_before_the_summary(monkeypatch, tmp_path):
             sid = made.json()["id"]
             done = wait_session(client, sid, headers, "done", "failed")
         assert done["status"] == "done", done
-        compactions = [e["data"] for e in m.db.events(sid) if e["type"] == "compaction"]
+        compactions = [e["data"] for e in m.db.sessions.events(sid) if e["type"] == "compaction"]
         tiers = [c["tier"] for c in compactions]
         assert "trim" in tiers and "summary" in tiers and tiers.index("trim") < tiers.index("summary"), tiers
         assert compactions[tiers.index("trim")]["characters_saved"] > 1000

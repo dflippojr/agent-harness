@@ -16,6 +16,7 @@ from harness import audit_context, namespace_audit
 from harness.accounts import AccountService
 from harness.api import create_app
 from harness.db import Database
+from harness.session_store import SessionStore
 from harness.manager import HarnessError, Manager
 from sdk.harness_client import Harness, HarnessError as SDKError
 from test_daemon import Script, make_cfg
@@ -31,7 +32,7 @@ def setup(tmp_path, monkeypatch):
     m = Manager(cfg, chat=Script([]))
     monkeypatch.setattr(m, "_spawn", lambda sid: None)
     members = [AccountService(m).create("owner", f"{name}@example.com", name) for name in ("alice", "bob")]
-    apps = [m.db.main.create_api_key(name, "sessions approvals", kind="app") for name in ("app-a", "app-b")]
+    apps = [m.db.main.credentials.create_api_key(name, "sessions approvals", kind="app") for name in ("app-a", "app-b")]
     headers = [{"Authorization": "Bearer " + secret} for _, secret in apps]
     with TestClient(create_app(m)) as client:
         yield m, client, members, apps, headers
@@ -71,10 +72,10 @@ def test_two_apps_two_members_owner_guesses_and_cursor(setup):
             assert client.post(f"/api/v1/sessions/{other}/messages", json={"content": PRIVATE}, headers=auth).status_code == 404
         assert client.delete("/api/v1/audit", headers=auth).status_code == 405
     assert client.get("/api/v1/audit").status_code == 403
-    assert m.db.main.audit_page(action="session.create")["items"] == []
+    assert m.db.main.accounts.audit_page(action="session.create")["items"] == []
     assert m.db.main.conn.execute("SELECT COUNT(*) FROM namespace_audit").fetchone()[0] == 0
     # sessions:all never grants another namespace's audit, including Web/member detail.
-    _, broad = m.db.main.create_api_key("broad", "sessions:all", kind="app")
+    _, broad = m.db.main.credentials.create_api_key("broad", "sessions:all", kind="app")
     assert page(client, {"Authorization": "Bearer " + broad})["items"] == []
 
 
@@ -96,7 +97,7 @@ def test_message_context_approval_cancel_and_rerun_scoping(setup):
     assert client.post(f"/api/v1/sessions/{sid}/messages", headers=auth, json={"content": PRIVATE}).status_code == 200
     assert client.post(f"/api/v1/sessions/{sid}/context", headers=auth,
                        json={"context": [{"title": "ctx", "content": PRIVATE}]}).status_code == 200
-    m.db.insert_approval({"id": "approval-a", "session_id": sid, "tool_call_id": "call-a", "tool": "shell",
+    m.db.sessions.insert_approval({"id": "approval-a", "session_id": sid, "tool_call_id": "call-a", "tool": "shell",
                           "args": {"command": PRIVATE}, "reason": PRIVATE, "detail": PRIVATE, "status": "pending"})
     assert client.post(f"/api/v1/sessions/{sid}/approvals/approval-a", headers=auth,
                        json={"decision": "deny", "note": PRIVATE}).status_code == 200
@@ -118,26 +119,26 @@ def test_explicit_delete_removes_detail_only_aggregate_receipt(setup, monkeypatc
     assert client.delete(f"/api/v1/sessions/{sid}", headers=headers[0]).status_code == 204
     assert page(client, headers[0])["items"] == []
     assert page(client, headers[1])["items"][0]["target_id"] == foreign
-    receipts = m.db.main.audit_page(action="namespace.erase")["items"]
+    receipts = m.db.main.accounts.audit_page(action="namespace.erase")["items"]
     assert [r["outcome"] for r in receipts] == ["ok", "started"]
     assert all(r["target_id"] == apps[0][0]["id"] for r in receipts)
     assert all(r["metadata"]["reason"] == "manual" and r["metadata"]["count"] == 1 for r in receipts)
     assert sid not in json.dumps(receipts) and PRIVATE not in json.dumps(receipts)
     assert sid not in caplog.text
     assert client.delete(f"/api/v1/sessions/{sid}", headers=headers[0]).status_code == 204
-    assert len(m.db.main.audit_page(action="namespace.erase")["items"]) == 2
+    assert len(m.db.main.accounts.audit_page(action="namespace.erase")["items"]) == 2
 
 
 @pytest.mark.parametrize("outcome", ["started", "ok"])
 def test_delete_intent_and_settlement_failure_no_repeat(setup, monkeypatch, outcome):
     m, client, _, _, headers = setup
     sid = create(client, headers[0])
-    original = m.db.main.insert_audit
+    original = m.db.main.accounts.insert_audit
     def fail(*args, **kwargs):
         if args[2] == "namespace.erase" and args[3] == outcome:
             raise OSError(PRIVATE)
         return original(*args, **kwargs)
-    monkeypatch.setattr(m.db.main, "insert_audit", fail)
+    monkeypatch.setattr(m.db.main.accounts, "insert_audit", fail)
     effect = AsyncMock()
     monkeypatch.setattr(m, "_erase_cli_history", effect)
     response = client.delete(f"/api/v1/sessions/{sid}", headers=headers[0])
@@ -146,12 +147,12 @@ def test_delete_intent_and_settlement_failure_no_repeat(setup, monkeypatch, outc
     if outcome == "started":
         assert error["code"] == "audit_unavailable"
         effect.assert_not_awaited()
-        assert m.db.get_session(sid)
+        assert m.db.sessions.get_session(sid)
     else:
         assert error["code"] == "audit_record_incomplete" and error["may_have_completed"]
         assert error["operation_id"] and not error["retryable"]
         effect.assert_awaited_once()
-        assert m.db.get_session(sid) is None
+        assert m.db.sessions.get_session(sid) is None
         another = create(client, headers[0])
         assert client.delete(f"/api/v1/sessions/{another}", headers=headers[0]).status_code == 503
         effect.assert_awaited_once()
@@ -162,7 +163,7 @@ def test_ordinary_gap_warns_keeps_mutation(setup, monkeypatch, caplog):
     _, client, _, _, headers = setup
     def fail(*args, **kwargs):
         raise OSError(PRIVATE)
-    monkeypatch.setattr(Database, "insert_namespace_audit", fail)
+    monkeypatch.setattr(SessionStore, "insert_namespace_audit", fail)
     response = client.post("/api/v1/sessions", headers=headers[0], json={"prompt": PRIVATE})
     assert response.status_code == 201
     assert response.headers["X-Agent-Harness-Audit-Warning"] == "audit_gap"
@@ -175,12 +176,12 @@ def test_private_login_retention_clock_restart_and_shorter_policy(setup, monkeyp
     store = m.db.for_app(scope)
     context = namespace_audit.key_context(apps[0][0])
     now = time.time()
-    monkeypatch.setattr("harness.db.time.time", lambda: now)
-    store.insert_namespace_audit(scope, "", context, "attempt-a", "login", "login.start", "started", {}, 2)
+    monkeypatch.setattr("harness.session_store.time.time", lambda: now)
+    store.sessions.insert_namespace_audit(scope, "", context, "attempt-a", "login", "login.start", "started", {}, 2)
     sid = create(client, headers[0])
-    monkeypatch.setattr("harness.db.time.time", lambda: now + 3 * DAY)
+    monkeypatch.setattr("harness.session_store.time.time", lambda: now + 3 * DAY)
     assert len(page(client, headers[0])["items"]) == 1  # session rows do not have the login TTL
-    store.prune_namespace_audit()
+    store.sessions.prune_namespace_audit()
     assert store.conn.execute("SELECT COUNT(*) FROM namespace_audit WHERE session_id = ''").fetchone()[0] == 0
     m.db.close_idle(time.monotonic() + 1000)
     assert page(client, headers[0])["items"][0]["target_id"] == sid
@@ -189,7 +190,7 @@ def test_private_login_retention_clock_restart_and_shorter_policy(setup, monkeyp
 def test_parallel_private_rows_and_filters(setup):
     m, client, _, apps, headers = setup
     sid = create(client, headers[0])
-    session = m.db.get_session(sid)
+    session = m.db.sessions.get_session(sid)
     ctx = namespace_audit.key_context(apps[0][0])
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(lambda _: namespace_audit.record(m.db, session, ctx, "session.message"), range(30)))
@@ -202,12 +203,12 @@ def test_parallel_private_rows_and_filters(setup):
 def test_login_protocol_audit_failure_refuses_or_reports_effect(setup, monkeypatch, outcome):
     m, _, _, apps, _ = setup
     scope = apps[0][0]["id"]
-    original = Database.insert_namespace_audit
+    original = SessionStore.insert_namespace_audit
     def fail(self, *args, **kwargs):
         if args[6] == outcome:
             raise OSError(PRIVATE)
         return original(self, *args, **kwargs)
-    monkeypatch.setattr(Database, "insert_namespace_audit", fail)
+    monkeypatch.setattr(SessionStore, "insert_namespace_audit", fail)
     effect = AsyncMock()
     async def run():
         async with namespace_audit.login_operation(m.db, scope, "delegated-person", None, "login.start"):
@@ -216,7 +217,7 @@ def test_login_protocol_audit_failure_refuses_or_reports_effect(setup, monkeypat
         asyncio.run(run())
     assert caught.value.code == ("audit_unavailable" if outcome == "started" else "audit_record_incomplete")
     assert effect.await_count == (0 if outcome == "started" else 1)
-    assert m.db.main.audit_page(action="login.start")["items"] == []
+    assert m.db.main.accounts.audit_page(action="login.start")["items"] == []
 
 
 def test_sdk_incomplete_is_not_retryable():
@@ -250,7 +251,7 @@ def test_interrupted_erase_survives_restart_blocks_automatic_repeat(setup, monke
         with pytest.raises(HarnessError) as caught:
             namespace_audit.refuse_unresolved_erase(SimpleNamespace(main=reopened), scope)
         assert caught.value.may_have_completed
-        assert reopened.audit_page(action="namespace.erase")["items"][0]["actor_kind"] == "system"
+        assert reopened.accounts.audit_page(action="namespace.erase")["items"][0]["actor_kind"] == "system"
     finally:
         reopened.close()
 
@@ -268,7 +269,7 @@ def test_login_finish_truthful_and_settlement_error_visible(setup, monkeypatch):
     assert row["actor_id"] == scope
     def fail(*args, **kwargs):
         raise OSError(PRIVATE)
-    monkeypatch.setattr(Database, "insert_namespace_audit", fail)
+    monkeypatch.setattr(SessionStore, "insert_namespace_audit", fail)
     store.finish(context, "operation-b")(attempt)
     assert attempt.audit_incomplete == "operation-b"
 
@@ -279,10 +280,10 @@ def test_erase_app_drops_private_audit_and_only_receipts_remain(setup, monkeypat
     sid = create(client, headers[0])
     effect = AsyncMock()
     monkeypatch.setattr("harness.cli_domains.drop_app_volumes", effect)
-    m.db.revoke_api_key(scope)
+    m.db.credentials.revoke_api_key(scope)
     asyncio.run(m.erase_app(scope))
     assert not m.db.store_path(scope).exists()
-    rows = m.db.main.audit_page(action="namespace.erase")["items"]
+    rows = m.db.main.accounts.audit_page(action="namespace.erase")["items"]
     assert len(rows) == 2
     assert all(r["actor_id"] == "system" and r["metadata"]["reason"] == "revoked_app" for r in rows)
     assert sid not in json.dumps(rows) and PRIVATE not in json.dumps(rows)
@@ -291,13 +292,13 @@ def test_erase_app_drops_private_audit_and_only_receipts_remain(setup, monkeypat
 def test_checksums_and_record_does_not_resurrect_erased_detail(setup):
     m, client, _, apps, headers = setup
     sid = create(client, headers[0])
-    session = m.db.get_session(sid)
+    session = m.db.sessions.get_session(sid)
     store = m.db.for_app(apps[0][0]["id"])
     row = dict(store.conn.execute("SELECT * FROM namespace_audit").fetchone())
     values = [row[k] for k in ("ts", "namespace", "session_id", "actor_id", "actor_kind", "key_id", "source",
                               "target_id", "target_kind", "action", "outcome", "metadata", "expires_at")]
     assert row["checksum"] == hashlib.sha256(json.dumps(values, separators=(',', ':')).encode()).hexdigest()
-    m.db.delete_session(sid)
+    m.db.sessions.delete_session(sid)
     namespace_audit.record(m.db, session, None, "session.cancel")
     assert page(client, headers[0])["items"] == []
     assert m.db.web.conn.execute("SELECT COUNT(*) FROM namespace_audit").fetchone()[0] == 0
@@ -322,7 +323,7 @@ def test_concurrent_delete_runs_effect_once_and_refuses_message(setup, monkeypat
         assert await asyncio.gather(first, second) == [True, False]
         fake.assert_awaited_once()
     asyncio.run(run())
-    assert len(m.db.main.audit_page(action="namespace.erase")["items"]) == 2
+    assert len(m.db.main.accounts.audit_page(action="namespace.erase")["items"]) == 2
     assert not m.erase_locks  # waiters retained the same lock, but erased namespaces are not cached forever
 
 
@@ -331,10 +332,10 @@ def test_shortened_app_login_retention_applies_to_reads_immediately(setup, monke
     key = apps[0][0]
     now = time.time()
     store = m.db.for_app(key["id"])
-    store.insert_namespace_audit(key["id"], "", namespace_audit.key_context(key), "attempt", "login",
-                                 "login.start", "started", {}, 30)
-    m.db.set_app_retention(key["id"], 1)
-    monkeypatch.setattr("harness.db.time.time", lambda: now + 2 * DAY)
+    store.sessions.insert_namespace_audit(key["id"], "", namespace_audit.key_context(key), "attempt", "login",
+                                          "login.start", "started", {}, 30)
+    m.db.apps.set_app_retention(key["id"], 1)
+    monkeypatch.setattr("harness.session_store.time.time", lambda: now + 2 * DAY)
     assert page(client, headers[0])["items"] == []
     asyncio.run(m.sweep_app_data(now + 2 * DAY))
     assert store.conn.execute("SELECT COUNT(*) FROM namespace_audit").fetchone()[0] == 0
@@ -388,7 +389,7 @@ def test_private_auto_approval_is_system_agent_and_never_in_main(setup):
     row = page(client, headers[0], action="approval.auto_decide")["items"][0]
     assert (row["actor_id"], row["actor_kind"], row["source"]) == ("system", "system", "agent")
     assert PRIVATE not in json.dumps(row)
-    assert m.db.main.audit_page(action="approval.auto_decide")["items"] == []
+    assert m.db.main.accounts.audit_page(action="approval.auto_decide")["items"] == []
 
 
 def test_member_erasure_leaves_only_account_receipt(setup):
@@ -399,7 +400,7 @@ def test_member_erasure_leaves_only_account_receipt(setup):
     asyncio.run(m.erase_session(sid, context=ctx))
     assert not m.erase_locks
     assert page(client, auth)["items"] == []
-    rows = m.db.main.audit_page(action="namespace.erase")["items"]
+    rows = m.db.main.accounts.audit_page(action="namespace.erase")["items"]
     assert all(r["target_kind"] == "account" and r["target_id"] == members[0]["user_id"] for r in rows)
     assert sid not in json.dumps(rows) and PRIVATE not in json.dumps(rows)
 
@@ -407,10 +408,10 @@ def test_member_erasure_leaves_only_account_receipt(setup):
 def test_retention_removes_private_rows_with_system_reason(setup):
     m, client, _, apps, headers = setup
     sid = create(client, headers[0])
-    m.db.set_app_retention(apps[0][0]["id"], 1)
+    m.db.apps.set_app_retention(apps[0][0]["id"], 1)
     asyncio.run(m.sweep_app_data(time.time() + 2 * DAY))
     assert page(client, headers[0])["items"] == []
-    rows = m.db.main.audit_page(action="namespace.erase")["items"]
+    rows = m.db.main.accounts.audit_page(action="namespace.erase")["items"]
     assert [r["outcome"] for r in rows] == ["ok", "started"]
     assert all(r["metadata"]["reason"] == "retention" and r["actor_id"] == "system" for r in rows)
     assert sid not in json.dumps(rows)
@@ -419,13 +420,13 @@ def test_retention_removes_private_rows_with_system_reason(setup):
 def test_partial_provider_erase_does_not_replay_or_leak_exception(setup, monkeypatch, caplog):
     m, client, _, apps, headers = setup
     sid = create(client, headers[0])
-    m.db.set_app_retention(apps[0][0]["id"], 1)
+    m.db.apps.set_app_retention(apps[0][0]["id"], 1)
     effect = AsyncMock(side_effect=OSError(PRIVATE))
     monkeypatch.setattr(m, "_erase_cli_history", effect)
     asyncio.run(m.sweep_app_data(time.time() + 2 * DAY))
     asyncio.run(m.sweep_app_data(time.time() + 3 * DAY))
     effect.assert_awaited_once()
-    rows = m.db.main.audit_page(action="namespace.erase")["items"]
+    rows = m.db.main.accounts.audit_page(action="namespace.erase")["items"]
     assert [r["outcome"] for r in rows] == ["unknown", "started"]
     assert PRIVATE not in caplog.text and sid not in caplog.text
 
@@ -433,7 +434,7 @@ def test_partial_provider_erase_does_not_replay_or_leak_exception(setup, monkeyp
 def test_failed_approval_uses_verified_approval_target_and_drops_guesses(setup):
     m, client, _, _, headers = setup
     sid = create(client, headers[0])
-    m.db.insert_approval({"id": "known-approval", "session_id": sid, "tool_call_id": "call", "tool": "shell",
+    m.db.sessions.insert_approval({"id": "known-approval", "session_id": sid, "tool_call_id": "call", "tool": "shell",
                           "args": {}, "reason": PRIVATE, "detail": PRIVATE, "status": "pending"})
     url = f"/api/v1/sessions/{sid}/approvals/known-approval"
     assert client.post(url, headers=headers[0], json={"decision": "deny"}).status_code == 200
@@ -450,10 +451,10 @@ def test_failed_approval_uses_verified_approval_target_and_drops_guesses(setup):
 
 def test_cross_origin_app_can_read_audit_gap_warning(setup, monkeypatch):
     m, client, _, _, _ = setup
-    _, secret = m.db.main.create_api_key("paired-browser", "sessions", "app", ["https://app.example"])
+    _, secret = m.db.main.credentials.create_api_key("paired-browser", "sessions", "app", ["https://app.example"])
     def fail(*args, **kwargs):
         raise OSError(PRIVATE)
-    monkeypatch.setattr(Database, "insert_namespace_audit", fail)
+    monkeypatch.setattr(SessionStore, "insert_namespace_audit", fail)
     response = client.post("/api/v1/sessions", json={"prompt": PRIVATE},
                            headers={"Authorization": "Bearer " + secret, "Origin": "https://app.example"})
     assert response.status_code == 201
@@ -503,9 +504,9 @@ def test_app_rerun_reconstructs_stored_tools_and_tool_result_audit(setup):
     again = client.post(f"/api/v1/sessions/{sid}/rerun", headers=headers[0])
     assert again.status_code == 201, again.text
     new_sid = again.json()["id"]
-    assert m.db.get_session(new_sid)["app_tools"] == m.db.get_session(sid)["app_tools"]
+    assert m.db.sessions.get_session(new_sid)["app_tools"] == m.db.sessions.get_session(sid)["app_tools"]
     assert m.db.app_of(new_sid) == apps[0][0]["id"]
-    m.db.insert_app_tool_call(new_sid, "lookup-call", "lookup", {"secret": PRIVATE})
+    m.db.sessions.insert_app_tool_call(new_sid, "lookup-call", "lookup", {"secret": PRIVATE})
     result = client.post(f"/api/v1/sessions/{new_sid}/tool_calls/lookup-call", headers=headers[0],
                          json={"output": PRIVATE, "ok": False})
     assert result.status_code == 200, result.text

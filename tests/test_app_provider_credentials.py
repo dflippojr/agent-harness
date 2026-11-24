@@ -127,7 +127,7 @@ def test_revoked_default_backend_drops_its_model_and_falls_back_to_local(tmp_pat
 
         created = client.post("/api/v1/sessions", headers=headers, json={"prompt": "hello"})
         assert created.status_code == 201, created.text
-        session = manager.db.get_session(created.json()["id"])
+        session = manager.db.sessions.get_session(created.json()["id"])
         assert session["backend"] == "local"
         assert session["model"] == manager.cfg.default_model
 
@@ -138,7 +138,7 @@ def test_app_file_key_is_used_and_usage_is_attributed_without_storing_it(tmp_pat
         secret_file = tmp_path / "app.key"
         secret_file.write_text("isolated-app-secret", encoding="utf-8")
         manager.cfg.provider_secret_files = {"app-billing": str(secret_file)}
-        app, _token = manager.db.create_api_key("builder", "sessions", "app")
+        app, _token = manager.db.credentials.create_api_key("builder", "sessions", "app")
         manager.set_app_provider_credential(app["id"], "claude", "app-billing", "api_key", ["claude-opus-5"])
         await manager.start()
         sid = manager.create("use my billing", backend="claude", app=app)["id"]
@@ -149,8 +149,8 @@ def test_app_file_key_is_used_and_usage_is_attributed_without_storing_it(tmp_pat
         usage = manager.db.conn.execute(
             "SELECT app_id, billing, credential_source FROM usage WHERE session_id = ?", (sid,)).fetchone()
         assert tuple(usage) == (app["id"], "api_key", "app_file")
-        assert manager.db.usage_tally("claude", 0, app["id"])["requests"] == 1
-        assert manager.db.usage_by_source("claude", 0, app["id"])["app_file"]["requests"] == 1
+        assert manager.db.usage.usage_tally("claude", 0, app["id"])["requests"] == 1
+        assert manager.db.usage.usage_by_source("claude", 0, app["id"])["app_file"]["requests"] == 1
         await manager.stop()
         manager.db.close()
         raw = manager.cfg.db_path.read_bytes()
@@ -165,7 +165,7 @@ def test_revoking_assignment_stops_an_active_provider_process(tmp_path):
         secret_file = tmp_path / "app.key"
         secret_file.write_text("temporary-secret", encoding="utf-8")
         manager.cfg.provider_secret_files = {"temporary": str(secret_file)}
-        app, _token = manager.db.create_api_key("builder", "sessions", "app")
+        app, _token = manager.db.credentials.create_api_key("builder", "sessions", "app")
         credential = manager.set_app_provider_credential(app["id"], "claude", "temporary", "api_key", [])
         await manager.start()
         sid = manager.create("keep running", backend="claude", app=app)["id"]
@@ -185,7 +185,7 @@ def test_app_subscription_limit_falls_back_only_to_its_assigned_key(tmp_path):
         secret_file = tmp_path / "fallback.key"
         secret_file.write_text("per-app-fallback", encoding="utf-8")
         manager.cfg.provider_secret_files = {"app-fallback": str(secret_file)}
-        app, _token = manager.db.create_api_key("builder", "sessions", "app")
+        app, _token = manager.db.credentials.create_api_key("builder", "sessions", "app")
         manager.set_app_provider_credential(app["id"], "claude", "app-fallback",
                                             "subscription_then_api_key", [])
 

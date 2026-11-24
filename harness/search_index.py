@@ -56,13 +56,13 @@ def restrict_app_id(db, caller_session_id: str) -> str | None:
     """
     if not caller_session_id:
         return None
-    caller = db.get_session(caller_session_id)
+    caller = db.sessions.get_session(caller_session_id)
     if caller is None:
         raise ToolError(f"no session matches {caller_session_id!r}")
     app_id = caller.get("app_id") or ""
     if not app_id:
         return None
-    key = db.get_api_key(app_id)
+    key = db.credentials.get_api_key(app_id)
     if key is None or key.get("revoked_at") is not None:
         return app_id
     scopes = set((key.get("scopes") or "").split())
@@ -74,7 +74,7 @@ def restrict_app_id(db, caller_session_id: str) -> str | None:
 def calling_app(db, caller_session_id: str) -> str:
     """The App whose store a session's search and reads may reach besides the main store: its own App's, or none
     for the owner's and members' sessions (#330 decision 3)."""
-    caller = db.get_session(caller_session_id) if caller_session_id else None
+    caller = db.sessions.get_session(caller_session_id) if caller_session_id else None
     return (caller or {}).get("app_id") or ""
 
 
@@ -82,13 +82,13 @@ def caller_user_id(db, caller_session_id: str) -> str | None:
     """The account whose sessions the caller may search and read, or None (no caller session: every account)."""
     if not caller_session_id:
         return None
-    s = db.get_session(caller_session_id)
+    s = db.sessions.get_session(caller_session_id)
     return (s.get("owner_id") or "owner") if s else None
 
 
 def readable_session_ids(db, ref: str, caller_session_id: str) -> list[str]:
     """The agent sessions `session_read` from `caller_session_id` may open whose id starts with `ref`: one means
     that session is the one read (#791)."""
-    return scoped(db, calling_app(db, caller_session_id)).find_session_ids(
+    return scoped(db, calling_app(db, caller_session_id)).sessions.find_session_ids(
         ref.strip(), user_id=caller_user_id(db, caller_session_id), app_id=restrict_app_id(db, caller_session_id),
         kind="agent")

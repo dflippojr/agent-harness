@@ -35,7 +35,9 @@ from . import taint
 from . import telemetry
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
-from .api_models import WebSessionResponse
+from .api_models import ApprovalResponse, WebSessionResponse
+from . import response_docs as docs
+from .response_docs import documented
 from .modules import principal_capabilities
 from .origins import LOOPBACK_HOSTS, daemon_origins, normalize_origin
 from .webgzip import WebGzipMiddleware
@@ -226,10 +228,10 @@ def owned_session(request: Request, ref: str, *, kind: str | None = "agent") -> 
         raise HarnessError(404, "no session matches that id")
     scope = owner_id(request)
     sid = m.resolve_id(ref, user_id=scope, kind=kind, app="")  # never an App's session (#330 decision 3)
-    session = m.db.get_session(sid)
+    session = m.db.sessions.get_session(sid)
     if (session is None or session.get("owner_id", "owner") != scope
             or (kind is not None and (session.get("kind") or "agent") != kind) or session.get("app_id")):
-        m.db.insert_audit(scope, scope, "cross_user", "denied")
+        m.db.accounts.insert_audit(scope, scope, "cross_user", "denied")
         raise HarnessError(404, "no chat matches that id" if kind == "chat" else "no session matches that id")
     return m, sid, session
 
@@ -272,8 +274,8 @@ def _access_refusal(request: Request, m: Manager, ident, login: str | None,
     if not ident.allowed:
         log.warning("refused %s %s from tailnet login %s (%s)",
                     request.method, request.url.path, login, ident.detail)
-        m.db.insert_audit(ident.user_id or "unknown", ident.user_id or "", "auth", "denied",
-                          ident.detail or "not allowed")
+        m.db.accounts.insert_audit(ident.user_id or "unknown", ident.user_id or "", "auth", "denied",
+                                   ident.detail or "not allowed")
         return JSONResponse({"detail": ident.detail or "this tailnet login is not allowed"},
                             status_code=403, headers=cors_headers)
     guest_block = access_mod.guest_forbidden(ident, request.method, request.url.path)
@@ -283,7 +285,7 @@ def _access_refusal(request: Request, m: Manager, ident, login: str | None,
     member_block = access_mod.member_forbidden(ident, request.method, request.url.path, m.cfg)
     if member_block:
         log.warning("refused member %s %s from %s (%s)", request.method, request.url.path, login, member_block)
-        m.db.insert_audit(ident.user_id, ident.user_id, "cross_user", "denied", member_block)
+        m.db.accounts.insert_audit(ident.user_id, ident.user_id, "cross_user", "denied", member_block)
         return JSONResponse({"detail": member_block}, status_code=403, headers=cors_headers)
     return None
 
@@ -373,7 +375,7 @@ async def _access_guard(request: Request, call_next):
     web = request.state.web_auth
     request.state.access = ident
     if ident.kind in ("owner", "member") and ident.allowed and ident.user_id != "owner":
-        m.db.touch_account(ident.user_id)
+        m.db.accounts.touch_account(ident.user_id)
     refusal = _web_session_refusal(request, m, ident, web, public_path, info.cors_headers)
     if refusal is None and not (web.admitted and not ident.allowed):
         refusal = _access_refusal(request, m, ident, login, info.cors_headers)
@@ -489,7 +491,7 @@ async def manifest(request: Request):
 
 
 # API
-@api_router.get("/health")
+@api_router.get("/health", responses=documented(docs.HealthResponse))
 async def health(request: Request):
     """Liveness check that also reports the build commit and configuration revision."""
     cfg = mgr(request).cfg
@@ -517,7 +519,7 @@ async def metrics(request: Request):
     return PlainTextResponse(await asyncio.to_thread(render, m), media_type="text/plain; version=0.0.4")
 
 
-@api_router.get("/me")
+@api_router.get("/me", responses=documented(docs.MeResponse))
 async def me(request: Request):
     """Caller's identity, role and capabilities, plus disk and queue usage where the account has it."""
     m = mgr(request)
@@ -529,7 +531,7 @@ async def me(request: Request):
     usage = {}
     if member and ident.allowed:
         from .storage import account_usage_bytes, quota_message
-        account = m.db.account_by_id(ident.user_id)
+        account = m.db.accounts.account_by_id(ident.user_id)
         if account:
             used = account_usage_bytes(cfg, ident.user_id)
             usage = {
@@ -538,8 +540,8 @@ async def me(request: Request):
                 "disk_note": quota_message(used, int(account["disk_quota_bytes"])),
                 "max_running": int(account["max_running"]),
                 "max_queued": int(account["max_queued"]),
-                "running": m.db.count_sessions(ident.user_id, "running"),
-                "queued": m.db.count_sessions(ident.user_id, "queued"),
+                "running": m.db.sessions.count_sessions(ident.user_id, "running"),
+                "queued": m.db.sessions.count_sessions(ident.user_id, "queued"),
                 "account_hint": ident.user_id[2:10] if ident.user_id.startswith("u-") else ident.user_id[:8],
             }
     return {
@@ -583,7 +585,7 @@ async def update_profile(body: ProfileUpdate, request: Request):
     return {"emoji": body.emoji, "choices": profile_emojis}
 
 
-@api_router.get("/projects")
+@api_router.get("/projects", responses=documented(list[docs.ProjectView]))
 async def projects(request: Request):
     """Projects visible to the caller, or an empty list for a read-only demo session."""
     from . import catalog
@@ -594,7 +596,7 @@ async def projects(request: Request):
     return [catalog.public_project(p) for p in catalog.list_projects(m.cfg, m.db, scope)]
 
 
-@api_router.post("/projects", status_code=201)
+@api_router.post("/projects", status_code=201, responses=documented(docs.ProjectView, 201))
 async def create_project(body: CreateProject, request: Request):
     """Creates a project with an empty workspace or a repo cloned per session; `github` clones use the caller's GitHub sign-in."""
     ident = request.state.access
@@ -643,7 +645,7 @@ async def models(request: Request):
             for m in cfg.models.values()]
 
 
-@api_router.get("/backends")
+@api_router.get("/backends", responses=documented(list[docs.BackendView]))
 async def backends(request: Request):
     """Local and hosted backends with their model and sign-in state; `auth=skip` skips the sign-in checks."""
     m = mgr(request)
@@ -659,7 +661,7 @@ async def backends(request: Request):
     return [local_view(m), *hosted]
 
 
-@api_router.put("/backends/{name}")
+@api_router.put("/backends/{name}", responses=documented(docs.BackendView))
 async def update_backend(name: str, body: BackendUpdate, request: Request):
     """Settings → Backends: persist the default model (and effort, for hosted CLIs)."""
     from .backend_state import save_prefs
@@ -678,19 +680,19 @@ async def update_backend(name: str, body: BackendUpdate, request: Request):
     return await asyncio.to_thread(backend_view, m, name, False)
 
 
-@api_router.get("/smart-approvals")
+@api_router.get("/smart-approvals", responses=documented(docs.SmartApprovalsResponse))
 async def smart_approvals(request: Request):
     """Smart-approval status and the 20 most recent reviews."""
     return require_owner(request).smart_approvals_status()
 
 
-@api_router.put("/smart-approvals")
+@api_router.put("/smart-approvals", responses=documented(docs.SmartApprovalsResponse))
 async def update_smart_approvals(body: SmartApprovalsUpdate, request: Request):
     """Sets the smart-approval mode; any mode but off needs smart_approvals configured in harness.yaml."""
     return require_owner(request).set_smart_approvals_mode(body.mode)
 
 
-@api_router.get("/queue")
+@api_router.get("/queue", responses=documented(list[docs.QueueEntry]))
 async def queue(request: Request):
     """Queue positions of the caller's queued agent sessions, in queue order."""
     m = mgr(request)
@@ -700,7 +702,7 @@ async def queue(request: Request):
     for sid, pos in sorted(positions.items(), key=lambda x: x[1]):
         if m.db.app_of(sid):  # an App's session (#330 decision 3)
             continue
-        session = m.db.get_session(sid) or {}
+        session = m.db.sessions.get_session(sid) or {}
         if session.get("owner_id", "owner") != scope or (session.get("kind") or "agent") != "agent":
             continue
         out.append({"session_id": sid, "position": pos})
@@ -729,7 +731,7 @@ async def list_sessions(request: Request, response: Response, limit: int = 50, b
     """One page of the caller's sessions, newest first. The first page (no `before`) also holds every session that
     is active or waits on an approval, whatever its age; `X-Next-Before` names the next older page (#663)."""
     m = mgr(request)
-    rows, cursor = m.db.session_page(max(1, min(limit, 200)), owner_id=owner_id(request), before=_page_cursor(before),
+    rows, cursor = m.db.sessions.session_page(max(1, min(limit, 200)), owner_id=owner_id(request), before=_page_cursor(before),
                                      target=target or None, include_active=not before)
     if cursor is not None:
         response.headers[NEXT_BEFORE] = f"{cursor[0]!r}:{cursor[1]}"
@@ -827,22 +829,22 @@ async def get_session(ref: str, request: Request):
     return m.summary(session)
 
 
-@api_router.patch("/sessions/{ref}")
-@api_router.put("/sessions/{ref}")
+@api_router.patch("/sessions/{ref}", responses=documented(WebSessionResponse))
+@api_router.put("/sessions/{ref}", responses=documented(WebSessionResponse))
 async def patch_session(ref: str, body: SessionUpdate, request: Request):
     """Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters."""
     m, sid, _ = owned_session(request, ref)
     return m.summary(m.rename(sid, body.title, context=operation_audit.request_context(request, m)))
 
 
-@api_router.post("/sessions/{ref}/messages")
+@api_router.post("/sessions/{ref}/messages", responses=documented(WebSessionResponse))
 async def send_message(ref: str, body: SendMessage, request: Request):
     """Sends a follow-up and returns before the reply finishes; a running session reads it before its next model call."""
     m, sid, _ = owned_session(request, ref)
     return m.summary(await m.send(sid, body.content, context=operation_audit.request_context(request, m)))
 
 
-@api_router.post("/sessions/{ref}/rerun", status_code=201)
+@api_router.post("/sessions/{ref}/rerun", status_code=201, responses=documented(WebSessionResponse, 201))
 async def rerun(ref: str, request: Request, body: RerunRequest | None = None):
     """Starts a new session repeating this one's original prompt, project and taint, optionally on another backend or model; 409 for App tools-only sessions."""
     m, sid, _ = owned_session(request, ref)
@@ -930,13 +932,13 @@ async def review(ref: str, action: str, request: Request):
     return m.summary(await m.review(sid, action, context=operation_audit.request_context(request, m)))
 
 
-@api_router.get("/maintenance")
+@api_router.get("/maintenance", responses=documented(docs.MaintenanceResponse))
 async def maintenance(request: Request):
     """Disk usage of session workspaces and checkpoints, and of the data volume."""
     return await require_owner(request).maintenance.usage()
 
 
-@api_router.post("/maintenance/cleanup")
+@api_router.post("/maintenance/cleanup", responses=documented(docs.CleanupResponse))
 async def maintenance_cleanup(request: Request):
     """Runs a cleanup pass now, after any pass in progress, and returns what it removed."""
     m = require_owner(request)
@@ -964,15 +966,15 @@ async def canary_alert_test(request: Request, body: CanaryAlertTest | None = Non
     return {"sent": True, "reason": "", "notification": payload}
 
 
-@api_router.get("/sessions/{ref}/approvals")
+@api_router.get("/sessions/{ref}/approvals", responses=documented(list[ApprovalResponse]))
 async def approvals(ref: str, request: Request, all: bool = False):
     """Pending approvals for the session, or every approval when `all` is true."""
     m, sid, _ = owned_session(request, ref)
-    rows = m.db.approvals(sid) if all else m.db.pending_approvals(sid)
+    rows = m.db.sessions.approvals(sid) if all else m.db.sessions.pending_approvals(sid)
     return [public_approval(a) for a in rows]
 
 
-@api_router.post("/sessions/{ref}/approvals/{approval_id}")
+@api_router.post("/sessions/{ref}/approvals/{approval_id}", responses=documented(ApprovalResponse))
 async def decide(ref: str, approval_id: str, body: Decision, request: Request):
     """Approves or denies an approval; `pending` works only when exactly one is waiting, and a decided one returns 409."""
     if body.decision not in ("approve", "deny"):
@@ -1022,7 +1024,7 @@ async def snippet_languages(request: Request):
 async def list_chats(request: Request, limit: int = 50):
     """The caller's chats, newest first, up to `limit` (1 to 200, default 50)."""
     m = require_owner(request)
-    rows = m.db.list_sessions(max(1, min(limit, 200)), owner_id=owner_id(request), kind="chat")
+    rows = m.db.sessions.list_sessions(max(1, min(limit, 200)), owner_id=owner_id(request), kind="chat")
     return [m.summary(r) for r in rows]
 
 
@@ -1094,7 +1096,7 @@ async def clear_taint(ref: str, request: Request):
     return m.summary(m.clear_taint(sid, context=operation_audit.request_context(request, m)))
 
 
-@api_router.post("/sessions/{ref}/cancel")
+@api_router.post("/sessions/{ref}/cancel", responses=documented(WebSessionResponse))
 async def cancel(ref: str, request: Request):
     """Stops an active session and returns once its run has ended; 409 when nothing is active."""
     m, sid, _ = owned_session(request, ref)
@@ -1113,10 +1115,10 @@ async def session_metrics(ref: str, request: Request):
     """Owner-only per-turn context-efficiency metrics for one agent session (#159)."""
     m = require_owner(request)
     sid = m.resolve_id(ref, kind="agent", app="")
-    session = m.db.get_session(sid)
+    session = m.db.sessions.get_session(sid)
     if session is None or session.get("app_id"):
         raise HarnessError(404, "no session matches that id")
-    return efficiency.session_payload(sid, m.db.events(sid))
+    return efficiency.session_payload(sid, m.db.sessions.events(sid))
 
 
 # event streams
@@ -1140,7 +1142,7 @@ def _stream_key(request: Request, m: Manager) -> dict | None:
     """The bearer key `require_admin` admitted this stream with on the admin surface, or None for an ambient Web
     identity (Tailscale owner, local owner token), whose streams end only on an epoch bump (#787)."""
     kid = getattr(request.state, "authenticated_key_id", None)
-    return m.db.get_api_key(kid) if kid else None
+    return m.db.credentials.get_api_key(kid) if kid else None
 
 
 def _stream_live(m: Manager, scope: str, epoch: int, key: dict | None) -> bool:
@@ -1157,7 +1159,7 @@ def _session_list_payload(m: Manager, scope: str, e: dict) -> str | None:
     one (#330 decision 3): its store is not even read."""
     if m.db.app_of(e["session_id"]):
         return None
-    session = m.db.get_session(e["session_id"])
+    session = m.db.sessions.get_session(e["session_id"])
     if not (e["type"] in GLOBAL_TYPES and session and session.get("owner_id", "owner") == scope
             and (session.get("kind") or "agent") == "agent" and not session.get("app_id")):
         return None
@@ -1200,7 +1202,7 @@ def _resync_after_overflow(m: Manager, sub, sid: str, last: int) -> list[dict]:
     sub.overflowed = False
     while not sub.queue.empty():
         sub.queue.get_nowait()
-    return m.db.events(sid, last)
+    return m.db.sessions.events(sid, last)
 
 
 def _advance_seq(last: int, e: dict) -> int | None:
@@ -1219,7 +1221,7 @@ async def _conversation_events(request: Request, m: Manager, sid: str, after: in
     key = _stream_key(request, m)
     try:
         yield ": connected\n\n"
-        for e in m.db.events(sid, after):
+        for e in m.db.sessions.events(sid, after):
             if not _stream_live(m, scope, epoch, key):
                 return
             last = e["seq"]
@@ -1288,10 +1290,10 @@ def _key_catalog_app_id(body: dict) -> str:
         raise HarnessError(400, str(e)) from e
 
 
-@api_router.get("/keys")
+@api_router.get("/keys", responses=documented(list[docs.KeyResponse]))
 async def list_keys(request: Request):
     """Key metadata only; a key's secret is returned once, by the create response."""
-    return mgr(request).db.list_api_keys()
+    return mgr(request).db.listed_api_keys()
 
 
 @api_router.post("/keys", status_code=201)
@@ -1316,7 +1318,7 @@ async def create_key(request: Request):
         await refuse_owner_key(m, ctx, "key.create", "api_key")
 
     def commit():
-        row, key = m.db.main.create_api_key(name, scopes, kind, origins, catalog_app_id)
+        row, key = m.db.main.credentials.create_api_key(name, scopes, kind, origins, catalog_app_id)
         credential_audit.record(m.db, ctx, "key.create", row["id"], "ok", "api_key",
                                 {"key_id": row["id"], "kind": kind, "scopes": scopes.split(),
                                  "catalog_app_id": catalog_app_id})
@@ -1332,12 +1334,12 @@ async def revoke_key(kid: str, request: Request):
     ctx = credential_audit.request_context(request, m)
 
     def commit() -> bool | None:
-        before = m.db.main.get_api_key(kid)
+        before = m.db.main.credentials.get_api_key(kid)
         if before is not None and before.get("role") == "hub" and before.get("revoked_at") is None:
             credential_audit.record(m.db, ctx, "key.revoke", kid, "denied", "api_key",
                                     {"key_id": kid, "kind": before["kind"], "reason": "hub_key"})
             return None
-        if m.db.main.revoke_api_key(kid):
+        if m.db.main.credentials.revoke_api_key(kid):
             credential_audit.record(m.db, ctx, "key.revoke", kid, "ok", "api_key",
                                     {"key_id": kid, "kind": before["kind"] if before else None})
             return True
@@ -1402,7 +1404,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     api_router.install(app)
     modules.install_routes(app, manager.cfg, "owner")
     modules.install_routes(app, manager.cfg, "public")
-    from . import admin
+    from . import admin, event_schema
+    event_schema.install(app)  # the SSE payloads in the OpenAPI document (#1014); before the admin aliases copy paths
     admin.register(app, mgr, modules.admin_paths(manager.cfg), manager.cfg)
     # Keep /static for installed bundled clients, while making the Stables shell directly deployable at a static-site
     # root. This catch-all mount is last so daemon/API routes always win.

@@ -49,18 +49,18 @@ async def run_hosted(task, backend_name: str, mode: str, run_dir: Path, backend,
         s = m.create(task.prompt, project="scratch", backend=backend_name, title=f"bakeoff {task.id} {mode}")
         sid = s["id"]
         baseline = prepare_hard_task(task, Path(s["workspace"]))  # before the session's first await
-        m.db.update_session(sid, run=dict(m.db.get_session(sid)["run"], max_turns=task.max_turns))
+        m.db.sessions.update_session(sid, run=dict(m.db.sessions.get_session(sid)["run"], max_turns=task.max_turns))
         stopped = False
-        while m.db.get_session(sid)["status"] not in DONE:
+        while m.db.sessions.get_session(sid)["status"] not in DONE:
             await asyncio.sleep(poll)
             if time.monotonic() - started > task.wall_limit:
                 stopped = True
                 await m.cancel(sid)
                 break
-        final = m.db.get_session(sid)
+        final = m.db.sessions.get_session(sid)
         ok, note = await asyncio.to_thread(grade_hard_task, task, Path(final["workspace"]), final["answer"], baseline)
         totals = final["totals"]
-        tools = [e for e in m.db.events(sid) if e["type"] == "tool_call"]
+        tools = [e for e in m.db.sessions.events(sid) if e["type"] == "tool_call"]
         return {"backend": backend_name, "mode": mode, "task": task.id, "ok": bool(ok and final["status"] == "done"),
                 "note": note + ("; stopped at the wall limit" if stopped else ""), "status": final["status"],
                 "turns": totals.get("turns", 0),

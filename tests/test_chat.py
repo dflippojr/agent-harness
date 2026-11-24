@@ -111,7 +111,7 @@ def test_chat_denies_agent_tools_without_approval_cards(tmp_path):
     client, m, _ = make_client(tmp_path, [Completion(content="")])
     with client:
         chat = client.post("/chats", json={"prompt": "hi"}).json()
-        s = m.db.get_session(chat["id"])
+        s = m.db.sessions.get_session(chat["id"])
         names = {t["function"]["name"] for t in Runner.tool_schemas(m.runner, s, None)}
         assert names <= {"web_search", "web_fetch"}
         assert "plain chat" in s["context"][0]["content"]
@@ -153,18 +153,18 @@ def test_search_index_and_tools_exclude_chat_kind(tmp_path):
         ("user_message", {"content": f"keep {CHAT_MARKER} in this chat"}),
         ("status", {"status": "done", "answer": f"stored {CHAT_MARKER}"}),
     ], created=2)
-    db.update_session("chat000001", kind="chat")
-    db._build_search_index()
+    db.sessions.update_session("chat000001", kind="chat")
+    db.sessions.build_search_index()
     agent_hits = search(db, CHAT_MARKER)
     assert agent_hits["results"] == []
     assert search(db, AGENT_MARKER)["results"][0]["id"] == "agent00001"
     chat_hits = search(db, CHAT_MARKER, session_kind="chat")
     assert [r["id"] for r in chat_hits["results"]] == ["chat000001"]
     assert search(db, AGENT_MARKER, session_kind="chat")["results"] == []
-    assert db.session_brief("chat000001") is None
-    assert db.session_brief("chat000001", kind="chat")["id"] == "chat000001"
-    assert db.find_session_ids("chat000001", kind="agent") == []
-    assert db.find_session_ids("agent00001", kind="agent") == ["agent00001"]
+    assert db.sessions.session_brief("chat000001") is None
+    assert db.sessions.session_brief("chat000001", kind="chat")["id"] == "chat000001"
+    assert db.sessions.find_session_ids("chat000001", kind="agent") == []
+    assert db.sessions.find_session_ids("agent00001", kind="agent") == ["agent00001"]
     tools = SessionSearch(db)
     assert_no_chat = tools.session_search(CHAT_MARKER, _session="agent00001")
     assert assert_no_chat.startswith("No earlier sessions match")
@@ -328,5 +328,5 @@ def test_chat_accepts_follow_up_messages(tmp_path):
         wait_for(lambda: client.get(f"/chats/{chat['id']}").json()["status"] == "done")
         sent = client.post(f"/chats/{chat['id']}/messages", json={"content": "and again"})
         assert sent.status_code == 200
-        wait_for(lambda: m.db.get_session(chat["id"])["status"] == "done"
-                 and "second" in str(m.db.get_session(chat["id"]).get("answer") or ""))
+        wait_for(lambda: m.db.sessions.get_session(chat["id"])["status"] == "done"
+                 and "second" in str(m.db.sessions.get_session(chat["id"]).get("answer") or ""))

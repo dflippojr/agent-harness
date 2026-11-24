@@ -50,15 +50,16 @@ Without the key the list is every package under the `harness_modules` namespace,
 its package there and uninstalling it is removing it. A listed package that fails to import is logged and skipped:
 a broken add-on never stops the core.
 
-Why a list and not Python entry points: the Server runs from a checkout (`python -m harness`, deployed by
-fast-forwarding the live checkout), not from an installed distribution, so there is no package metadata for entry
-points to read. A list is explicit, ordered and testable (tests pass their own), and the namespace default needs no
-configuration for an ordinary install.
+Why a list and not Python entry points: the Server also runs from a checkout (`python -m harness`, deployed by
+fast-forwarding the live checkout), where there is no package metadata for entry points to read. A list is explicit,
+ordered and testable (tests pass their own), and the namespace default needs no configuration for an ordinary
+install. Installed from wheels ([Packaging](#packaging)), the same namespace scan finds every module wheel, because
+each one adds its own package to `harness_modules`.
 
 ## Layout
 
 ```
-harness/                 the core (moves to its own repository in stage f)
+harness/                 the core (moves to its own repository in stage f); a regular package
   modules.py             the interface, discovery and ModuleHost
 harness_modules/         a PEP 420 namespace package: no __init__.py, so separate distributions can each add one
   images/
@@ -68,6 +69,7 @@ harness_modules/         a PEP 420 namespace package: no __init__.py, so separat
     settings.py          the images.* registry keys
     doctor.py            python -m harness.doctor checks
     service.py edit.py archive.py models.py upscale.py flux_fast.json   (formerly harness/images*.py etc.)
+    store.py             ImageStore: the image queries on the core's shared database (see Module stores)
   notifications/         ntfy phone notifications (formerly harness/notify.py)
     __init__.py runtime.py routes.py settings.py service.py
   search/                session search (formerly harness/search.py): /search, /api/v1/search, session_search/read
@@ -75,15 +77,15 @@ harness_modules/         a PEP 420 namespace package: no __init__.py, so separat
   backup/                nightly backup (formerly Maintenance's backup section) and verify/restore (#374)
     __init__.py runtime.py routes.py settings.py service.py restore.py
   skills/                owner-approved instructions (formerly harness/skills.py, skill_review.py, skill_validate.py)
-    __init__.py runtime.py routes.py settings.py service.py skill_review.py skill_validate.py
+    __init__.py runtime.py routes.py settings.py service.py skill_review.py skill_validate.py store.py
   memory_library/        personal memory tools, approved writes and frozen session profiles (formerly harness/memory_library.py)
     __init__.py runtime.py routes.py settings.py service.py
   runners/               remote transport, native pairing and Mac bundle (formerly harness/remote.py, mac_client.py)
-    __init__.py runtime.py routes.py service.py mac_client.py
+    __init__.py runtime.py routes.py service.py mac_client.py store.py
   remote_control/        Claude Remote Control and owner-only folder discovery (formerly harness/remote_control.py)
     __init__.py runtime.py routes.py settings.py service.py folder_discovery.py discovery_paths.py discovery_api.py
   endpoint/              OpenAI/Anthropic inference, request accounting and embeddings proxy (formerly harness/endpoint.py)
-    __init__.py runtime.py routes.py settings.py service.py metrics.py
+    __init__.py runtime.py routes.py settings.py service.py metrics.py store.py
   local_model/           llama-server supervision, warm-up, GPU holds and RAM admission (last stage c module)
     __init__.py runtime.py routes.py settings.py service.py warmup.py resources.py metrics.py doctor.py
 ```
@@ -104,6 +106,36 @@ Resource wiring runs in `ModuleRuntime.after_init()` after every runtime has ini
 admission and lazy loading regardless of discovery order. Exclusive GPU consumers request server control through
 `ModuleHost.model_control()` / `ModuleRuntime.model_control()` rather than importing another module. Only the
 local-model module supplies that control. Images requires it when actually taking the GPU.
+
+## Packaging
+
+Stage (e) of #334 builds wheels with the in-tree backend `scripts/packaging/agent_harness_build.py`, which uses the
+standard library only. `pyproject.toml` declares the layout ([INSTALL.md](INSTALL.md#install-the-server-from-wheels-pip)
+has the commands):
+
+- **The core wheel**, `agent-harness`, holds the `harness` package (a regular package, so an installed copy never
+  merges with another `harness` folder on the path) and the SDK as the top-level module `harness_client`. Its
+  dependencies are `requirements.txt`'s lines, with pytest under the `test` extra because the daemon never imports it.
+- **One add-on wheel per module**, `agent-harness-module-<name>`, holding `harness_modules/<name>/` and requiring the
+  exact core release. A module is already the unit the interface adds and removes: installing its wheel puts its
+  package in the namespace, where discovery finds it, and `pip uninstall` makes it absent. Modules never import each
+  other, so each wheel needs only the core, and an install takes only the modules it wants. No wheel ships a
+  `harness_modules/__init__.py`, so the namespace stays open to all of them.
+
+A wheel holds the `.py` sources of its package plus the files `pyproject.toml` lists, nothing else. Built from a git
+checkout, or from a project folder inside one, the build reads only files git tracks, `pyproject.toml` included, so an
+untracked or ignored file never ships. Every read refuses a link anywhere on its path, whether the disk has it or git
+records it. A module's own data files go in `package-data` (`images` lists
+`flux_fast.json`). A module that reads a repository file outside its package (the hub's manifest schema in `docs/`,
+the runners' Mac bundle in `macrunner/`) lists it under `[tool.agent-harness.addons.repo-files]` and reads it with
+`harness.modules.repo_file(__package__, "<path>")`. That is the checkout's file when the Server runs from one, and the
+copy the wheel carries in `<package>/_repo_files/` when it is installed. Nothing may resolve against the folder above
+the package, which is site-packages once installed: `tests/test_checkout_paths.py` fails on it, and the core names the
+checkout only through `harness.config.CHECKOUT` (None when installed). `tests/test_packaging.py` installs the wheels in
+a new virtual environment and runs the Server from it, with the core alone and then with the add-ons.
+
+The Server image (`Dockerfile`, [INSTALL.md](INSTALL.md#run-the-server-in-docker)) installs the core and every module
+wheel. Presence still follows the profile, so a module stays absent until it is switched on.
 
 ## What a module contributes
 
@@ -147,6 +179,8 @@ and notifications enabled/queued counts. No module imports another module; `_PUB
 | `features()`, `app_root()` | `/api/v1` `features` entries and extra top-level keys (`image_modes`). |
 | `gpu_holders()` | GPU-holder names for machine diagnostics; the core aggregates all present runtimes. |
 | `metrics(out, db)` | Prometheus lines on `/metrics`. |
+| `key_request_counts(key_ids)` | `{key id: logged requests}` for the `/keys` listing's `requests`; `ModuleHost` sums the answers and `SessionStores` adds them to each listed key (0 for none). The endpoint module answers it. |
+| `scheduled_job(jid)` | The scheduled job `jid` (`name`, `notify` and the rest), from the module that schedules jobs; `ModuleHost.scheduled_job` asks each runtime. Notifications names a finished run's job through it, so it never imports the jobs module; with jobs absent the answer is None and the notification names the session. |
 
 `manager.<module name>` returns the runtime's `service` (None while switched off or absent), for code written before
 modules; new core code goes through `manager.modules`.
@@ -177,10 +211,99 @@ with personal context withhold it from Apps. These hooks contribute nothing by d
    use `enabled_flag("<section>")` for a `runtime_enabled` that reads `cfg.<section>.enabled`. Add the module's row
    to `tests/test_module_hooks.py`.
 2. Import the core only from `harness.modules`. If you need a core object it doesn't export, add it to `_PUBLIC`.
+   Put the queries on the module's own tables in its store (see [Module stores](#module-stores)), not in
+   `harness/db.py`.
 3. Put the profile switch in `config.MODULE_NAMES` so profiles and the installer accept it (see below).
 4. Add one row to the table in `tests/test_module_lifecycle.py`: its probe route, settings keys, capability, routes,
    CLI row, metrics and tools. The table runs every module on, off, absent and uninstalled through `create_app`, so the
    lifecycle needs no test file of its own. Add tests next to the module's behaviour for the rest.
+5. The package becomes its own wheel with no further setup. List any data file that isn't a `.py` source in
+   `pyproject.toml` (`package-data`, or `repo-files` for a repository file outside the package; see
+   [Packaging](#packaging)); `tests/test_packaging.py` fails on a tracked file that no wheel ships.
+
+## Module stores
+
+A module's queries on its own tables are methods of its store, `harness_modules/<name>/store.py`, never of the core
+`Database` (#992). A store subclasses `harness.modules.ModuleStore` and decorates each method with
+`harness.modules.database_reads` or `database_writes`, as `Database` does its own: a read runs on a pooled read-only
+connection, a write runs on the core's writer thread as one transaction, and inside a caller's `write` it joins that
+transaction. `Store(db)` takes the manager's database (or a lone `Database`) and wraps the main one, so
+`await store.aio.<method>()` works too. A store forwards nothing else: it has no `get_session` or any other core method.
+A store method that must also call a core method in its transaction calls it on `self.core` (the runner store's
+redeem mints the owner key with `create_api_key`). A store is cheap to build, so a route can make one per request.
+
+| Module | Store | Tables |
+| --- | --- | --- |
+| skills | `SkillRecordStore` (the service is `SkillStore`) | `skill_proposals`, `skill_installed`, `skill_versions`, `skill_project_allowlist`, `skill_rejected`, `skill_review_jobs` |
+| jobs | `JobStore` | `jobs`, `templates` |
+| runners | `RunnerPairingStore` | `runner_pairing_codes` |
+| endpoint | `EndpointRequestStore` | `endpoint_requests` (the request log) |
+| images | `ImageStore` | `images` |
+
+The tables themselves stay in the core's frozen baseline and migrations, so existing installs and backups keep their
+schema while a module is absent (#334). `SessionStore.job_sessions` stays in the core: it reads a scheduled job's sessions,
+which are session rows on Web's store, not job rows. The `/keys` listing's per-key `requests` count is the endpoint
+module's (`ModuleRuntime.key_request_counts`, filled in by `SessionStores` on the list, the one-key read and an undone
+revoke); it is 0 while the module is absent. `tests/test_module_stores.py` fails on any `Database` method whose SQL
+names a module table, and on any store that forwards attributes to the Database.
+
+The core's own queries split the same way, one domain store per change (#992 stage 5). A core store subclasses
+`harness.db.CoreStore`, and `Database` builds it and exposes it as an attribute:
+
+- **`db.credentials`** (`harness/credential_store.py`): API keys, pairing codes, pairing requests and the Hub claim,
+  stream tickets, and App provider credentials.
+- **`db.sessions`** (`harness/session_store.py`): the `sessions` table and the rows keyed by one session. That means
+  checkpoints, artifacts, review comments, secret dismissals, events and the search index, approvals, and smart
+  reviews. It also holds the other rows each App keeps in its own store: its tool calls, end users, idempotency keys
+  and namespace audit (#992 stage 6). Every Database builds its own: the main store, Web's, and each App's.
+- **`db.accounts`** (`harness/account_store.py`): household accounts and the account audit, member projects, GitHub
+  connections, members' own provider keys, Google identities and invitations, and Stables web sessions.
+- **`db.apps`** (`harness/app_store.py`): the main store's per-App records beside the App registry. That means each
+  App's settings, the session caps the owner set, its retention, and the erasure of a revoked App. Erasing an App is
+  one transaction across stores on purpose: the tombstone and provider credentials (CredentialStore's tables), the
+  settings and the meta keys commit together or not at all.
+- **`db.usage`** (`harness/usage_store.py`): the usage log (`usage`) and each hosted backend's reported usage
+  (`backend_usage`), both in the main store.
+- **Still on `Database`:** `meta`, which stays there as infrastructure.
+
+Every caller calls the store: `db.credentials.get_api_key(kid)`, `await db.credentials.aio.create_api_key(...)`.
+`Database` forwards nothing. The temporary forwarding shim that stage 5 added while call sites moved was deleted in
+stage 6 (#992). `tests/test_database_shim.py` checks that `Database` has only its infrastructure and `meta`, and a
+source scan there fails on a call to any store method that isn't made on that store (for sessions, a routing proxy).
+`operation_audit` writes through the account store of the database it is given.
+
+Session methods go through a routing proxy, and SessionStores adds its own key listings:
+
+- **Session methods.** `SessionStores` routes each session to its own store. On the routing wrappers (`m.db`,
+  `scope(app_id)`, and `for_app` or `for_session` for an App), `sessions` is the one per-session routing proxy
+  (`app_stores._RoutedSessions`, #992 stage 6). It has `SessionStore`'s methods, and each call runs on the store
+  that holds the rows, held for that call only:
+  - `m.db.sessions` routes by session id, and still refuses a write about an erased App session. It runs
+    SessionStores' own overrides, such as the index upkeep and the multi-store lists, and sends every other
+    method to Web's store. The main store holds no sessions once they have moved there.
+  - `for_app(app_id).sessions` runs the index-keeping writes (`insert_session`, `update_session`,
+    `delete_session` and `insert_approval`) through SessionStores, so the index stays current.
+  - `for_app(app_id).sessions` runs on that App's store. Call an App's end users, idempotency keys and namespace
+    audit there, since they take no session id. `m.db.sessions` refuses them, because it can't tell whose rows they
+    are.
+  - `scope(app_id).sessions` narrows lists, searches and id lookups to what that App, or the owner for `""`, may see.
+
+  `core_store("sessions")` still refuses, so a wrapper without its own proxy fails instead of misrouting. A Web route
+  (`for_app("")`, `for_app(WEB_APP_ID)`, or `for_session` of an owner or member session) returns Web's Database
+  itself, so its `sessions` is Web's own store: the one that holds those sessions. Events and search, checkpoints,
+  artifacts, review comments, secret dismissals, approvals and smart reviews, and the session rows, lists and counts
+  (`get_session`, `update_session`, `list_sessions`, `count_sessions` and the rest) are called only through a
+  `sessions` store or proxy: `Database` forwards no session method. A wrapper asked for a `SessionStore` method
+  itself (`m.db.get_session`, `for_app(app_id).insert_session`, `scope(app_id).list_sessions`) raises, pointing at
+  its `sessions` proxy. SessionStores' own overrides (`m.db.list_sessions`) are real methods the proxy runs, so
+  they still answer; a scan fails on any call to a `SessionStore` method that isn't made on a `sessions` store or
+  proxy. Every route, and
+  every Database that `SessionStores` opens, hands out the main store's `credentials`, `accounts`, `apps` and
+  `usage`. `app_stores._STORE_HOME` records where each store's rows live, and a new store must add itself there.
+- **Key listings.** `SessionStores.listed_api_keys()`, `listed_api_key(kid)` and `restore_listed_api_key(kid)` are
+  the key list as Settings and the Hub show it: `CredentialStore`'s rows with each key's request count and, for an
+  App, its store's metadata, which only SessionStores can read. Call them on `m.db`. Their names differ from the
+  store's (`list_api_keys`, `get_api_key_listing`, `restore_api_key`), so a credential name is only ever the store's.
 
 ## What stage (b) leaves in the core
 
@@ -236,14 +359,15 @@ These are names, not imports, and move with the config and storage split in stag
   effect when a present module answers to them.
 - `db.py` and its frozen baseline migrations retain the historical `images` table and columns, so existing
   databases and backups keep their schema even while the add-on is absent. Live image queries moved to
-  `harness_modules/images/store.py`: `ImageStore(db)` uses the core's writer queue, transactions and pooled readers.
-  Database image methods are now methods of that store. The module's service and archive wrap the shared database.
+  `harness_modules/images/store.py`: `ImageStore(db)` is a [module store](#module-stores). Database image methods
+  are now methods of that store. The module's service and archive wrap the shared database.
 - Images owns its member access rules through `Module.member_forbidden`, the `generate_image` mutation name
   through `ToolGate.mutating`, and the ComfyUI holder through `ModuleRuntime.gpu_holders`. Resources aggregates
   holders, and endpoint aggregates `features()`, without naming images. An absent package contributes none of them;
   a present disabled package still refuses member access and reports false image features.
-- Endpoint: `EndpointConfig`, the `endpoint:` YAML section and profile switch, the shared `InferenceGate`,
-  `endpoint_requests` table and database accounting methods remain core names. `/keys`, its admin API and CLI
+- Endpoint: `EndpointConfig`, the `endpoint:` YAML section and profile switch, the shared `InferenceGate` and the
+  `endpoint_requests` table's schema remain core names. The module's `EndpointRequestStore` writes the request log and
+  counts each key's requests for the `/keys` listing (#992); while the module is absent that count is 0. `/keys`, its admin API and CLI
   stay in core because Apps and owner credentials need them without inference. All URLs, auth, response shapes,
   configuration keys and CLI commands are unchanged; no deprecation is needed. The add-on owns the `/v1` inference
   and discovery routes, embeddings proxy, request logging, `endpoint.*` settings, queue initialization and
@@ -271,8 +395,8 @@ These are names, not imports, and move with the config and storage split in stag
   `python -m harness.backup_restore`). While the module is absent no scheduled backup runs and `backup.enabled` has
   no effect; pre-migration snapshots still happen. The image archive joins the backup through
   `ModuleRuntime.backup` as before.
-- Skills: the `skills:` YAML section (`SkillsConfig`), the `skills` profile switch, the skill tables and frozen
-  session records in `db.py` / migrations, discovery of the reviewer key path, and `access.py`'s `/skills` rule
+- Skills: the `skills:` YAML section (`SkillsConfig`), the `skills` profile switch, the skill tables' schema and frozen
+  session records in `db.py` / migrations (their queries are the module's `SkillRecordStore`, #992), discovery of the reviewer key path, and `access.py`'s `/skills` rule
   remain core names. All configuration keys and `harness skills ...` commands are unchanged; no deprecation is
   needed. The module owns the store, standalone sandbox validator, advisory reviewer and GPU-idle check,
   owner/admin routes, CLI rows, `skills.enabled`, skill metrics, and instruction injection. The manager reads
@@ -282,11 +406,11 @@ These are names, not imports, and move with the config and storage split in stag
   Import paths moved from `harness.skills`, `harness.skill_review`, and `harness.skill_validate` to
   `harness_modules.skills.service`, `harness_modules.skills.skill_review`, and `harness_modules.skills.skill_validate`.
 
-- Jobs: `JobsConfig`, the `jobs:` YAML section and profile switch, the jobs/templates tables and database
-  methods, scheduled-session fields, and the `/jobs` and `/templates` access rules remain core names.
+- Jobs: `JobsConfig`, the `jobs:` YAML section and profile switch, the jobs/templates tables' schema (their queries
+  are the module's `JobStore`, #992), `SessionStore.job_sessions`, scheduled-session fields, and the `/jobs` and `/templates` access rules remain core names.
   `harness/job_results.py` is the shared STATUS and notification-summary protocol: the runner still records
   results for existing scheduled sessions even when the jobs package is absent, and notifications does not
-  import the jobs add-on. Scheduling, owner/admin routes, settings and CLI rows live in `harness_modules/jobs`.
+  import the jobs add-on: it reads a run's job through `ModuleHost.scheduled_job`. Scheduling, owner/admin routes, settings and CLI rows live in `harness_modules/jobs`.
   The service import moves from `harness.jobs` to `harness_modules.jobs.service`. YAML keys, registry keys,
   API paths and `harness jobs ...` / `harness templates ...` commands are unchanged; no deprecation is needed.
   An absent/uninstalled package contributes no routes, settings or capabilities. A present package with

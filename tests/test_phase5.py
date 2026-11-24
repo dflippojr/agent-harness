@@ -478,7 +478,7 @@ def test_session_pauses_before_next_turn_and_continues(tmp_path):
         assert m.guard.state == PAUSED
         assert control.stops == 1
         assert events(m, sid, "gpu_paused")[0]["reason"] == "Hades.exe"
-        note = next(m.notifier.build(e) for e in m.db.events(sid) if e["type"] == "gpu_paused")
+        note = next(m.notifier.build(e) for e in m.db.sessions.events(sid) if e["type"] == "gpu_paused")
         assert note["title"].startswith("Paused for the GPU")
         assert "Actions → Resources" in note["message"]
         assert "Settings" not in note["message"]
@@ -487,7 +487,7 @@ def test_session_pauses_before_next_turn_and_continues(tmp_path):
         await m.send(sid, "again")
         await wait_status(m, sid, "queued")
         await asyncio.sleep(0.1)
-        assert m.db.get_session(sid)["status"] == "queued"
+        assert m.db.sessions.get_session(sid)["status"] == "queued"
         detect.signals = []
         await m.guard.check()
         await m.guard.check()
@@ -590,6 +590,6 @@ def test_memory_tools_reach_sessions_and_rebuild_asks(tmp_path):
         result = events(m, s["id"], "tool_result")[0]
         assert result["ok"]
         assert "Helix" in result["output"]
-        assert "memory_index" in m.db.get_session(s["id"])["context"][0]["content"]
+        assert "memory_index" in m.db.sessions.get_session(s["id"])["context"][0]["content"]
         await m.stop()
     asyncio.run(body())

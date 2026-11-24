@@ -125,7 +125,7 @@ def test_split_shell_and_file_calls_need_a_grant_and_run_on_the_sandbox(tmp_path
         assert set(SPLIT_TOOLS) <= {t["function"]["name"] for t in m.runner.mcp_tool_schemas(sid)}
         box = RecordingSandbox()
         m.runner.sandbox = lambda s: box
-        s, cli = m.db.get_session(sid), FakeCli()
+        s, cli = m.db.sessions.get_session(sid), FakeCli()
         run = {"command": "echo hello"}
         denied = await m.runner.mcp_call(sid, "run_shell", run, "toolu-1")  # no grant: refused, nothing runs
         assert denied[1] is False and "not allowed" in denied[0] and box.commands == []
@@ -138,7 +138,7 @@ def test_split_shell_and_file_calls_need_a_grant_and_run_on_the_sandbox(tmp_path
         await m.runner._ask_cli_policy(s, cli, "r2", {}, "mcp__harness__write_file", write, "toolu-2")
         assert (await m.runner.mcp_call(sid, "write_file", write, "toolu-2"))[1] is True
         assert (m.runner.split_workspace(s).root / "a.txt").read_text() == "hi"
-        assert m.db.get_session(sid)["run"]["files_touched"] == ["a.txt"]
+        assert m.db.sessions.get_session(sid)["run"]["files_touched"] == ["a.txt"]
         bad = {"command": "ls", "bogus": 1}
         await m.runner._ask_cli_policy(s, cli, "r3", {}, "mcp__harness__run_shell", bad, "toolu-3")
         text, ok = await m.runner.mcp_call(sid, "run_shell", bad, "toolu-3")
@@ -167,7 +167,7 @@ def test_split_session_without_mcp_refuses_instead_of_falling_back(tmp_path):
         sid = m.create("x", backend="claude")["id"]
         await wait_status(m, sid, "failed")
         await asyncio.gather(*m.tasks.values())
-        assert not made and m.db.get_session(sid)["run"]["failure"]["code"] == "split_unavailable"
+        assert not made and m.db.sessions.get_session(sid)["run"]["failure"]["code"] == "split_unavailable"
         m.runner.mcp_tool_schemas = real
         await m.stop()
     asyncio.run(body())

@@ -11,6 +11,8 @@ per-App usage and error counters, provider credentials, settings, jobs, skills, 
 ...)`, ...) runs on that session's store; anything else runs on the main store. A transaction (`write`/`awrite`) that
 touches a session must run on that session's writer: `db.for_session(sid).write(fn)`, or `db.for_app(app_id)` for a
 session not created yet. An App store opens on first use and closes after `APP_STORE_IDLE_SECONDS` without one.
+`db.sessions` (on `SessionStores`, `for_app(app_id)` and `scope(app_id)`) is the one per-session routing proxy
+(`_RoutedSessions`, #992 stage 6): `SessionStore`'s methods, each routed the same way.
 
 The owner and members never read another App's store (#330 decision 3): their lists, searches and id lookups cover
 Web's store only, and an App's cover its own (`db.scope(app_id)`), plus Web's for an owner-granted `sessions:all` read.
@@ -39,9 +41,10 @@ import time
 import weakref
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .db import Database, merge_newest_first
+from .session_store import SessionStore
 from .fileops import remove_tree
 from .sqlite_backup import backup_sqlite
 
@@ -56,19 +59,21 @@ _APP_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 # events; `usage` (metadata) and `stream_tickets` (auth) stay in the main store.
 SESSION_TABLES = ("events", "artifacts", "approvals", "app_tool_calls", "smart_reviews", "review_comments",
                   "secret_dismissals", "checkpoints", "namespace_audit")
-# Database methods whose first argument is a session id: they run on that session's store.
+# Session methods whose first argument is a session id: they run on that session's store.
 _BY_SESSION = frozenset({
     "get_session", "get_session_for_user", "session_brief", "add_checkpoint", "checkpoints",
     "show_checkpoints_through", "delete_checkpoints", "put_artifact", "read_artifact", "full_artifact",
     "add_review_comment", "list_review_comments", "add_secret_dismissal", "secret_dismissals",
-    "delete_review_comments", "insert_event", "events", "pushed_heads", "last_event_seq", "session_card_bits",
-    "approval_for_call", "approvals", "insert_app_tool_call", "get_app_tool_call", "app_tool_calls", "finish_app_tool_call",
+    "delete_review_comments", "insert_event", "events", "has_tool_result", "pushed_heads", "last_event_seq",
+    "session_card_bits", "approval_for_call", "approvals", "insert_app_tool_call", "get_app_tool_call",
+    "app_tool_calls", "finish_app_tool_call", "patch_run", "unset_run",
 })
 # The by-session calls above that write. An erased App session's id leaves the index, so they would land in the main
 # store (the owner's): they are refused for it instead.
 _SESSION_WRITES = frozenset({
-    "add_checkpoint", "delete_checkpoints", "put_artifact", "add_review_comment", "add_secret_dismissal",
-    "delete_review_comments", "insert_event", "insert_app_tool_call", "finish_app_tool_call",
+    "add_checkpoint", "show_checkpoints_through", "delete_checkpoints", "put_artifact", "add_review_comment",
+    "add_secret_dismissal", "delete_review_comments", "insert_event", "insert_app_tool_call", "finish_app_tool_call",
+    "patch_run", "unset_run",
 })
 # Session columns the in-memory index of App sessions mirrors.
 _INDEXED = ("app_id", "owner_id", "kind", "status")
@@ -87,9 +92,23 @@ WEB_APP_ID = "app-web"
 # sessions and serves them, as before #330 stage c).
 WEB_MIGRATION_ENV = "HARNESS_WEB_STORE_MIGRATION"
 WEB_STORE_META = "web_store"  # main-store meta: when the sessions moved into Web's store, how many, and the backup
-# Main-store methods that read sessions or their rows without taking a session id: they run on Web's store.
-_ON_WEB = frozenset({"group_sessions", "snippet_events", "smart_review_stats", "smart_reviews", "job_sessions",
-                     "session_activity"})
+# Where each core store's rows live behind SessionStores (#992): "main" (the main store's, as the App registry's), or
+# None when its rows are routed per session. A wrapper hands out a "main" store's object as the main store's. For a
+# routed one it hands out its own routing proxy (`sessions`, `_RoutedSessions`) and never one Database's store.
+# tests/test_database_shim.py checks that it names every store in `db.CORE_STORES`.
+_STORE_HOME: dict[str, str | None] = {"credentials": "main", "sessions": None, "accounts": "main", "apps": "main",
+                                     "usage": "main"}
+# SessionStores' own session methods that keep its index current (sessions and approvals): an App's route runs these
+# rather than its store's.
+_INDEXING = frozenset({"insert_session", "update_session", "delete_session", "insert_approval"})
+# SessionStore's own methods: what a routing proxy (`<wrapper>.sessions`) hands out.
+_SESSION_METHODS = frozenset(n for n, v in vars(SessionStore).items() if callable(v) and not n.startswith("_"))
+# SessionStore methods about one App's own rows that take no session id (#992 stage 6): its end users, idempotency keys
+# and namespace audit. They run on an App's route (`for_app(app_id).sessions`); `SessionStores.sessions` refuses them,
+# since it cannot tell whose rows they are.
+_APP_ROWS = frozenset({"register_end_user", "end_users", "forget_end_user", "insert_idempotency_key",
+                       "drop_expired_idempotency_keys", "find_idempotency_key", "insert_namespace_audit",
+                       "prune_namespace_audit", "namespace_audit_page"})
 
 
 class WebStoreMismatch(RuntimeError):
@@ -148,8 +167,19 @@ def _kind(name: str) -> str | None:
     return getattr(getattr(Database, name, None), "db_kind", None)
 
 
+def _session_kind(name: str) -> str | None:
+    return getattr(getattr(SessionStore, name, None), "db_kind", None)
+
+
+def _refuse_session_name(name: str) -> None:
+    """A `SessionStore` method asked of a wrapper itself rather than of its `sessions` proxy: refused, so a call left
+    over from the removed forwarding shim (#992 stage 6) fails rather than taking an older route."""
+    if name in _SESSION_METHODS:
+        raise AttributeError(f"{name} is a SessionStore method: call it on this wrapper's `sessions` routing proxy")
+
+
 def _like(prefix: str) -> re.Pattern:
-    """`Database.find_session_ids`'s case-insensitive literal prefix match as a regex (#785)."""
+    """`SessionStore.find_session_ids`'s case-insensitive literal prefix match as a regex (#785)."""
     return re.compile(re.escape(prefix) + ".*", re.IGNORECASE | re.DOTALL)
 
 
@@ -161,17 +191,44 @@ class _OpenStore:
 
 
 class _ThreadAio:
-    """`await store.aio.<method>(...)`: the method in a worker thread, off the event loop."""
+    """`await store.aio.<method>(...)`: the method in a worker thread, off the event loop. A wrapper's own `aio`
+    (`refuse_sessions`) refuses a `SessionStore` method as the wrapper does, even one SessionStores defines itself:
+    those run through `<wrapper>.sessions.aio`."""
 
-    def __init__(self, target):
-        self._target = target
+    def __init__(self, target, refuse_sessions: bool = False):
+        self._target, self._refuse_sessions = target, refuse_sessions
 
     def __getattr__(self, name: str):
+        if self._refuse_sessions:
+            _refuse_session_name(name)
         method = getattr(self._target, name)
 
         async def call(*args, **kwargs):
             return await asyncio.to_thread(method, *args, **kwargs)
         return call
+
+
+class _RoutedSessions:
+    """`<wrapper>.sessions` behind `SessionStores`: the one per-session routing proxy (#992 stage 6, decision 1). It
+    has `SessionStore`'s methods, and its wrapper routes each call to the store that holds the rows, held for that call
+    only (never a method bound to one Database's store, which could outlive the hold):
+
+    - `SessionStores.sessions` by session id (a write about an erased App session refused), SessionStores' own
+      overrides, and Web's store otherwise; an App's own rows (`_APP_ROWS`) refused.
+    - `for_app(app_id).sessions` (and `for_session(sid).sessions` for an App session) on that App's store.
+    - `scope(app_id).sessions` as `SessionStores.sessions`, with lists, searches and id lookups narrowed to what that
+      App (or, for "", the owner) may see.
+
+    A Web route is Web's own Database, whose `sessions` is its store."""
+
+    def __init__(self, route: Callable[[str], Callable[..., Any]]):
+        self._route = route
+        self.aio = _ThreadAio(self)
+
+    def __getattr__(self, name: str) -> Any:
+        if name not in _SESSION_METHODS:
+            raise AttributeError(f"SessionStore has no method {name!r}")
+        return self._route(name)
 
 
 class _AppStore:
@@ -180,7 +237,19 @@ class _AppStore:
 
     def __init__(self, stores: SessionStores, app_id: str):
         self._stores, self.app_id = stores, app_id
-        self.aio = _ThreadAio(self)
+        self.aio = _ThreadAio(self)  # its own __getattr__ refuses a session method
+        self.sessions = _RoutedSessions(self._session_route)
+
+    def _session_route(self, name: str) -> Callable[..., Any]:
+        stores, app_id = self._stores, self.app_id
+        if name in _INDEXING:
+            return getattr(stores, name)
+        write = _session_kind(name) == "write"
+
+        def call(*args, **kwargs):
+            with stores._using(app_id, write=write) as db:
+                return getattr(db.sessions, name)(*args, **kwargs)
+        return call
 
     def for_session(self, sid: str):
         return self._stores.for_session(sid)
@@ -192,8 +261,9 @@ class _AppStore:
         if name.startswith("__"):
             raise AttributeError(name)
         stores, app_id = self._stores, self.app_id
-        if name in ("insert_session", "update_session", "delete_session"):  # they keep the index current
-            return getattr(stores, name)
+        if name in _STORE_HOME:  # never the App's own copy of a core store, nor one held past its release
+            return stores.core_store(name)
+        _refuse_session_name(name)
         if name in ("awrite", "aread"):
             async def call_async(*args, **kwargs):
                 db = await stores._aacquire(app_id)
@@ -214,17 +284,23 @@ class _AppStore:
 
 
 class _Scoped:
-    """`SessionStores.scope(app_id)`: lists, searches and id lookups as one App (or, for "", the owner) may see
-    them; everything else as `SessionStores`."""
+    """`SessionStores.scope(app_id)`: through its `sessions` proxy, lists, searches and id lookups as one App (or, for
+    "", the owner) may see them; everything else as `SessionStores`. A session method asked of it directly is
+    refused."""
 
     def __init__(self, stores: SessionStores, app_id: str):
         self._stores, self.app_id = stores, app_id
+        self.sessions = _RoutedSessions(self._session_route)
+
+    def _session_route(self, name: str) -> Callable[..., Any]:
+        method = self._stores._session_route(name)
+        return functools.partial(method, with_app=self.app_id) if name in _SCOPED else method
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("__"):
             raise AttributeError(name)
-        method = getattr(self._stores, name)
-        return functools.partial(method, with_app=self.app_id) if name in _SCOPED else method
+        _refuse_session_name(name)
+        return getattr(self._stores, name)
 
 
 def scoped(db, app_id: str):
@@ -261,7 +337,7 @@ class SessionStores:
     App's, so nothing the owner or a member asks for reads an App store (#330 decision 3). `find_session_ids` reads
     only the index for App sessions; it reaches every App unless `with_app` narrows it, since the daemon resolves its
     own full ids with it. The daemon's sweeps (sessions_with_status, sessions_with_run_flag, count_sessions) cover
-    every store. Group, job and chat lists, the metrics and the smart-review stats read Web's store only (`_ON_WEB`):
+    every store. Group, job and chat lists, the metrics and the smart-review stats read Web's store only:
     App sessions are counted in `app_metadata` instead, and in total by status from the index (`app_session_counts`).
     """
 
@@ -269,7 +345,8 @@ class SessionStores:
         self.main = main
         self.apps_dir = Path(apps_dir)
         self.idle_seconds = idle_seconds
-        self.aio = _ThreadAio(self)
+        self.aio = _ThreadAio(self, refuse_sessions=True)
+        self.sessions = _RoutedSessions(self._session_route)
         self._lock = threading.RLock()
         self._open: dict[str, _OpenStore] = {}
         self._proxies: dict[str, _AppStore] = {}
@@ -282,12 +359,25 @@ class SessionStores:
         self._stop = threading.Event()
         self._reaper: threading.Thread | None = None
         self.web: Database = main  # until the sessions are in Web's store (`migrate_web_store`)
+        # {key id: logged requests} for the key listing; the Manager installs its module host's (#992).
+        self.key_request_counts: Callable[[list[str]], dict[str, int]] = lambda key_ids: {}
         self.migrate_app_sessions()
         self.web = self.migrate_web_store()
         self._load_index()
         self.migrate_app_files()
 
     # stores -----------------------------------------------------------------------------------------------------------
+    def _open_store(self, app_id: str) -> Database:
+        """Open App `app_id`'s store (or Web's). Its main-store core stores (`_STORE_HOME`: credentials, accounts,
+        apps, usage) are the main store's (#992): the App registry, its per-App records, the usage log and the
+        household live there, so no route to this Database (`for_app`, `for_session` or a raw `db.<store>`) reaches
+        its own empty copy."""
+        db = Database(self.store_path(app_id))
+        for name, home in _STORE_HOME.items():
+            if home == "main":
+                setattr(db, name, getattr(self.main, name))
+        return db
+
     def store_path(self, app_id: str) -> Path:
         if not _APP_ID.fullmatch(app_id or ""):
             raise ValueError(f"not an App id: {app_id!r}")
@@ -305,7 +395,7 @@ class SessionStores:
                 raise sqlite3.ProgrammingError(f"App {app_id}'s store was erased")
             entry = self._open.get(app_id)
             if entry is None:
-                entry = self._open[app_id] = _OpenStore(Database(self.store_path(app_id)))
+                entry = self._open[app_id] = _OpenStore(self._open_store(app_id))
                 self._start_reaper()
             entry.users += 1
             entry.last_used = time.monotonic()
@@ -341,8 +431,9 @@ class SessionStores:
             self._release(app_id)
 
     def _call(self, app_id: str, name: str, /, *args, **kwargs):
-        with self._using(app_id, write=_kind(name) == "write") as db:
-            return getattr(db, name)(*args, **kwargs)
+        """SessionStore method `name` on App `app_id`'s store, held for the call (as a write for a writing one)."""
+        with self._using(app_id, write=_session_kind(name) == "write") as db:
+            return getattr(db.sessions, name)(*args, **kwargs)
 
     def _writer_here(self) -> Database | None:
         """The store whose writer thread this is, if any."""
@@ -411,16 +502,39 @@ class SessionStores:
             entry = self._sessions.get(sid)
         return entry["app_id"] if entry else ""
 
-    def __getattr__(self, name: str) -> Any:
-        if name.startswith("__"):
-            raise AttributeError(name)
+    def core_store(self, name: str):
+        """Core store `name` as every wrapper hands it out: the main store's. A store whose rows are routed per session
+        is refused here (the main store's `sessions` would miss every App's and, after the move, Web's): each wrapper
+        defines its own routing proxy for it (`sessions`), so a wrapper that lacks one fails instead of misrouting."""
+        if _STORE_HOME[name] is None:
+            raise AttributeError(f"SessionStores routes each session to its own store: use this wrapper's own "
+                                 f"`{name}` routing proxy, or for_session(sid) or for_app(app_id), not a `{name}` "
+                                 "store")
+        return getattr(self.main, name)
+
+    def _session_route(self, name: str) -> Callable[..., Any]:
+        """SessionStore method `name` as `self.sessions` runs it: SessionStores' own (they keep the index current, or
+        read several stores), by session id, or on Web's store, which holds every session not routed to an App (the
+        main store holds none once they have moved there)."""
+        if name in _OWN_SESSION_METHODS:
+            return getattr(self, name)
         if name in _BY_SESSION:
             def by_session(sid, *args, **kwargs):
                 if name in _SESSION_WRITES:
                     self._refuse_erased(sid)
-                return getattr(self.for_session(sid), name)(sid, *args, **kwargs)
+                return getattr(self.for_session(sid).sessions, name)(sid, *args, **kwargs)
             return by_session
-        return getattr(self.web if name in _ON_WEB else self.main, name)
+        if name in _APP_ROWS:
+            raise AttributeError(f"{name} reads or writes one App's own rows: call it on for_app(app_id).sessions")
+        return getattr(self.web.sessions, name)
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__"):
+            raise AttributeError(name)
+        if name in _STORE_HOME:
+            return self.core_store(name)
+        _refuse_session_name(name)
+        return getattr(self.main, name)
 
     def _refuse_erased(self, sid: str) -> None:
         """Refuse a write about an erased App session: nothing of it may be written again, least of all into the
@@ -466,16 +580,16 @@ class SessionStores:
             if app_id and not taken:  # routes the id from here on, counts once committed
                 self._sessions[sid] = {k: s.get(k) or "" for k in _INDEXED} | {"app_id": app_id, "seq": 0,
                                                                                 "committed": False}
-        if taken or (app_id and self.web.get_session(sid) is not None):
+        if taken or (app_id and self.web.sessions.get_session(sid) is not None):
             if app_id and not taken:
                 self._forget(sid)
             raise sqlite3.IntegrityError(f"session id {sid} is already in use")
         if not app_id:
-            return self.web.insert_session(s)
+            return self.web.sessions.insert_session(s)
 
         def insert(db: Database) -> None:
             db.after_rollback(lambda: self._forget(sid))
-            db.insert_session(s)
+            db.sessions.insert_session(s)
             self._stage(db, sid)
         try:
             with self._using(app_id, write=True) as db:
@@ -488,10 +602,10 @@ class SessionStores:
         self._refuse_erased(sid)
         app_id = self.app_of(sid)
         if not app_id:
-            return self.web.update_session(sid, **fields)
+            return self.web.sessions.update_session(sid, **fields)
 
         def update(db: Database) -> None:
-            db.update_session(sid, **fields)
+            db.sessions.update_session(sid, **fields)
             if any(k in fields for k in _INDEXED):
                 self._stage(db, sid)
             if fields.get("status") == "failed":
@@ -522,8 +636,9 @@ class SessionStores:
         for _, e in self._indexed(lambda e: e["app_id"] == app_id):
             sessions[e["status"]] = sessions.get(e["status"], 0) + 1
         error = json.loads(self.main.get_meta(_APP_ERROR + app_id) or "{}")
-        return {"sessions": sessions, "usage": self.main.app_usage(app_id), "errors": int(error.get("errors") or 0),
-                "last_error": error.get("last_error") or "", "last_error_at": error.get("last_error_at")}
+        return {"sessions": sessions, "usage": self.main.usage.app_usage(app_id),
+                "errors": int(error.get("errors") or 0), "last_error": error.get("last_error") or "",
+                "last_error_at": error.get("last_error_at")}
 
     def app_session_counts(self) -> dict[str, int]:
         """Every App's sessions counted by status, from the index: totals only, with no App named, and nothing read
@@ -533,14 +648,30 @@ class SessionStores:
             counts[e["status"]] = counts.get(e["status"], 0) + 1
         return counts
 
-    def list_api_keys(self) -> list[dict]:
-        """The key list (Settings → Apps), each App's and device's with its store's metadata."""
-        return [self._with_store(k) for k in self.main.list_api_keys()]
+    def listed_api_keys(self) -> list[dict]:
+        """The key list (Settings → Apps), each App's and device's with its request count and its store's metadata:
+        `CredentialStore.list_api_keys` with what only SessionStores can add."""
+        return [self._with_store(k) for k in self._with_requests(self.main.credentials.list_api_keys())]
 
-    def get_api_key_listing(self, kid: str) -> dict | None:
-        """Key `kid` as `list_api_keys` lists it, read alone (#669)."""
-        key = self.main.get_api_key_listing(kid)
-        return self._with_store(key) if key else None
+    def listed_api_key(self, kid: str) -> dict | None:
+        """Key `kid` as `listed_api_keys` lists it, read alone (#669)."""
+        key = self.main.credentials.get_api_key_listing(kid)
+        return self._with_store(self._with_requests([key])[0]) if key else None
+
+    def restore_listed_api_key(self, kid: str) -> tuple[dict, str] | None:
+        """`CredentialStore.restore_api_key`, its row with the request count (and, as always, no store metadata)."""
+        restored = self.main.credentials.restore_api_key(kid)
+        if restored is None:
+            return None
+        row, key = restored
+        return (self._with_requests([row])[0] if row else row), key
+
+    def _with_requests(self, rows: list[dict]) -> list[dict]:
+        """Each listed key's `requests`: its logged requests, from the module that logs them (0 when none does)."""
+        counts = self.key_request_counts([k["id"] for k in rows])
+        for k in rows:
+            k["requests"] = counts.get(k["id"], 0)
+        return rows
 
     def _with_store(self, k: dict) -> dict:
         if k.get("kind") not in ("owner", "web") and not k.get("erased_at"):
@@ -550,11 +681,11 @@ class SessionStores:
     def delete_session(self, sid: str) -> None:
         app_id = self.app_of(sid)
         if not app_id:
-            return self.web.delete_session(sid)
+            return self.web.sessions.delete_session(sid)
 
         def delete(db: Database) -> None:
             approvals = db.conn.execute("SELECT id, token FROM approvals WHERE session_id = ?", (sid,)).fetchall()
-            db.delete_session(sid)
+            db.sessions.delete_session(sid)
 
             def forget() -> None:
                 self._forget(sid, committed=True)
@@ -600,7 +731,7 @@ class SessionStores:
     def _stage(self, db: Database, sid: str) -> None:
         """In `db`'s transaction: once it commits, the index holds the session's row as this transaction left it.
         A transaction that ran later wins, whichever of their callbacks runs first."""
-        row, seq = db.get_session(sid) or {}, next(_SEQ)
+        row, seq = db.sessions.get_session(sid) or {}, next(_SEQ)
 
         def apply() -> None:
             with self._lock:
@@ -621,7 +752,7 @@ class SessionStores:
 
     def find_session_ids(self, prefix: str, user_id: str | None = None, app_id: str | None = None,
                          kind: str | None = None, with_app: str | None = EVERY_APP) -> list[str]:
-        ids = self.web.find_session_ids(prefix, user_id=user_id, kind=kind) if self._reads_web(app_id) else []
+        ids = self.web.sessions.find_session_ids(prefix, user_id=user_id, kind=kind) if self._reads_web(app_id) else []
         apps = set(self._reach(app_id, with_app))
         like = _like(prefix)
         return ids + [sid for sid, _ in self._indexed(
@@ -630,7 +761,7 @@ class SessionStores:
             if like.fullmatch(sid)]
 
     def sessions_with_status(self, *statuses: str, user_id: str | None = None) -> list[dict]:
-        rows = self.web.sessions_with_status(*statuses, user_id=user_id)
+        rows = self.web.sessions.sessions_with_status(*statuses, user_id=user_id)
         apps = self._apps(lambda e: e["status"] in statuses and (user_id is None or e["owner_id"] == user_id))
         if not apps:
             return rows
@@ -639,7 +770,7 @@ class SessionStores:
         return sorted(rows, key=lambda r: r["updated_at"])
 
     def sessions_with_run_flag(self, flag: str) -> list[dict]:
-        rows = self.web.sessions_with_run_flag(flag)
+        rows = self.web.sessions.sessions_with_run_flag(flag)
         apps = self._apps()
         if not apps:
             return rows
@@ -647,11 +778,17 @@ class SessionStores:
             rows += self._call(app_id, "sessions_with_run_flag", flag)
         return sorted(rows, key=lambda r: r["updated_at"])
 
-    def count_sessions(self, user_id: str, *statuses: str) -> int:
-        return self.web.count_sessions(user_id, *statuses) + len(
+    def count_sessions(self, user_id: str, *statuses: str, holding: bool = False) -> int:
+        """From the index for App sessions; `holding` (the sessions that hold a place) needs their rows, so it counts
+        as `count_stored_sessions` does."""
+        if holding:
+            return self.count_stored_sessions(user_id, *statuses, holding=True)
+        return self.web.sessions.count_sessions(user_id, *statuses) + len(
             self._indexed(lambda e: e["owner_id"] == user_id and e["status"] in statuses))
 
-    def count_app_sessions(self, app_id: str, *statuses: str) -> int:
+    def count_app_sessions(self, app_id: str, *statuses: str, holding: bool = False) -> int:
+        if holding:
+            return self.count_stored_app_sessions(app_id, *statuses, holding=True)
         return len(self._indexed(lambda e: e["app_id"] == app_id and e["status"] in statuses))
 
     def count_stored_sessions(self, user_id: str, *statuses: str, holding: bool = False) -> int:
@@ -659,7 +796,7 @@ class SessionStores:
         only once its callbacks run: what admission caps count (#524). Inside a write, its store's own rows."""
         apps = self._stores_with(lambda e: e["owner_id"] == user_id and (e["status"] in statuses
                                                                             or e["status"] not in _ENDED))
-        return self.web.count_sessions(user_id, *statuses, holding=holding) + sum(
+        return self.web.sessions.count_sessions(user_id, *statuses, holding=holding) + sum(
             self._call(app_id, "count_sessions", user_id, *statuses, holding=holding) for app_id in apps)
 
     def count_stored_app_sessions(self, app_id: str, *statuses: str, holding: bool = False) -> int:
@@ -683,20 +820,20 @@ class SessionStores:
                      with_app: str | None = None, *, before: tuple[float, str] | None = None,
                      target: str | None = None,
                      include_active: bool = False) -> tuple[list[dict], tuple[float, str] | None]:
-        """`Database.session_page` across Web's store and the App stores the scope reaches: one page of the newest
+        """`SessionStore.session_page` across Web's store and the App stores the scope reaches: one page of the newest
         rows of them all, and the active ones of each (#663)."""
         apps = self._reach(None, with_app, lambda e: e["kind"] == kind
                            and (owner_id is None or e["owner_id"] == owner_id))
         if not apps:
-            return self.web.session_page(limit, owner_id, kind, before=before, target=target,
+            return self.web.sessions.session_page(limit, owner_id, kind, before=before, target=target,
                                          include_active=include_active)
         pages, active, more = [], [], False
         for store in (self.web, *(self.for_app(a) for a in apps)):
-            rows, cursor = store.session_page(limit, owner_id, kind, before=before, target=target)
+            rows, cursor = store.sessions.session_page(limit, owner_id, kind, before=before, target=target)
             pages += rows
             more = more or cursor is not None
             if include_active:
-                active += store.active_sessions(owner_id, kind, target)
+                active += store.sessions.active_sessions(owner_id, kind, target)
         merged = merge_newest_first(pages)
         page = merged[:limit]
         more = more or len(merged) > limit
@@ -706,7 +843,7 @@ class SessionStores:
     def search_events(self, fts_query: str, exclude: str = "", max_rows: int = 600, user_id: str | None = None,
                       app_id: str | None = None, session_kind: str | None = "agent",
                       with_app: str | None = None) -> list[dict]:
-        rows = self.web.search_events(fts_query, exclude, max_rows, user_id=user_id,
+        rows = self.web.sessions.search_events(fts_query, exclude, max_rows, user_id=user_id,
                                       session_kind=session_kind) if self._reads_web(app_id) else []
         apps = self._reach(app_id, with_app, lambda e: (app_id is None or e["app_id"] == app_id)
                            and (user_id is None or e["owner_id"] == user_id)
@@ -723,10 +860,10 @@ class SessionStores:
         self._refuse_erased(a["session_id"])
         app_id = self.app_of(a["session_id"])
         if not app_id:
-            return self.web.insert_approval(a)
+            return self.web.sessions.insert_approval(a)
         def insert(db: Database) -> None:
-            db.insert_approval(a)
-            token = (db.get_approval(a["id"]) or {}).get("token")
+            db.sessions.insert_approval(a)
+            token = (db.sessions.get_approval(a["id"]) or {}).get("token")
             with self._lock:  # routes from here on, like a new session's id; dropped if the insert rolls back
                 self._approvals[a["id"]] = app_id
                 if token:
@@ -741,29 +878,29 @@ class SessionStores:
             self._tokens.pop(token, None)
 
     def insert_smart_review(self, rid: str, sid: str, approval_id: str, record: dict) -> None:
-        return self.for_session(sid).insert_smart_review(rid, sid, approval_id, record)
+        return self.for_session(sid).sessions.insert_smart_review(rid, sid, approval_id, record)
 
     def get_approval(self, aid: str) -> dict | None:
         with self._lock:
             app_id = self._approvals.get(aid)
-        return self._call(app_id, "get_approval", aid) if app_id else self.web.get_approval(aid)
+        return self._call(app_id, "get_approval", aid) if app_id else self.web.sessions.get_approval(aid)
 
     def approval_by_token(self, token: str) -> dict | None:
         with self._lock:
             app_id = self._tokens.get(token) if token else None
-        return self._call(app_id, "approval_by_token", token) if app_id else self.web.approval_by_token(token)
+        return self._call(app_id, "approval_by_token", token) if app_id else self.web.sessions.approval_by_token(token)
 
     def decide_approval(self, aid: str, status: str, note: str = "") -> bool:
         with self._lock:
             app_id = self._approvals.get(aid)
         return self._call(app_id, "decide_approval", aid, status, note) if app_id else \
-            self.web.decide_approval(aid, status, note)
+            self.web.sessions.decide_approval(aid, status, note)
 
     def pending_approvals(self, sid: str | None = None, user_id: str | None = None,
                           with_app: str | None = None) -> list[dict]:
         if sid:
-            return self.for_session(sid).pending_approvals(sid, user_id=user_id)
-        rows = self.web.pending_approvals(user_id=user_id)
+            return self.for_session(sid).sessions.pending_approvals(sid, user_id=user_id)
+        rows = self.web.sessions.pending_approvals(user_id=user_id)
         apps = self._reach(None, with_app, lambda e: e["status"] not in _ENDED
                            and (user_id is None or e["owner_id"] == user_id))
         if not apps:
@@ -845,21 +982,21 @@ class SessionStores:
             if dry_run and not migrated:
                 log.warning("Web store migration (dry run): no sessions to move; the main store stays in use")
                 return main
-            web = Database(self.store_path(WEB_APP_ID))
-            if not migrated or main.get_api_key(WEB_APP_ID) is None:
+            web = self._open_store(WEB_APP_ID)
+            if not migrated or main.credentials.get_api_key(WEB_APP_ID) is None:
                 main.write(self._record_web_store, {"sessions": 0, "backup": ""})
             return web
         before = main.read(_session_row_counts, main, sids)
         if dry_run:
             log.warning("Web store migration (dry run): would move %d session(s) into %s: %s; nothing changed",
                         len(sids), self.store_path(WEB_APP_ID), json.dumps(before, sort_keys=True))
-            return Database(self.store_path(WEB_APP_ID)) if migrated else main
+            return self._open_store(WEB_APP_ID) if migrated else main
         backup = _unused(Path(main.path).parent / "pre-migration" /
                          f"harness-web-store-{time.strftime('%Y%m%dT%H%M%S')}.sqlite3")
         backup_sqlite(Path(main.path), backup)
         log.info("Web store migration: moving %d session(s) into %s: %s; main store backed up to %s", len(sids),
                  self.store_path(WEB_APP_ID), json.dumps(before, sort_keys=True), backup)
-        web = Database(self.store_path(WEB_APP_ID))
+        web = self._open_store(WEB_APP_ID)
         try:
             self._copy_to_web(web, sids, before)
 
@@ -909,11 +1046,11 @@ class SessionStores:
             if after != before:
                 raise WebStoreMismatch(f"Web store row counts {after} differ from the main store's {before}")
         web.write(insert)
-        web._build_search_index()  # the moved events, indexed in Web's store
+        web.sessions.build_search_index()  # the moved events, indexed in Web's store
 
     def _record_web_store(self, info: dict) -> None:
         """In a main-store transaction: register Web in the App registry and record that its store is in use."""
-        self.main.ensure_web_app(WEB_APP_ID)
+        self.main.credentials.ensure_web_app(WEB_APP_ID)
         self.main.set_meta(WEB_STORE_META, json.dumps({"migrated_at": time.time(), **info}))
 
     def migrate_app_files(self) -> list[Path]:
@@ -987,10 +1124,14 @@ class SessionStores:
                                             f"VALUES ({','.join('?' * len(cols))})", values)
                 db.conn.execute("DELETE FROM meta WHERE key = 'search_index'")
             db.write(insert)
-            db._build_search_index()  # the moved events, indexed in the App's store
+            db.sessions.build_search_index()  # the moved events, indexed in the App's store
 
         def delete() -> None:
             for table in (*SESSION_TABLES, "search_index"):
                 main.conn.execute(f"DELETE FROM {table} WHERE session_id IN ({marks})", sids)
             main.conn.execute(f"DELETE FROM sessions WHERE id IN ({marks})", sids)
         main.write(delete)
+
+
+# SessionStore methods that SessionStores defines itself: `sessions` runs these, not one store's.
+_OWN_SESSION_METHODS = _SESSION_METHODS & frozenset(vars(SessionStores))

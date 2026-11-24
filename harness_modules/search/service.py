@@ -1,8 +1,9 @@
 """Full-text search over past sessions (SQLite FTS5, no model involved).
 
 Every persisted event that carries text the user or an agent might look for later is indexed as it's written
-(`Database.insert_event`): session titles, user messages, assistant replies and the tools they called, tool results
-(capped), final answers, and app context. The index lives in the session database, so backups carry it.
+(`SessionStore.insert_event`, called as `db.sessions.insert_event`): session titles, user messages, assistant replies
+and the tools they called, tool results (capped), final answers, and app context. The index lives in the session
+database, so backups carry it.
 
 Used by the phone app (GET /search) and by agents through two daemon-side tools:
 - `session_search` finds sessions and shows the best-matching passages;
@@ -93,7 +94,7 @@ def _term_coverage(db, query: str, exclude: str, user_id: str | None, app_id: st
                    session_kind: str | None = "agent") -> dict[str, int]:
     coverage: dict[str, int] = {}
     for term in query.split(" OR "):
-        for sid in {r["session_id"] for r in db.search_events(term, exclude=exclude, max_rows=2000,
+        for sid in {r["session_id"] for r in db.sessions.search_events(term, exclude=exclude, max_rows=2000,
                                                              user_id=user_id, app_id=app_id,
                                                              session_kind=session_kind)}:
             coverage[sid] = coverage.get(sid, 0) + 1
@@ -119,7 +120,7 @@ def search(db, query: str, project: str = "", limit: int = 20, exclude: str = ""
         q = fts_query(query, any_term)
         if not q:
             continue
-        rows = db.search_events(q, exclude=exclude, max_rows=600, user_id=user_id, app_id=app_id,
+        rows = db.sessions.search_events(q, exclude=exclude, max_rows=600, user_id=user_id, app_id=app_id,
                                 session_kind=session_kind)
         if not rows:
             continue
@@ -144,7 +145,7 @@ def _group(db, rows: list[dict], project: str, limit: int, coverage: dict | None
             hit["passages"].append({"kind": r["kind"], "seq": r["seq"], "text": r["snippet"]})
     out = []
     for sid, hit in by_session.items():
-        s = db.session_brief(sid, user_id=user_id, kind=session_kind, with_taint=with_taint)
+        s = db.sessions.session_brief(sid, user_id=user_id, kind=session_kind, with_taint=with_taint)
         if s is None or (project and s["project"] != project):
             continue
         out.append({**s, **hit, "terms": (coverage or {}).get(sid, 0)})
@@ -202,14 +203,14 @@ def _compact_event(t: str, d: dict, lines: list[str], last_content: str) -> str:
 
 
 def compact_transcript(db, sid: str) -> str:
-    s = db.get_session(sid)
+    s = db.sessions.get_session(sid)
     if s is None:
         raise ToolError(f"no session {sid}")
     created = time.strftime("%Y-%m-%d %H:%M", time.localtime(s["created_at"]))
     lines = [f"# {s['title']}", f"session {s['id']} · project {s['project']} · {created} · status {s['status']}"
              + (f" · branch {s['branch']} ({s['review'] or 'not reviewed'})" if s.get("branch") else ""), ""]
     last_content = ""
-    for e in db.events(sid):
+    for e in db.sessions.events(sid):
         last_content = _compact_event(e["type"], e["data"], lines, last_content)
     return "\n".join(lines)
 
@@ -298,9 +299,9 @@ class SessionSearch:
         ids = readable_session_ids(self.db, session_id, _session)
         if len(ids) != 1:
             raise ToolError(f"no session matches {session_id!r}" if not ids else f"{session_id!r} is ambiguous")
-        before = self.db.get_session(ids[0])
+        before = self.db.sessions.get_session(ids[0])
         text = compact_transcript(self.db, ids[0])
-        read = self.db.get_session(ids[0]) or before  # taint added during the read counts; a deleted one keeps its own
+        read = self.db.sessions.get_session(ids[0]) or before  # taint added during the read counts; a deleted one keeps its own
         tainted = (read or {}).get("taint") or []
         source = [("session", f"session {ids[0]} ({tainted[0]['origin']})")] if tainted else []
         return ToolOutput(self._page(text, start, find), taint=source)

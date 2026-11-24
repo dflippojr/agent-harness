@@ -25,29 +25,29 @@ def drain_activity(client, manager):
 def test_session_creation_polling_and_admin_reads_update_activity(tmp_path, monkeypatch):
     m = Manager(make_cfg(tmp_path))
     monkeypatch.setattr(m, "_spawn", lambda sid: None)
-    app, token = m.db.create_api_key("App", "sessions", kind="app")
-    owner, owner_token = m.db.create_api_key("Owner", "admin", kind="owner")
-    assert m.db.api_key_by_secret(token)["last_used_at"] is None
+    app, token = m.db.credentials.create_api_key("App", "sessions", kind="app")
+    owner, owner_token = m.db.credentials.create_api_key("Owner", "admin", kind="owner")
+    assert m.db.credentials.api_key_by_secret(token)["last_used_at"] is None
     with TestClient(create_app(m)) as client:
         response = client.post("/api/v1/sessions", headers=headers(token), json={"prompt": "synthetic task"})
         assert response.status_code == 201, response.text
         drain_activity(client, m)
-        assert m.db.api_key_by_secret(token)["last_used_at"] is not None
+        assert m.db.credentials.api_key_by_secret(token)["last_used_at"] is not None
         m.db.main.write(lambda: m.db.main.conn.execute(
             "UPDATE api_keys SET last_used_at = 1 WHERE id = ?", (app["id"],)))
         m._key_activity_last_touch[app["id"]] -= 60
         polled = client.get("/api/v1/sessions/" + response.json()["id"], headers=headers(token))
         assert polled.status_code == 200
         drain_activity(client, m)
-        assert m.db.api_key_by_secret(token)["last_used_at"] > 1
+        assert m.db.credentials.api_key_by_secret(token)["last_used_at"] > 1
         assert client.get("/api/admin/v1/keys", headers=headers(owner_token)).status_code == 200
         drain_activity(client, m)
-        assert m.db.api_key_by_secret(owner_token)["last_used_at"] is not None
+        assert m.db.credentials.api_key_by_secret(owner_token)["last_used_at"] is not None
         inventory = client.get("/api/admin/v1/hub").json()
         states = {row["id"]: row["state"] for row in inventory["apps"]}
         assert states[app["id"]] == states[owner["id"]] == "active"
         assert client.get("/api/admin/v1/hub", headers=headers(owner_token)).status_code == 200
-        assert m.db.list_api_keys()[0]["last_used_at"] > time.time() - 60
+        assert m.db.listed_api_keys()[0]["last_used_at"] > time.time() - 60
 
 
 @pytest.mark.parametrize("path, scope, extra, expected", [
@@ -57,18 +57,18 @@ def test_session_creation_polling_and_admin_reads_update_activity(tmp_path, monk
 ])
 def test_rejected_scope_origin_or_admin_access_never_updates_activity(tmp_path, path, scope, extra, expected):
     m = Manager(make_cfg(tmp_path))
-    row, token = m.db.create_api_key("App", scope, kind="app")
+    row, token = m.db.credentials.create_api_key("App", scope, kind="app")
     with TestClient(create_app(m)) as client:
         assert client.get(path, headers=headers(token, **extra)).status_code == expected
-    assert m.db.api_key_by_secret(token)["last_used_at"] is None
+    assert m.db.credentials.api_key_by_secret(token)["last_used_at"] is None
 
 
 def test_activity_write_failure_preserves_successful_response(tmp_path, monkeypatch, caplog):
     m = Manager(make_cfg(tmp_path))
-    row, token = m.db.create_api_key("Owner", "admin", kind="owner")
+    row, token = m.db.credentials.create_api_key("Owner", "admin", kind="owner")
     def failed(*args):
         raise RuntimeError("synthetic-secret-write-error")
-    monkeypatch.setattr(m.db.main, "touch_api_key", failed)
+    monkeypatch.setattr(m.db.main.credentials, "touch_api_key", failed)
     with TestClient(create_app(m)) as client:
         assert client.get("/api/admin/v1/keys", headers=headers(token)).status_code == 200
     assert "key activity metadata could not be recorded" in caplog.text
@@ -78,11 +78,11 @@ def test_activity_write_failure_preserves_successful_response(tmp_path, monkeypa
 def test_inference_discovery_tracks_bearer_and_anthropic_key_activity(tmp_path):
     m = Manager(make_cfg(tmp_path))
     m.cfg.endpoint.enabled = True
-    device, token = m.db.create_api_key("Inference device", "inference", kind="device")
-    app, app_token = m.db.create_api_key("No inference scope", "sessions", kind="app")
+    device, token = m.db.credentials.create_api_key("Inference device", "inference", kind="device")
+    app, app_token = m.db.credentials.create_api_key("No inference scope", "sessions", kind="app")
     with TestClient(create_app(m)) as client:
         assert client.get("/v1/models", headers=headers(app_token)).status_code == 401
-        assert m.db.api_key_by_secret(app_token)["last_used_at"] is None
+        assert m.db.credentials.api_key_by_secret(app_token)["last_used_at"] is None
         for path in ("/v1/models", "/v1/capabilities"):
             for auth in (headers(token), {"x-api-key": token}):
                 m.db.main.write(lambda: m.db.main.conn.execute(
@@ -90,7 +90,7 @@ def test_inference_discovery_tracks_bearer_and_anthropic_key_activity(tmp_path):
                 m._key_activity_last_touch.pop(device["id"], None)
                 assert client.get(path, headers=auth).status_code == 200
                 drain_activity(client, m)
-                assert m.db.api_key_by_secret(token)["last_used_at"] > time.time() - 60
+                assert m.db.credentials.api_key_by_secret(token)["last_used_at"] > time.time() - 60
         inventory = client.get("/api/admin/v1/hub").json()
         states = {row["id"]: row["state"] for row in inventory["apps"]}
         assert states[device["id"]] == "active" and states[app["id"]] == "never_used"
@@ -98,8 +98,8 @@ def test_inference_discovery_tracks_bearer_and_anthropic_key_activity(tmp_path):
 
 def test_burst_activity_is_background_throttled_per_key_and_pending_write(tmp_path, monkeypatch):
     m = Manager(make_cfg(tmp_path))
-    key, token = m.db.create_api_key("Owner", "admin", kind="owner")
-    other, other_token = m.db.create_api_key("Other", "admin", kind="owner")
+    key, token = m.db.credentials.create_api_key("Owner", "admin", kind="owner")
+    other, other_token = m.db.credentials.create_api_key("Other", "admin", kind="owner")
     calls = []
     original = m.db.main.awrite
 
@@ -107,7 +107,7 @@ def test_burst_activity_is_background_throttled_per_key_and_pending_write(tmp_pa
         release = asyncio.Event()
 
         async def delayed(fn, *args, **kwargs):
-            if fn == m.db.main.touch_api_key:
+            if fn == m.db.main.credentials.touch_api_key:
                 calls.append(args[0])
                 await release.wait()
             return await original(fn, *args, **kwargs)
@@ -146,7 +146,7 @@ def test_burst_activity_is_background_throttled_per_key_and_pending_write(tmp_pa
 
     try:
         asyncio.run(exercise())
-        assert m.db.api_key_by_secret(token)["last_used_at"] is not None
+        assert m.db.credentials.api_key_by_secret(token)["last_used_at"] is not None
     finally:
         m.db.close()
 
@@ -155,7 +155,7 @@ def test_burst_activity_is_background_throttled_per_key_and_pending_write(tmp_pa
 def test_inference_accounting_does_not_queue_an_extra_activity_write(tmp_path, monkeypatch, stream):
     from test_module_endpoint import endpoint_manager
     m = endpoint_manager(tmp_path)
-    key, token = m.db.create_api_key("Inference", "inference", kind="device")
+    key, token = m.db.credentials.create_api_key("Inference", "inference", kind="device")
     calls = []
     monkeypatch.setattr(m, "record_key_activity", calls.append)
     if stream:
@@ -165,7 +165,7 @@ def test_inference_accounting_does_not_queue_an_extra_activity_write(tmp_path, m
     with TestClient(create_app(m)) as client:
         response = client.post("/v1/chat/completions", headers=headers(token), json={"stream": stream})
         assert response.status_code == 200
-        assert m.db.api_key_by_secret(token)["last_used_at"] is not None
+        assert m.db.credentials.api_key_by_secret(token)["last_used_at"] is not None
         assert calls == []
         # Discovery and validation errors have no accounting row, so still need background activity.
         assert client.get("/v1/models", headers=headers(token)).status_code == 200

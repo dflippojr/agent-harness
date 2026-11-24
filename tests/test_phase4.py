@@ -131,7 +131,7 @@ def executor(tmp: Path, roots: list[Path]) -> harness_runner.Executor:
 async def settle(m: Manager, sid: str) -> dict:
     await wait_status(m, sid, "done", "failed", "cancelled", timeout=30)
     await asyncio.gather(*list(m.tasks.values()), return_exceptions=True)
-    return m.db.get_session(sid)
+    return m.db.sessions.get_session(sid)
 
 
 needs_bash = pytest.mark.skipif(bash() is None, reason="needs bash (Git Bash on Windows)")
@@ -197,7 +197,7 @@ def test_waits_for_offline_mac_then_resumes(tmp_path):
         s = m.create("say hi", project="mac-scratch")
         s = await wait_status(m, s["id"], "waiting_target")
         assert m.scheduler.holder is None  # waiting doesn't hold the GPU
-        waiting = [e for e in m.db.events(s["id"]) if e["type"] == "target_waiting"]
+        waiting = [e for e in m.db.sessions.events(s["id"]) if e["type"] == "target_waiting"]
         note = Notifier(cfg, m.db).build(waiting[0])
         assert note["title"].startswith("Waiting for the macbook")
         assert note["sequence_id"] == f"target-{s['id']}"

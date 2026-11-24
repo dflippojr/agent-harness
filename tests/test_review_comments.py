@@ -85,7 +85,7 @@ def test_draft_survives_restart_and_sends_one_followup(tmp_path):
         repo = m.cfg.workspaces_dir / s["id"] / "repo"
         repo.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        wait_for(lambda: m.db.get_session(s["id"])["status"] == "done")
+        wait_for(lambda: m.db.sessions.get_session(s["id"])["status"] == "done")
         parsed = client.get(f"/sessions/{s['id']}/changes").json()["repos"][0]["parsed"]
         assert rc.side_lines(parsed, "new.txt", "new") == {1: "hello", 2: "world"}
         url = f"/sessions/{s['id']}/review-comments"
@@ -100,11 +100,11 @@ def test_draft_survives_restart_and_sends_one_followup(tmp_path):
 
         from harness.app_stores import APP_STORE_FILE, WEB_APP_ID
         from harness.db import Database
-        assert Database(Path(m.cfg.data_dir) / "apps" / WEB_APP_ID / APP_STORE_FILE).list_review_comments(s["id"])
+        assert Database(Path(m.cfg.data_dir) / "apps" / WEB_APP_ID / APP_STORE_FILE).sessions.list_review_comments(s["id"])
         sent = client.post(url + "/send")
         assert sent.status_code == 200
-        wait_for(lambda: m.db.get_session(s["id"])["status"] == "done")
-        msgs = [e["data"]["content"] for e in m.db.events(s["id"]) if e["type"] == "user_message"]
+        wait_for(lambda: m.db.sessions.get_session(s["id"])["status"] == "done")
+        msgs = [e["data"]["content"] for e in m.db.sessions.events(s["id"]) if e["type"] == "user_message"]
         assert len(msgs) == 2
         assert "new.txt, line 1-2 in the new lines" in msgs[1]
         assert "greet better" in msgs[1]

@@ -77,7 +77,7 @@ class LocalModelRuntime(ModuleRuntime):
     def _gpu_paused(self, reasons):
         m = self.manager
         m.modules.gpu_hold()
-        for session in m.db.sessions_with_status(*ACTIVE):
+        for session in m.db.sessions.sessions_with_status(*ACTIVE):
             if session.get("backend", "local") == "local" and session["status"] != "waiting_approval":
                 m.runner.note_gpu_pause(session["id"])
 

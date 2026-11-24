@@ -15,6 +15,7 @@ from harness.db import Database
 from harness.manager import HarnessError
 from harness_modules.backup.service import BackupService
 from harness_modules.jobs.service import JobScheduler
+from harness_modules.jobs.store import JobStore
 from test_module_jobs import jobs_manager
 from test_phase7 import seed
 
@@ -31,7 +32,7 @@ def manager(tmp_path):
 
 
 def rows(m, action):
-    return list(reversed(m.db.audit_page(action=action)["items"]))
+    return list(reversed(m.db.accounts.audit_page(action=action)["items"]))
 
 
 def pair(m, action, context=CTX):
@@ -47,7 +48,7 @@ def pair(m, action, context=CTX):
 
 
 def approval(m, aid="a-test", sid="session1"):
-    m.db.insert_approval({"id": aid, "session_id": sid, "tool_call_id": "call1", "tool": "shell",
+    m.db.sessions.insert_approval({"id": aid, "session_id": sid, "tool_call_id": "call1", "tool": "shell",
                           "args": {"command": SENTINEL}, "reason": SENTINEL, "detail": SENTINEL,
                           "status": "pending"})
 
@@ -57,7 +58,7 @@ def approval(m, aid="a-test", sid="session1"):
 def test_approval_aliases(manager, path, source, approve):
     m = manager
     approval(m)
-    key, secret = m.db.create_api_key("test", "admin sessions approvals", kind="owner")
+    key, secret = m.db.credentials.create_api_key("test", "admin sessions approvals", kind="owner")
     with TestClient(create_app(m)) as client:
         response = client.post(path + "/sessions/session1/approvals/a-test",
                                json={"decision": "approve" if approve else "deny", "note": SENTINEL},
@@ -80,7 +81,7 @@ def test_approval_aliases(manager, path, source, approve):
 
 def test_notification_identity_and_idempotency(manager):
     approval(manager)
-    token = manager.db.get_approval("a-test")["token"]
+    token = manager.db.sessions.get_approval("a-test")["token"]
     manager.decide_by_token(token, True)
     manager.decide_by_token(token, False)
     ctx = audit_context.AuditContext("owner", "owner", "", "notification_link")
@@ -94,9 +95,9 @@ def test_legacy_stray_token_preserves_ambient_owner(manager, token_kind):
     if token_kind == "invalid":
         secret = "invalid-token"
     else:
-        key, secret = manager.db.create_api_key("test", "sessions", kind="app" if token_kind == "app" else "owner")
+        key, secret = manager.db.credentials.create_api_key("test", "sessions", kind="app" if token_kind == "app" else "owner")
         if token_kind == "revoked":
-            manager.db.revoke_api_key(key["id"])
+            manager.db.credentials.revoke_api_key(key["id"])
     headers = {"Authorization": "Bearer " + secret, local_owner.HEADER: manager.local_owner_token}
     with TestClient(create_app(manager)) as client:
         # Admin authentication still rejects the token before attribution runs.
@@ -119,12 +120,12 @@ def test_rejected_approval_audit_failure_preserves_conflict(manager, monkeypatch
     approval(manager)
     manager.decide("session1", "a-test", True, context=CTX)
     fail_write(monkeypatch, manager.db, "failure")
-    _, secret = manager.db.create_api_key("test", "admin sessions approvals", kind="owner")
+    _, secret = manager.db.credentials.create_api_key("test", "admin sessions approvals", kind="owner")
     with TestClient(create_app(manager)) as client:
         response = client.post(path + "/sessions/session1/approvals/a-test", json={"decision": "deny"},
                                headers={"Authorization": "Bearer " + secret})
         assert response.status_code == 409, response.text
-    assert manager.db.get_approval("a-test")["status"] == "approved"
+    assert manager.db.sessions.get_approval("a-test")["status"] == "approved"
     pair(manager, "approval.decide")
     assert "audit record unavailable for an already-decided approval" in caplog.text
     assert SENTINEL not in caplog.text
@@ -132,7 +133,7 @@ def test_rejected_approval_audit_failure_preserves_conflict(manager, monkeypatch
 
 @pytest.mark.parametrize("kind", ["member", "app"])
 def test_foreign_sessions_not_copied(manager, monkeypatch, kind):
-    manager.db.update_session("session1", **({"owner_id": "u-member"} if kind == "member" else {"app_id": "app-a"}))
+    manager.db.sessions.update_session("session1", **({"owner_id": "u-member"} if kind == "member" else {"app_id": "app-a"}))
     approval(manager)
     manager.decide("session1", "a-test", True, context=CTX)
     monkeypatch.setattr(manager, "_review", AsyncMock(return_value={}))
@@ -147,12 +148,13 @@ def test_unknown_approval_target_is_not_audited(manager):
 
 
 def fail_write(monkeypatch, db, outcome):
-    original = db.insert_audit
+    accounts = db.accounts  # the account store writes the audit rows (#992)
+    original = accounts.insert_audit
     def insert(*args, **kwargs):
         if args[3] == outcome:
             raise OSError(SENTINEL)
         return original(*args, **kwargs)
-    monkeypatch.setattr(db, "insert_audit", insert)
+    monkeypatch.setattr(accounts, "insert_audit", insert)
 
 
 @pytest.mark.parametrize("outcome", ["started", "ok"])
@@ -182,7 +184,7 @@ def test_approval_terminal_failure_wakes_agent(manager, monkeypatch):
     with pytest.raises(HarnessError, match="may have completed"):
         manager.decide("session1", "a-test", True, context=CTX)
     assert event.is_set()
-    assert manager.db.get_approval("a-test")["status"] == "approved"
+    assert manager.db.sessions.get_approval("a-test")["status"] == "approved"
 
 
 def test_cancel_and_reopen_leave_unresolved_start(tmp_path):
@@ -193,7 +195,7 @@ def test_cancel_and_reopen_leave_unresolved_start(tmp_path):
             raise asyncio.CancelledError()
     db.close()
     db = Database(path)
-    assert [r["outcome"] for r in db.audit_page()["items"]] == ["started"]
+    assert [r["outcome"] for r in db.accounts.audit_page()["items"]] == ["started"]
     db.close()
 
 
@@ -203,7 +205,7 @@ def test_job_run_provenance_and_no_repeat(manager, monkeypatch, manual):
     job = {"id": "j-test", "name": SENTINEL, "prompt": SENTINEL, "cron": "@daily", "project": "scratch",
            "backend": "local", "model": "", "notify": "low", "enabled": True, "catch_up_minutes": 360,
            "next_run_at": now - 1}
-    manager.db.insert_job(job)
+    JobStore(manager.db).insert_job(job)
     calls = []
     scheduler = JobScheduler(manager.db, lambda *a, **kw: calls.append(kw) or {"id": "session1"}, lambda _: False)
     assert scheduler.run(job, now, manual, context=CTX) == "session1"
@@ -212,7 +214,7 @@ def test_job_run_provenance_and_no_repeat(manager, monkeypatch, manual):
     if not manual:
         fail_write(monkeypatch, manager.db, "ok")
         scheduler.run(job, now, context=CTX)
-        assert manager.db.get_job("j-test")["last_session_id"] == "session1"
+        assert JobStore(manager.db).get_job("j-test")["last_session_id"] == "session1"
         assert scheduler.tick(now) == []
         assert len(calls) == 2
 
@@ -253,7 +255,7 @@ def test_auto_decision_is_system(manager):
 @pytest.mark.parametrize("path,source", [("", "legacy_api"), (PREFIX, "admin_api")])
 def test_job_mutation_aliases(manager, path, source, monkeypatch):
     m = manager
-    key, secret = m.db.create_api_key("test", "admin", kind="owner")
+    key, secret = m.db.credentials.create_api_key("test", "admin", kind="owner")
     headers = {"Authorization": "Bearer " + secret}
     body = {"name": SENTINEL, "prompt": SENTINEL, "cron": "@daily"}
     with TestClient(create_app(m)) as client:
@@ -277,15 +279,15 @@ def test_job_mutation_aliases(manager, path, source, monkeypatch):
         fail_write(monkeypatch, m.db, "ok")
         with pytest.raises(OSError):
             client.post(path + "/jobs", json=body, headers=headers)
-        assert m.db.list_jobs() == []  # mutation and audit share the main writer transaction
+        assert JobStore(m.db).list_jobs() == []  # mutation and audit share the main writer transaction
 
 
 @pytest.mark.parametrize("kind", ["fork", "rewind"])
 @pytest.mark.parametrize("path,source", [("", "legacy_api"), (PREFIX, "admin_api")])
 def test_checkpoint_aliases(manager, monkeypatch, kind, path, source):
     m = manager
-    key, secret = m.db.create_api_key("test", "admin", kind="owner")
-    monkeypatch.setattr(m, "_idle_for_checkpoint", AsyncMock(return_value=m.db.get_session("session1")))
+    key, secret = m.db.credentials.create_api_key("test", "admin", kind="owner")
+    monkeypatch.setattr(m, "_idle_for_checkpoint", AsyncMock(return_value=m.db.sessions.get_session("session1")))
     if kind == "fork":
         seed(m.db, "new-session", "scratch", SENTINEL, [])
         monkeypatch.setattr(m, "_fork", AsyncMock(return_value="new-session"))
@@ -309,8 +311,8 @@ def test_checkpoint_aliases(manager, monkeypatch, kind, path, source):
 @pytest.mark.parametrize("action", ["merge", "push", "discard"])
 def test_review_aliases_and_error_contract(manager, monkeypatch, path, source, action):
     m = manager
-    key, secret = m.db.create_api_key("test", "admin sessions", kind="owner")
-    monkeypatch.setattr(m, "_review", AsyncMock(return_value=m.db.get_session("session1")))
+    key, secret = m.db.credentials.create_api_key("test", "admin sessions", kind="owner")
+    monkeypatch.setattr(m, "_review", AsyncMock(return_value=m.db.sessions.get_session("session1")))
     with TestClient(create_app(m)) as client:
         response = client.post(path + "/sessions/session1/review/" + action,
                                headers={"Authorization": "Bearer " + secret})
@@ -355,7 +357,7 @@ def test_async_cancellation_preserves_intent(manager):
 @pytest.mark.parametrize("path,source", [("", "legacy_api"), (PREFIX, "admin_api")])
 def test_taint_and_maintenance_route_contexts(manager, monkeypatch, path, source):
     m = manager
-    key, secret = m.db.create_api_key("test", "admin", kind="owner")
+    key, secret = m.db.credentials.create_api_key("test", "admin", kind="owner")
     headers = {"Authorization": "Bearer " + secret}
     cleanup = m.maintenance
     monkeypatch.setattr(cleanup, "_containers", AsyncMock())
@@ -363,7 +365,8 @@ def test_taint_and_maintenance_route_contexts(manager, monkeypatch, path, source
     monkeypatch.setattr(cleanup, "_remote_workspaces", AsyncMock())
     cleanup.app_sweep = None
     backup = m.modules.get("backup").service
-    monkeypatch.setattr(backup, "_backup_sync", lambda _: {"path": SENTINEL, "bytes": 1, "removed": []})
+    monkeypatch.setattr(backup, "_backup_sync", lambda _: {"ok_at": 1.0, "path": SENTINEL, "bytes": 1, "removed": [],
+                                                           "error": ""})
     monkeypatch.setattr(backup, "_write_backup_status", lambda: None)
     with TestClient(create_app(m)) as client:
         for endpoint in ("/sessions/session1/taint/clear", "/maintenance/cleanup", "/maintenance/backup"):
@@ -407,10 +410,10 @@ def test_compare_preserves_review_initiator(manager, monkeypatch):
     m = manager
     seed(m.db, "session2", "scratch", SENTINEL, [])
     for sid in ("session1", "session2"):
-        m.db.update_session(sid, compare_group="group1")
+        m.db.sessions.update_session(sid, compare_group="group1")
     async def review(sid, action):
-        m.db.update_session(sid, review="merged" if action == "merge" else "discarded")
-        return m.db.get_session(sid)
+        m.db.sessions.update_session(sid, review="merged" if action == "merge" else "discarded")
+        return m.db.sessions.get_session(sid)
     monkeypatch.setattr(m, "_review", review)
     asyncio.run(m.compare_pick("group1", "session1", "merge", True, context=CTX))
     assert pair(m, "review.merge")["target_id"] == "session1"

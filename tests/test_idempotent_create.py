@@ -42,7 +42,7 @@ def _spawned(m: Manager) -> list[str]:
 
 
 def _created_events(m: Manager, sid: str) -> int:
-    return sum(e["type"] == "session_created" for e in m.db.events(sid))
+    return sum(e["type"] == "session_created" for e in m.db.sessions.events(sid))
 
 
 def _post(client, auth: dict, key: str | bytes | None, body: dict = BODY):
@@ -104,7 +104,7 @@ def test_the_key_row_commits_with_the_session_and_a_second_insert_rolls_back(tmp
     client = TestClient(create_app(m))
     with client:
         app_id, _ = _key(client, "shop", "sessions")
-        app = m.db.get_api_key(app_id)
+        app = m.db.credentials.get_api_key(app_id)
         record = idempotency.new_record(app_id, "k1", BODY)
 
         async def create() -> dict:
@@ -129,7 +129,7 @@ def test_a_crash_after_the_commit_but_before_the_response_replays_after_a_restar
             patch.setattr(apps, "view", lost)
             assert _post(client, auth, "order-7").status_code == 500
         [sid] = m.db.app_session_ids(app_id)
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
 
     again = _manager(cfg)
     client = TestClient(create_app(again))
@@ -259,6 +259,10 @@ def test_replayed_session_raises_harness_errors_without_a_store_write():
     class Store:
         row: dict | None = None
 
+        @property
+        def sessions(self):  # the key and the session are both read from the routed session store
+            return self
+
         def find_idempotency_key(self, _key_hash, _now):
             return self.row
 
@@ -337,11 +341,11 @@ def test_insert_uses_the_current_clock_for_cleanup_and_the_new_protection_window
         clock[0] += 61
 
         async def create():
-            return m.create("plan dinner", app=m.db.get_api_key(app_id), idempotency=record)
+            return m.create("plan dinner", app=m.db.credentials.get_api_key(app_id), idempotency=record)
 
         fresh = client.portal.call(create)
         assert fresh["id"] != first
-        kept = m.db.for_app(app_id).find_idempotency_key(record["key_hash"], clock[0])
+        kept = m.db.for_app(app_id).sessions.find_idempotency_key(record["key_hash"], clock[0])
         assert kept["session_id"] == fresh["id"]
         assert kept["created_at"] == clock[0]
         assert kept["expires_at"] == clock[0] + idempotency.WINDOW_SECONDS
@@ -376,13 +380,13 @@ def test_erasure_between_the_replay_lookup_and_view_returns_gone(tmp_path, monke
     with TestClient(create_app(m), raise_server_exceptions=False) as client:
         app_id, auth = _key(client, "shop", "sessions")
         sid = _post(client, auth, "k").json()["id"]
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
         replayed_session = idempotency.replayed_session
 
         def erase_before_view(store, record):
             replayed = replayed_session(store, record)
             assert replayed == sid
-            m.db.delete_session(sid)
+            m.db.sessions.delete_session(sid)
             return replayed
 
         monkeypatch.setattr(idempotency, "replayed_session", erase_before_view)
@@ -397,13 +401,13 @@ def test_replay_view_uses_its_snapshot_if_erasure_commits_during_rendering(tmp_p
     with TestClient(create_app(m), raise_server_exceptions=False) as client:
         app_id, auth = _key(client, "shop", "sessions")
         sid = _post(client, auth, "k").json()["id"]
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
-        snapshot = m.db.get_session(sid)
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
+        snapshot = m.db.sessions.get_session(sid)
         summary = m.summary
 
         def erase_during_view(session):
             result = summary(session)
-            m.db.delete_session(sid)
+            m.db.sessions.delete_session(sid)
             return result
 
         monkeypatch.setattr(m, "summary", erase_during_view)

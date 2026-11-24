@@ -217,6 +217,98 @@ Server. No
 Rosetta, local GPU model, or administrator privileges are required. Docker Desktop must be running before hosted
 sessions can start.
 
+## Install the Server from wheels (pip)
+
+The installers above remain the way to set up a machine. They choose the service profile first, build the sandbox
+and provider images, and register the services. Agent Harness Server is also a pip package, for hosts that manage
+their own Python and processes. No package index carries it yet (#334), so build the wheels from a checkout. The
+build uses only the standard library and needs no network:
+
+```bash
+python scripts/packaging/agent_harness_build.py --out dist
+```
+
+`dist/` then holds the core wheel, `agent_harness-<release>-py3-none-any.whl`, and one wheel per optional module,
+`agent_harness_module_<name>-<release>-py3-none-any.whl`. The core wheel holds the `harness` package and the SDK as
+the `harness_client` module (`from harness_client import Harness`). `pip wheel .` and `pip install .` build the core
+wheel alone. [modules.md](modules.md#packaging) explains the split.
+
+Install the core and the modules you want into a virtual environment with Python 3.12 or later:
+
+```bash
+python3.12 -m venv ~/.local/share/agent-harness/venv
+~/.local/share/agent-harness/venv/bin/pip install dist/agent_harness-*.whl dist/agent_harness_module_jobs-*.whl
+```
+
+An installed Server keeps nothing next to its code. Without `--config-dir`, `--data-dir`, `HARNESS_CONFIG_DIR` or
+`HARNESS_DATA_DIR`, it uses the directories the installers write: `config/` and `data/` under
+`~/.local/share/agent-harness` (`$XDG_DATA_HOME/agent-harness` when that is set), or under
+`%LOCALAPPDATA%\agent-harness` on Windows. On a machine that already has an installer-made install, those are that
+install's files, so run only one Server on them. Write a service-profile config there and start the Server:
+
+```bash
+venv=~/.local/share/agent-harness/venv
+$venv/bin/python -m harness.setup_config --profile service --enable-module jobs \
+  --config-dir ~/.local/share/agent-harness/config --data-dir ~/.local/share/agent-harness/data \
+  --pause-flag ~/.local/share/agent-harness/llama-server.paused
+$venv/bin/harness-server      # the daemon on 127.0.0.1:8100; python -m harness also works
+$venv/bin/harness --help      # Agent Harness CLI
+```
+
+The wheels hold the Server only:
+
+- Hosted sessions run in Docker. The sandbox image, the provider CLI image and the egress proxies are built from a
+  checkout (`sandbox/`, `ops/egress/compose.yaml`), as the installers do, and provider logins use
+  `ops/backends/login.sh`.
+- Stables is served only when `HARNESS_STABLES_DIR` names a copy. An installed Server never looks beside its code.
+- The nightly canary runs `bakeoff/`, which only a checkout has. An installed Server turns the canary off and logs why.
+- A module wheel requires the core release it was built with. `pip uninstall agent-harness-module-jobs` removes the
+  module, as taking its package out of a checkout does.
+- Running from a checkout is unchanged (`python -m harness`, the installers, the tower's deploy). `pip install -e .` is
+  not supported; run the checkout directly instead.
+
+## Run the Server in Docker
+
+The repository's `Dockerfile` builds an image of Agent Harness Server from the same wheels. It runs the service
+profile as an unprivileged account (uid 10001) and keeps its config and data in one volume, `/var/lib/agent-harness`.
+It holds no token or config of its own: the container writes its config, and the daemon its local owner token, into
+the volume on the first start. Build it from a clean checkout, because the build context is the allowlist in
+`.dockerignore`, and an untracked file inside `harness/` would reach the image's wheel:
+
+```bash
+docker build -t agent-harness-server .
+docker run -d --name agent-harness --restart unless-stopped --network host \
+  -v agent-harness:/var/lib/agent-harness agent-harness-server
+docker exec agent-harness harness --help   # Agent Harness CLI, with this install's port and local token
+```
+
+The first start writes a service-profile config into `/var/lib/agent-harness/config` (`harness.yaml`, `projects.yaml`
+and `profile.yaml`). A start that finds one of them missing, as an interrupted first start leaves it, sets the config up
+again: it keeps an existing `harness.yaml` and `projects.yaml` and writes `profile.yaml` afresh. Once all three
+exist, later starts keep whatever you change there. Everything else the Server keeps by default (data, the image work dir and logs, the memory library
+clone) is in the volume too: the image sets `XDG_DATA_HOME=/var/lib`, which makes the volume the install's root. A
+named volume takes the image's ownership; a bind-mounted host folder must be writable by uid 10001. `-e HARNESS_PORT=8200` sets that first config's port, and `-e HARNESS_ENABLE_MODULES=jobs,backup`
+its modules. The image holds every module's wheel, and a module stays absent until the profile switches it on.
+
+The daemon listens on 127.0.0.1 only. With `--network host`, which Docker Desktop must have turned on, that is the
+host's loopback, as with the installers. To use a bridge network instead, set `listen.host: 0.0.0.0` in
+`/var/lib/agent-harness/config/harness.local.yaml` and publish the same port on the host's loopback only:
+`-p 127.0.0.1:8100:8100`. The daemon answers only a request whose `Host` is its own loopback address and port (or
+`public_url`), and everything except `/health`, `/metrics` and `GET /api/v1` needs a credential.
+
+`docker inspect --format '{{.State.Health.Status}}' agent-harness` shows the image's health check.
+`python scripts/server_image_smoke.py agent-harness-server` checks a built image. It confirms that `/health` answers,
+that the daemon runs unprivileged and listens on loopback only, that its state is in the volume, and that a fresh
+container holds no token, secret or config.
+
+The image holds the Server only:
+
+- Hosted sessions run in Docker containers, and the image has no Docker client or socket. Handing the container the
+  host's Docker socket would give it root on the host. The session sandboxes also mount host paths (the workspaces and
+  the CLI home files), which would have to exist at the same place on the host. Until that is designed, run sessions
+  from an installer-made install; the image serves the API, the CLI and management.
+- Stables is served only when `HARNESS_STABLES_DIR` names a copy mounted into the container.
+
 ## Check it
 
 ```powershell

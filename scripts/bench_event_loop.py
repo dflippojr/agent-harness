@@ -1,7 +1,7 @@
 """Benchmark how long SQLite work blocks the daemon's event loop (#257, #294).
 
 Runs in one process on one asyncio loop against a temp database, the way the daemon does: fake sessions await
-`db.aio.insert_event` (what `EventBus.aemit` does; some events are ~1 MB tool results), a searcher runs
+`db.sessions.aio.insert_event` (what `EventBus.aemit` does; some events are ~1 MB tool results), a searcher runs
 `search.search` and the `session_search` tool in worker threads (as `api.search` and `SessionSearch.call` do), and a
 scraper renders `/metrics` in a worker thread (as `api.metrics` does). Before #294 the sessions and the searcher
 called the Database synchronously on the loop. The always-on loop-lag probe and the per-method lock-hold histograms
@@ -52,17 +52,17 @@ def _session(sid: str, workspace: str) -> dict:
 
 
 async def fake_session(db: Database, sid: str, stop: asyncio.Event, large_every: int, stats: dict, workspace: str) -> None:
-    await db.aio.insert_session(_session(sid, workspace))
+    await db.sessions.aio.insert_session(_session(sid, workspace))
     blob = ("x" * 63 + "\n") * (LARGE_BYTES // 64)
     i = 0
     while not stop.is_set():
         i += 1
-        await db.aio.insert_event(sid, "assistant", {"text": _text(60, i), "tool_calls": []})
+        await db.sessions.aio.insert_event(sid, "assistant", {"text": _text(60, i), "tool_calls": []})
         if i % large_every == 0:
-            await db.aio.insert_event(sid, "tool_result", {"name": "bash", "ok": True, "output": blob})
+            await db.sessions.aio.insert_event(sid, "tool_result", {"name": "bash", "ok": True, "output": blob})
             stats["large"] += 1
         else:
-            await db.aio.insert_event(sid, "tool_result", {"name": "bash", "ok": True, "output": _text(300, i)})
+            await db.sessions.aio.insert_event(sid, "tool_result", {"name": "bash", "ok": True, "output": _text(300, i)})
         stats["events"] += 1
         await asyncio.sleep(0.005)  # model latency stand-in; the loop is otherwise free
 

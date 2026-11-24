@@ -29,6 +29,8 @@ from pydantic import BaseModel, Field, ValidationError
 from . import audit_context, credential_audit
 from .local_owner import HUB_HEADER as HEADER
 from .manager import HarnessError
+from . import response_docs as docs
+from .response_docs import documented
 from .request_body import BODY_PARSE_ERRORS
 
 ROLE = "hub"
@@ -123,7 +125,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         def commit():
             db, now = m.db.main, pr.clock()
             pr.sweep(db, now)
-            row = db.get_pairing_request(rid)
+            row = db.credentials.get_pairing_request(rid)
             refusal: tuple[int, str, str] | None = None
             if row is None or row["kind"] != ROLE:
                 refusal = (404, "no Hub claim request has that id", "not_found")
@@ -138,15 +140,15 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
                 credential_audit.record(db, ctx, action, rid if known else "", outcome, "pairing_request",
                                         {"request_id": rid, "reason": reason} if known else {"reason": "not_found"})
                 return pr._refuse(status, detail, reason)
-            if not db.update_pairing_request(rid, states, **fields(now)):
+            if not db.credentials.update_pairing_request(rid, states, **fields(now)):
                 return pr._refuse(409, "this Hub claim request changed; check `harness hub status`", "not_approvable")
             credential_audit.record(db, ctx, action, rid, "ok", "pairing_request", {"request_id": rid})
-            return {"row": db.get_pairing_request(rid)}
+            return {"row": db.credentials.get_pairing_request(rid)}
         out = await m.db.main.awrite(commit)
         pr._raise_refusal(out)
         return JSONResponse(pr.owner_view(out["row"], m.cfg), headers=pr.NO_STORE)
 
-    @app.get(base)
+    @app.get(base, responses=documented(docs.HubClaimResponse))
     async def hub_claim_status(request: Request):
         """Whether a Hub is claimed, its record (never a token or hash), and Hub claim requests still open."""
         require_admin(request, mgr)
@@ -155,7 +157,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         def commit():
             db = m.db.main
             pr.sweep(db, pr.clock())
-            return db.hub_claim(), db.list_pairing_requests(ROLE)
+            return db.credentials.hub_claim(), db.credentials.list_pairing_requests(ROLE)
         record, requests = await m.db.main.awrite(commit)
         return JSONResponse({"claimed": record is not None, "hub": record_view(record),
                              "requests": [pr.owner_view(r, m.cfg) for r in requests]}, headers=pr.NO_STORE)
@@ -165,7 +167,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         """Approve a Hub claim with the match code the Hub shows (`{"match": "..."}`). Host only: needs the approval
         secret header, checked before the body."""
         def check(db, row, body):
-            if db.hub_claim() is not None:
+            if db.credentials.hub_claim() is not None:
                 return 409, "a Hub is already claimed; release it first with `harness hub release --confirm`", \
                     "hub_claimed"
             if not pr._same_match(row, body.match):
@@ -195,13 +197,13 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
 
         def commit():
             db = m.db.main
-            record = db.release_hub(pr.clock())
+            record = db.credentials.release_hub(pr.clock())
             if record is None:
                 credential_audit.record(db, ctx, "hub.release", "", "noop", "hub_claim", {"reason": "no_hub"})
                 return None
             credential_audit.record(db, ctx, "hub.release", record["key_id"], "ok", "hub_claim",
                                     {"key_id": record["key_id"], "request_id": record["request_id"]})
-            return record, db.hub_minted_owner_keys()
+            return record, db.credentials.hub_minted_owner_keys()
         out = await m.db.main.awrite(commit)
         if out is None:
             raise HarnessError(404, "no Hub is claimed")

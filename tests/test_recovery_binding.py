@@ -48,14 +48,14 @@ def test_recovery_binds_only_to_the_single_unanswered_unbound_twin(runner_db, si
     checked = 0
     for n, combo in enumerate(itertools.product(SHAPES, repeat=size)):
         sid = f"s-{size}-{n}"
-        db.insert_session({"id": sid, "title": "t", "project": "p", "target": "tower", "model": "m",
+        db.sessions.insert_session({"id": sid, "title": "t", "project": "p", "target": "tower", "model": "m",
                            "backend": "claude", "status": "waiting_approval", "workspace": "",
                            "created_at": 1.0, "updated_at": 1.0, "context": [], "run": {}})
         session = []
         unanswered_ids = set()
         for i, (status, unanswered, bound, same) in enumerate(combo):
             aid = f"a-{size}-{n}-{i}"
-            db.insert_approval({"id": aid, "session_id": sid, "tool_call_id": f"tool-{i}", "tool": TOOL,
+            db.sessions.insert_approval({"id": aid, "session_id": sid, "tool_call_id": f"tool-{i}", "tool": TOOL,
                                 "args": ARGS if same else OTHER, "reason": "asks", "status": status})
             if unanswered:
                 unanswered_ids.add(aid)
@@ -78,10 +78,10 @@ def test_recovery_binds_only_to_the_single_unanswered_unbound_twin(runner_db, si
 
 def test_recovery_never_binds_a_different_tool(runner_db):
     runner, db = runner_db
-    db.insert_session({"id": "s-tool", "title": "t", "project": "p", "target": "tower", "model": "m",
+    db.sessions.insert_session({"id": "s-tool", "title": "t", "project": "p", "target": "tower", "model": "m",
                        "backend": "claude", "status": "waiting_approval", "workspace": "",
                        "created_at": 1.0, "updated_at": 1.0, "context": [], "run": {}})
-    db.insert_approval({"id": "a-tool", "session_id": "s-tool", "tool_call_id": "tool-1", "tool": "Write",
+    db.sessions.insert_approval({"id": "a-tool", "session_id": "s-tool", "tool_call_id": "tool-1", "tool": "Write",
                         "args": ARGS, "reason": "asks"})
     runner._recovery_unanswered["s-tool"] = {"a-tool"}
     assert runner._recovery_approval("s-tool", TOOL, ARGS) is None
@@ -91,10 +91,10 @@ def test_recovery_never_binds_a_different_tool(runner_db):
 def test_recovery_binds_nothing_outside_a_recovered_run(runner_db):
     """No snapshot (a run that was not recovered): even a lone pending twin is not bound by tool and args."""
     runner, db = runner_db
-    db.insert_session({"id": "s-new", "title": "t", "project": "p", "target": "tower", "model": "m",
+    db.sessions.insert_session({"id": "s-new", "title": "t", "project": "p", "target": "tower", "model": "m",
                        "backend": "claude", "status": "waiting_approval", "workspace": "",
                        "created_at": 1.0, "updated_at": 1.0, "context": [], "run": {}})
-    db.insert_approval({"id": "a-new", "session_id": "s-new", "tool_call_id": "tool-1", "tool": TOOL,
+    db.sessions.insert_approval({"id": "a-new", "session_id": "s-new", "tool_call_id": "tool-1", "tool": TOOL,
                         "args": ARGS, "reason": "asks"})
     assert runner._recovery_approval("s-new", TOOL, ARGS) is None
 
@@ -102,11 +102,11 @@ def test_recovery_binds_nothing_outside_a_recovered_run(runner_db):
 def test_startup_snapshot_takes_hosted_sessions_pending_approvals_only(runner_db):
     runner, db = runner_db
     for sid, backend in (("s-hosted", "claude"), ("s-local", "local")):
-        db.insert_session({"id": sid, "title": "t", "project": "p", "target": "tower", "model": "m",
+        db.sessions.insert_session({"id": sid, "title": "t", "project": "p", "target": "tower", "model": "m",
                            "backend": backend, "status": "waiting_approval", "workspace": "",
                            "created_at": 1.0, "updated_at": 1.0, "context": [], "run": {}})
         for aid, status in ((f"a-{sid}-old", "denied"), (f"a-{sid}-now", "pending")):
-            db.insert_approval({"id": aid, "session_id": sid, "tool_call_id": aid, "tool": TOOL, "args": ARGS,
+            db.sessions.insert_approval({"id": aid, "session_id": sid, "tool_call_id": aid, "tool": TOOL, "args": ARGS,
                                 "reason": "asks", "status": status})
-        asyncio.run(runner.mark_recovered_place(db.get_session(sid)))
+        asyncio.run(runner.mark_recovered_place(db.sessions.get_session(sid)))
     assert runner._recovery_unanswered == {"s-hosted": {"a-s-hosted-now"}}

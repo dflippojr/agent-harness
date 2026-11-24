@@ -56,9 +56,10 @@ def record(db, session, context, action, *, target=None, kind="session", outcome
     try:
         store = db.for_app(session.get("app_id") or "")
         def commit():
-            if store.get_session(session["id"]) is not None:
-                store.insert_namespace_audit(scope, session["id"], context or audit_context.SYSTEM,
-                                             session["id"] if target is None else target, kind, action, outcome, data)
+            if store.sessions.get_session(session["id"]) is not None:
+                store.sessions.insert_namespace_audit(scope, session["id"], context or audit_context.SYSTEM,
+                                                      session["id"] if target is None else target, kind, action,
+                                                      outcome, data)
         store.write(commit)
     except Exception:
         warning = gap.get()
@@ -71,7 +72,7 @@ def failures(action):
     """Rejected/interrupting service actions on a known session carry truthful content-free outcomes."""
     def decorate(fn):
         def failure(manager, ref, context, exc, kind=None, approval_id=None):
-            session = manager.db.get_session(ref)
+            session = manager.db.sessions.get_session(ref)
             if session:
                 label = "session.context" if action == "session.message" and kind == "app_context" else action
                 target, target_kind = failure_target(manager.db, session, action, approval_id)
@@ -103,7 +104,7 @@ def failure_target(db, session, action, approval_id):
     if action != "approval.decide":
         return None, "session"
     store = db.for_app(session.get("app_id") or "")
-    approval = store.get_approval(approval_id) if approval_id else None
+    approval = store.sessions.get_approval(approval_id) if approval_id else None
     if approval and approval["session_id"] == session["id"]:
         return approval["id"], "approval"
     # Do not persist unverified caller targets or correlate a sibling member's approval.
@@ -112,7 +113,7 @@ def failure_target(db, session, action, approval_id):
 
 class LoginStore:
     """Adapt #470's protocol to the private store; none of its rows enter account_audit."""
-    def __init__(self, db, app_id, end_user, days=30, backend=""):
+    def __init__(self, db, app_id, end_user, days: int | None = 30, backend=""):
         self.db, self.app_id, self.end_user = db, app_id, end_user
         self.days = min(30, days or 30)
         self.backend = backend
@@ -122,7 +123,7 @@ class LoginStore:
                 "subject_trust": "caller_asserted"}
         if self.backend in {"claude", "codex"}:
             data["backend"] = self.backend
-        self.db.for_app(self.app_id).insert_namespace_audit(
+        self.db.for_app(self.app_id).sessions.insert_namespace_audit(
             self.app_id, "", context, target, "login", action, outcome, data, self.days)
 
     def finish(self, context, operation_id):
@@ -143,14 +144,14 @@ class ReceiptStore:
         self.db, self.category, self.reason, self.count = db, category, reason, count
 
     def insert_audit(self, actor, target, action, outcome, *, context, target_kind, metadata):
-        self.db.main.insert_audit(actor, target, "namespace.erase", outcome, context=context,
-                                  target_kind=self.category,
-                                  metadata={"operation_id": metadata["operation_id"], "count": self.count,
+        self.db.main.accounts.insert_audit(actor, target, "namespace.erase", outcome, context=context,
+                                           target_kind=self.category,
+                                           metadata={"operation_id": metadata["operation_id"], "count": self.count,
                                             "reason": self.reason, "category": self.category})
 
 
 def login_operation(db, app_id, end_user, context, action, target="", backend=""):
-    app = db.main.get_api_key(app_id) or {}
+    app = db.main.credentials.get_api_key(app_id) or {}
     return operation_audit.async_operation(LoginStore(db, app_id, end_user, app.get("retention_days"), backend),
                                            context or audit_context.SYSTEM, target, action)
 
@@ -167,7 +168,7 @@ def refuse_unresolved_erase(db, scope):
     before = None
     settled = set()
     while True:
-        page = db.main.audit_page(target_id=scope, action="namespace.erase", before_id=before, limit=500)
+        page = db.main.accounts.audit_page(target_id=scope, action="namespace.erase", before_id=before, limit=500)
         for row in page["items"]:
             op = row["metadata"].get("operation_id")
             if row["outcome"] == "ok":

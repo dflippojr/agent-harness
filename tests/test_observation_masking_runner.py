@@ -9,7 +9,15 @@ from harness import compaction
 from harness.llm import Completion
 from harness.manager import Manager
 from harness.tools import bound_shell_text
-from test_daemon import Script, call, events, make_cfg, wait_status
+from test_daemon import Script, call, events, wait_status
+from test_daemon import make_cfg as _make_cfg
+
+
+def make_cfg(tmp_path, **kwargs):
+    """Per-turn masking, the timing these tests pin; batching is the default since #1027 (test_mask_batch.py)."""
+    cfg = _make_cfg(tmp_path, **kwargs)
+    cfg.mask_batch_at = 0.0
+    return cfg
 
 BIG = "0123456789" * 6000  # 60,000 characters: over the 20,000-character read cap
 
@@ -26,15 +34,15 @@ async def _session(m: Manager, prompt: str = "task") -> dict:
 async def _seed_result(m: Manager, sid: str, idx: int, output: str, name: str = "read_file") -> str:
     """Append one assistant tool call plus its recorded result, the way a real turn does."""
     c = call(name, idx, path="big.txt")
-    s = m.db.get_session(sid)
-    m.db.update_session(sid, context=s["context"] + [{"role": "assistant", "content": None, "tool_calls": [c]}])
+    s = m.db.sessions.get_session(sid)
+    m.db.sessions.update_session(sid, context=s["context"] + [{"role": "assistant", "content": None, "tool_calls": [c]}])
     await m.runner._record_result(sid, c, name, output[:20000], ok=True, artifact_content=output)
     return c["id"]
 
 
 def _finish_turn(m: Manager, sid: str) -> None:
-    s = m.db.get_session(sid)
-    m.db.update_session(sid, context=s["context"] + [{"role": "assistant", "content": "used it"}])
+    s = m.db.sessions.get_session(sid)
+    m.db.sessions.update_session(sid, context=s["context"] + [{"role": "assistant", "content": "used it"}])
 
 
 def test_masking_and_recovery_through_a_scripted_session(tmp_path):
@@ -66,7 +74,7 @@ def test_masking_and_recovery_through_a_scripted_session(tmp_path):
         sid = m.create("read the big file")["id"]
         live.update(m=m, sid=sid)
         await wait_status(m, sid, "done")
-        full = m.db.full_artifact(sid, digest())
+        full = m.db.sessions.full_artifact(sid, digest())
         assert full and len(full) > 20000  # over the 20,000-character read_artifact cap
 
         big, small = _ctx_text(m, sid, "c2-read_file"), _ctx_text(m, sid, "c3-read_file")
@@ -82,7 +90,7 @@ def test_masking_and_recovery_through_a_scripted_session(tmp_path):
         assert recovered == full[100:9100]  # over the mask threshold, and still verbatim after later turns
         assert _result_event(m, sid, "c6-read_artifact")["artifact_id"] is None  # no receipt of its own to loop on
         assert any(recovered in src for src in grounding.session_sources(
-            m.db.get_session(sid)["context"], m.db.events(sid)))
+            m.db.sessions.get_session(sid)["context"], m.db.sessions.events(sid)))
 
         chunk = _ctx_text(m, sid, "c7-read_artifact")  # no range: the first 20,000 characters, flagged as truncated
         assert chunk.startswith(full[:20000]) and "[truncated; request a smaller range" in chunk
@@ -95,10 +103,10 @@ def test_masking_and_recovery_through_a_scripted_session(tmp_path):
 def test_read_artifact_tool_ranges_missing_and_other_session(tmp_path):
     async def read(m, sid, idx, **args):
         c = call("read_artifact", idx, **args)
-        await m.runner._resolve_call(m.db.get_session(sid), c, [], {}, 10**9, [])
-        ok = [e["data"]["ok"] for e in m.db.events(sid) if e["type"] == "tool_result" and e["data"]["id"] == c["id"]]
+        await m.runner._resolve_call(m.db.sessions.get_session(sid), c, [], {}, 10**9, [])
+        ok = [e["data"]["ok"] for e in m.db.sessions.events(sid) if e["type"] == "tool_result" and e["data"]["id"] == c["id"]]
         # The context holds the full text the model sees; the event's copy is shortened for the UI.
-        text = next(x["content"] for x in m.db.get_session(sid)["context"] if x.get("tool_call_id") == c["id"])
+        text = next(x["content"] for x in m.db.sessions.get_session(sid)["context"] if x.get("tool_call_id") == c["id"])
         return text, ok[-1]
 
     async def body():
@@ -108,8 +116,8 @@ def test_read_artifact_tool_ranges_missing_and_other_session(tmp_path):
         other = m.create("other")["id"]
         await wait_status(m, other, "done")
         digest = _digest(BIG)
-        m.db.put_artifact(sid, digest, BIG)
-        m.db.put_artifact(other, _digest("secret"), "secret")
+        m.db.sessions.put_artifact(sid, digest, BIG)
+        m.db.sessions.put_artifact(other, _digest("secret"), "secret")
 
         out, ok = await read(m, sid, 1, artifact_id=digest)  # no range: capped, flagged as truncated
         assert ok and out.startswith(BIG[:20000]) and "[truncated; request a smaller range" in out
@@ -139,11 +147,11 @@ def test_read_artifact_tool_ranges_missing_and_other_session(tmp_path):
 # read_artifact must get every guarantee an ordinary tool result gets between _resolve_calls and the context.
 
 def _ctx_text(m: Manager, sid: str, call_id: str) -> str:
-    return next(x["content"] for x in m.db.get_session(sid)["context"] if x.get("tool_call_id") == call_id)
+    return next(x["content"] for x in m.db.sessions.get_session(sid)["context"] if x.get("tool_call_id") == call_id)
 
 
 def _result_event(m: Manager, sid: str, call_id: str) -> dict:
-    return next(e["data"] for e in m.db.events(sid) if e["type"] == "tool_result" and e["data"]["id"] == call_id)
+    return next(e["data"] for e in m.db.sessions.events(sid) if e["type"] == "tool_result" and e["data"]["id"] == call_id)
 
 
 def test_parallel_read_artifact_calls_share_the_turn_budget(tmp_path):
@@ -153,7 +161,7 @@ def test_parallel_read_artifact_calls_share_the_turn_budget(tmp_path):
         s = await _session(m)
         sid = s["id"]
         digest = _digest(BIG)
-        m.db.put_artifact(sid, digest, BIG)
+        m.db.sessions.put_artifact(sid, digest, BIG)
         calls = [call("read_artifact", i, artifact_id=digest) for i in range(1, 4)]
         assert await m.runner._resolve_calls(s, calls) is False
         first, second, third = (_ctx_text(m, sid, c["id"]) for c in calls)
@@ -175,10 +183,10 @@ def test_read_artifact_goes_through_policy_and_emits_tool_call(tmp_path):
         s = await _session(m)
         sid = s["id"]
         digest = _digest(BIG)
-        m.db.put_artifact(sid, digest, BIG)
+        m.db.sessions.put_artifact(sid, digest, BIG)
         allowed = call("read_artifact", 1, artifact_id=digest, start=0, end=5)
         await m.runner._resolve_calls(s, [allowed])
-        decision = next(e["data"] for e in m.db.events(sid) if e["type"] == "tool_call" and e["data"]["id"] == allowed["id"])
+        decision = next(e["data"] for e in m.db.sessions.events(sid) if e["type"] == "tool_call" and e["data"]["id"] == allowed["id"])
         assert decision["name"] == "read_artifact" and decision["decision"] == "allow"
         assert _ctx_text(m, sid, allowed["id"]) == BIG[:5]
 
@@ -186,7 +194,7 @@ def test_read_artifact_goes_through_policy_and_emits_tool_call(tmp_path):
         m.runner.policy = lambda _s: Policy([{"tool": "read_artifact", "action": "deny", "reason": "not today",
                                               "args": {"artifact_id": f"^{digest}$"}}])
         denied = call("read_artifact", 2, artifact_id=digest, start=0, end=5)
-        await m.runner._resolve_calls(m.db.get_session(sid), [denied])
+        await m.runner._resolve_calls(m.db.sessions.get_session(sid), [denied])
         assert "blocked by policy (not today)" in _ctx_text(m, sid, denied["id"])
         assert _result_event(m, sid, denied["id"])["ok"] is False
         await m.stop()
@@ -198,13 +206,13 @@ def test_read_artifact_bad_arguments_count_as_invalid_tool_calls(tmp_path):
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
         s = await _session(m)
         sid = s["id"]
-        before = m.db.get_session(sid)["run"].get("invalid_tool_calls", 0)
+        before = m.db.sessions.get_session(sid)["run"].get("invalid_tool_calls", 0)
         bad = [call("read_artifact", 1), call("read_artifact", 2, artifact_id="f" * 64, extra=1),
                call("read_artifact", 3, artifact_id="f" * 64, start="abc")]
         await m.runner._resolve_calls(s, bad)
         for c in bad:
             assert _ctx_text(m, sid, c["id"]).startswith("Error: bad arguments for read_artifact:")
-        assert m.db.get_session(sid)["run"]["invalid_tool_calls"] == before + 3
+        assert m.db.sessions.get_session(sid)["run"]["invalid_tool_calls"] == before + 3
         await m.stop()
     asyncio.run(body())
 
@@ -215,10 +223,10 @@ def test_read_artifact_is_only_available_where_it_is_offered(tmp_path):
         s = await _session(m)
         sid = s["id"]
         digest = _digest("abc")
-        m.db.put_artifact(sid, digest, "abc")
-        m.db.update_session(sid, kind="chat")  # chat sessions are not offered the tool, so they cannot call it
+        m.db.sessions.put_artifact(sid, digest, "abc")
+        m.db.sessions.update_session(sid, kind="chat")  # chat sessions are not offered the tool, so they cannot call it
         c = call("read_artifact", 1, artifact_id=digest)
-        await m.runner._resolve_calls(m.db.get_session(sid), [c])
+        await m.runner._resolve_calls(m.db.sessions.get_session(sid), [c])
         assert "unknown tool 'read_artifact'" in _ctx_text(m, sid, c["id"])
         await m.stop()
     asyncio.run(body())
@@ -241,13 +249,13 @@ class _FakeWeb:
 
 
 def _assert_nothing_masked(m: Manager, sid: str, call_id: str) -> None:
-    context = m.db.get_session(sid)["context"]
+    context = m.db.sessions.get_session(sid)["context"]
     assert not any(str(x.get("content") or "").startswith(compaction.RECEIPT_PREFIX) for x in context)
     assert not any("read_artifact" in str(x.get("content") or "") for x in context if x["role"] != "system")
     assert _ctx_text(m, sid, call_id) == PAGE
     assert _result_event(m, sid, call_id)["artifact_id"] is None
     assert not [e for e in events(m, sid, "compaction") if e["tier"] == "mask"]
-    assert m.db.full_artifact(sid, _digest(PAGE)) is None
+    assert m.db.sessions.full_artifact(sid, _digest(PAGE)) is None
 
 
 def test_chat_session_fetching_a_long_page_is_never_masked(tmp_path):
@@ -277,7 +285,7 @@ def test_agent_session_still_masks_the_same_fetch(tmp_path):
         assert "read_artifact" in {t["function"]["name"] for t in m.runner.tool_schemas(s, m.runner.workspace(s))}
         call_id = await _seed_result(m, sid, 1, PAGE, name="web_fetch")
         _finish_turn(m, sid)
-        await m.runner._maybe_compact(m.db.get_session(sid))
+        await m.runner._maybe_compact(m.db.sessions.get_session(sid))
         assert _ctx_text(m, sid, call_id).startswith(compaction.RECEIPT_PREFIX)
         await m.stop()
     asyncio.run(body())
@@ -293,7 +301,7 @@ def test_denied_by_project_policy_removes_the_tool_and_disables_masking(tmp_path
         assert not m.runner.artifact_tool_available(s)
         assert "read_artifact" not in {t["function"]["name"] for t in m.runner.tool_schemas(s, m.runner.workspace(s))}
         # A stale call (e.g. a model that remembers the tool) can neither run nor read stored artifacts.
-        m.db.put_artifact(sid, _digest(PAGE), PAGE)
+        m.db.sessions.put_artifact(sid, _digest(PAGE), PAGE)
         stale = call("read_artifact", 9, artifact_id=_digest(PAGE))
         await m.runner._resolve_calls(s, [stale])
         assert "unknown tool 'read_artifact'" in _ctx_text(m, sid, stale["id"])
@@ -303,7 +311,7 @@ def test_denied_by_project_policy_removes_the_tool_and_disables_masking(tmp_path
 
         call_id = await _seed_result(m, sid, 1, PAGE, name="web_fetch")
         _finish_turn(m, sid)
-        await m.runner._maybe_compact(m.db.get_session(sid))
+        await m.runner._maybe_compact(m.db.sessions.get_session(sid))
         assert _ctx_text(m, sid, call_id) == PAGE
         assert not [e for e in events(m, sid, "compaction") if e["tier"] == "mask"]
         await m.stop()
@@ -318,14 +326,14 @@ def test_policy_change_after_masking_stops_further_masking(tmp_path):
         sid = s["id"]
         first = await _seed_result(m, sid, 1, PAGE, name="web_fetch")
         _finish_turn(m, sid)
-        await m.runner._maybe_compact(m.db.get_session(sid))
+        await m.runner._maybe_compact(m.db.sessions.get_session(sid))
         assert _ctx_text(m, sid, first).startswith(compaction.RECEIPT_PREFIX)
 
         from harness.policy import Policy
         m.runner.policy = lambda _s: Policy([{"tool": "read_artifact", "action": "deny"}])
         second = await _seed_result(m, sid, 2, PAGE + "x", name="web_fetch")
         _finish_turn(m, sid)
-        await m.runner._maybe_compact(m.db.get_session(sid))
+        await m.runner._maybe_compact(m.db.sessions.get_session(sid))
         assert _ctx_text(m, sid, second) == PAGE + "x"
         assert len([e for e in events(m, sid, "compaction") if e["tier"] == "mask"]) == 1
         await m.stop()
@@ -350,7 +358,7 @@ def test_hosted_backend_sessions_never_reach_masking(tmp_path):
         async def forbidden(_s):
             raise AssertionError("_maybe_compact must not run for a hosted backend")
         m.runner._maybe_compact = forbidden
-        m.db.update_session(sid, backend="claude")
+        m.db.sessions.update_session(sid, backend="claude")
         await m.runner.run(sid)
         assert calls == [sid]
         await m.stop()

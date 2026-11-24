@@ -23,11 +23,14 @@ import logging
 import pkgutil
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 log = logging.getLogger("harness.modules")
 
 NAMESPACE = "harness_modules"
+# Where an add-on wheel carries the repository files its package reads (repo_file, scripts/packaging).
+REPO_FILES = "_repo_files"
 
 # The core's public interface for modules: name -> (core module, attribute). Resolved on first use, so importing
 # harness.modules never drags in the API or the manager.
@@ -48,6 +51,8 @@ _PUBLIC = {
     "database_reads": ("harness.db", "_reads"),
     "database_writes": ("harness.db", "_writes"),
     "AsyncDatabase": ("harness.db", "AsyncDatabase"),
+    "ModuleStore": ("harness.db", "ModuleStore"),  # a module's own queries on the shared database (#992)
+    "sha256_hex": ("harness.digests", "sha256_hex"),
     "GpuExclusive": ("harness.scheduler", "GpuExclusive"),
     "QueueFull": ("harness.scheduler", "QueueFull"),
     "SLEEPING": ("harness.local_inference", "SLEEPING"),
@@ -115,6 +120,8 @@ _PUBLIC = {
     "normalize_origin": ("harness.origins", "normalize_origin"),  # canonical browser origin, as keys and pairing use it
     "RouteTable": ("harness.api", "RouteTable"),
     "WebSessionResponse": ("harness.api_models", "WebSessionResponse"),
+    "documented": ("harness.response_docs", "documented"),  # a route's documentation-only reply model (#1015)
+    "response_docs": ("harness.response_docs", None),
     "require_owner": ("harness.api", "require_owner"),
     "app_auth": ("harness.apps", "auth"),
     "calling_app": ("harness.apps", "calling_app"),
@@ -143,7 +150,8 @@ _PUBLIC = {
     "remove_tree": ("harness.maintenance", "remove_tree"),
     "backup_sqlite": ("harness.sqlite_backup", "backup_sqlite"),
     "OWNER_USER_ID": ("harness.principal", "OWNER_USER_ID"),
-    "ROOT": ("harness.config", "ROOT"),
+    # No ROOT: an installed Server has no checkout. Modules reach repository files through repo_file below.
+    "resolve_config_dir": ("harness.config", "resolve_config_dir"),
     "write_atomic": ("harness.atomic_io", "write_atomic"),
     "ManagedStore": ("harness.managed_config", "ManagedStore"),
 }
@@ -157,6 +165,21 @@ def __getattr__(name: str) -> Any:
     # Not cached: patches to a public core attribute reach its consumers too.
     module = importlib.import_module(target[0])
     return module if target[1] is None else getattr(module, target[1])
+
+
+def repo_file(package: str | None, relative: str) -> Path:
+    """A repository file outside the module's package that the module reads (``docs/...``, ``macrunner/...``).
+
+    From a source checkout it is the checkout's own file. A Server installed from wheels has no checkout, so the
+    module's add-on wheel carries a copy in ``<package>/_repo_files/`` (the ``repo-files`` table in pyproject.toml,
+    #334). The path comes back whether or not it exists; reading a missing one fails with its name."""
+    from .config import CHECKOUT
+    if not package:
+        raise ValueError("repo_file takes the calling module's __package__")
+    carried = Path(sys.modules[package].__file__ or "").parent / REPO_FILES / relative
+    if carried.is_file() or CHECKOUT is None:
+        return carried
+    return CHECKOUT / relative
 
 
 def lazy(path: str, attr: str, *, call: bool = False) -> Callable[..., Any]:
@@ -347,6 +370,16 @@ class ModuleRuntime:
 
     def metrics(self, out, db) -> None:
         """Prometheus lines for /metrics (out.metric(name, type, help, rows))."""
+
+    def key_request_counts(self, key_ids: list[str]) -> dict[str, int]:
+        """{key id: requests logged with it} for the `/keys` listing, from a module that logs requests; none here."""
+        return {}
+
+    # scheduled jobs (harness/job_results.py is their shared result protocol)
+    def scheduled_job(self, jid: str) -> dict | None:
+        """Scheduled job `jid` (its `name` and `notify` mode among the rest) for a module that schedules jobs; None
+        here: this module schedules none."""
+        return None
 
 
 # discovery
@@ -585,6 +618,18 @@ class ModuleHost:
     def metrics(self, out, db) -> None:
         for rt in self:
             rt.metrics(out, db)
+
+    def key_request_counts(self, key_ids: list[str]) -> dict[str, int]:
+        """Each key's logged requests, summed over the modules that log them; a key with none is left out."""
+        out: dict[str, int] = {}
+        for rt in self:
+            for kid, n in rt.key_request_counts(key_ids).items():
+                out[kid] = out.get(kid, 0) + n
+        return out
+
+    def scheduled_job(self, jid: str) -> dict | None:
+        """Scheduled job `jid` from the module that schedules it; None when there is none, or no such module."""
+        return next((job for rt in self if (job := rt.scheduled_job(jid)) is not None), None)
 
 
 # route helpers for module handlers
