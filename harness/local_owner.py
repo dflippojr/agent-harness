@@ -99,7 +99,12 @@ def admitted(request, m, path: str) -> bool:
     key = m.db.credentials.api_key_by_secret(token) if token else None
     if key is not None:
         # The owner's admin token is the owner anywhere. Other tokens only reach the API routes that check them.
-        return api or (key.get("kind") == "owner" and "admin" in (key.get("scopes") or "").split())
+        if key.get("kind") == "owner" and "admin" in (key.get("scopes") or "").split():
+            # A route that never calls `require_admin` (the unversioned event streams) ends its stream when this key
+            # is revoked or released (#1061). Only the id is kept: the stream reads the row again, revoked or not.
+            request.state.admitted_key_id = key["id"]
+            return True
+        return api
     if token and path.startswith("/runners/"):
         return True  # runner routes check the runner token themselves
     return bool(request.query_params.get("ticket") and path.startswith("/api/v1/sessions/")

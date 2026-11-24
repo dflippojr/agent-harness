@@ -302,3 +302,27 @@ def test_ambient_owner_stream_survives_revoking_an_unrelated_key(tmp_path, monke
 
         with monkeypatch.context() as patch:
             asyncio.run(consume(patch))
+
+
+@pytest.mark.parametrize("surface", sorted(STREAMS))
+def test_a_key_revoked_before_the_first_frame_still_ends_its_stream(tmp_path, monkeypatch, surface):
+    """A session or chat stream finds its key on its first frame, not in the handler; a key revoked in between must
+    not leave the stream running as if no key had opened it."""
+    client, m = make_client(tmp_path)
+    key, token = m.db.credentials.create_api_key("reader", "admin", "owner", origins=[ORIGIN])
+    headers = {"Authorization": f"Bearer {token}", "Origin": ORIGIN}
+    with client:
+        path, subscription, sid = _seeded_stream_path(m, surface)
+        stream = _open_admin_stream(client, monkeypatch, path, headers)
+        assert m.db.credentials.revoke_api_key(key["id"])
+
+        async def consume(patch):
+            _short_tick(patch)
+            assert await anext(stream) == ": connected\n\n"
+            m.bus.emit(sid, "status", {"status": "done", "answer": "must not leak"})
+            with pytest.raises(StopAsyncIteration):
+                await anext(stream)
+            assert not m.bus._subs[subscription]
+
+        with monkeypatch.context() as patch:
+            asyncio.run(consume(patch))

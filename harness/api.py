@@ -1139,9 +1139,12 @@ async def _next_bus_event(sub, request: Request) -> tuple[dict | None, bool]:
 
 
 def _stream_key(request: Request, m: Manager) -> dict | None:
-    """The bearer key `require_admin` admitted this stream with on the admin surface, or None for an ambient Web
-    identity (Tailscale owner, local owner token), whose streams end only on an epoch bump (#787)."""
-    kid = getattr(request.state, "authenticated_key_id", None)
+    """The bearer key that admitted this stream: the one `require_admin` checked on the admin surface (#787), or the
+    owner key `local_owner.admitted` let through to an unversioned route (#1061). None for an ambient Web identity
+    (Tailscale owner, local owner token), whose streams end only on an epoch bump. The row is read by id, so a key
+    revoked before the stream's first frame still ends it."""
+    kid = (getattr(request.state, "authenticated_key_id", None)
+           or getattr(request.state, "admitted_key_id", None))
     return m.db.credentials.get_api_key(kid) if kid else None
 
 
