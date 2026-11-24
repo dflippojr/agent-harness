@@ -693,7 +693,7 @@ def test_assignment_tokens_cannot_escape_workspace():
         "ls OUT=//server/share",
     ]
     for command in path_escape:
-        el = _ask(command)
+        el = _static_rejection(command)
         assert el.ok is False, command
         assert el.reason == "path escapes workspace", (command, el.reason)
     assert _eligible("make build DESTDIR=/workspace/out")
