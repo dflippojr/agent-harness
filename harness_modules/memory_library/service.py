@@ -27,7 +27,8 @@ import re
 import time
 from pathlib import Path
 
-from harness.modules import MemoryLibraryConfig, ToolError, truncate_middle, write_text_within, run_cmd
+from harness.modules import (MemoryLibraryConfig, ToolError, harness_tool_names, run_cmd, truncate_middle,
+                             write_text_within)
 
 log = logging.getLogger("harness.memory_library")
 
@@ -360,7 +361,9 @@ class MemoryLibrary:
         return f"{' '.join(args['summary'].split())}\n\n{truncate_middle(diff, 12000)}", warning
 
     async def apply(self, name: str, args: dict, session_id: str, call_id: str) -> str:
-        approval = self.db.sessions.approval_for_call(session_id, call_id) if self.db is not None else None
+        # The approval of this exact call (#1063), asked natively or over MCP: a reused call id is another call.
+        approval = (self.db.sessions.approval_for_exact_call(session_id, call_id, harness_tool_names(name), args)
+                    if self.db is not None else None)
         if approval is None or approval["status"] != "approved":
             raise ToolError("memory library changes need the user's approval, and this one wasn't approved")
         async with self._lock:

@@ -35,7 +35,7 @@ from .db import Database, finish_then_cancel
 from .mcp_server import MCP_BACKENDS, SPLIT_TOOLS, McpRelay, McpServer, McpTokens
 from .principal import OWNER_USER_ID, session_user_id
 from .policy import (ALLOW, ASK, DENY, TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED, AppToolsPolicy,
-                     ChatPolicy, Policy, mcp_harness_tool)
+                     ChatPolicy, Policy, canonical_args, mcp_harness_tool)
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .runner_contract import RemoteWorkspace, RunnerError, NoRunnerHub
 from .disk_watch import AccountLimit, DiskLimits
@@ -470,12 +470,12 @@ class Runner(HostedRuns):
         bare = mcp_harness_tool(name)
         if bare is not None:
             self._mcp_grants.setdefault(sid, []).append(
-                {"tool": bare, "args": json.dumps(args, sort_keys=True), "call_id": call_id,
+                {"tool": bare, "args": canonical_args(args), "call_id": call_id,
                  "approval_call_id": approval_call_id or call_id})
 
     def _take_mcp_grant(self, sid: str, name: str, args: dict, tool_use_id: str) -> dict | None:
         grants = self._mcp_grants.get(sid) or []
-        wanted = json.dumps(args, sort_keys=True)
+        wanted = canonical_args(args)
         for grant in grants:
             if grant["tool"] == name and grant["args"] == wanted and (not tool_use_id
                                                                       or grant["call_id"] == tool_use_id):
@@ -1727,7 +1727,7 @@ class Runner(HostedRuns):
     async def _authorize(self, s: dict, call: dict, name: str, args: dict, ws: Workspace) -> str | None:
         """Apply the policy. Returns None to proceed, or the tool result to record instead of running it."""
         sid = s["id"]
-        existing = self.db.sessions.approval_for_call(sid, call["id"])
+        existing = self.db.sessions.approval_for_exact_call(sid, call["id"], name, args)
         if existing is None:
             decision = self._decide(s, name, args)
             telemetry.annotate({"harness.policy_decision": decision.action})

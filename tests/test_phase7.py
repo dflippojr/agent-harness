@@ -260,8 +260,9 @@ def test_memory_write_denied_or_stale_is_not_saved(tmp_path):
             self.rows = {}
             self.sessions = self  # the store's `sessions`, where approvals are read
 
-        def approval_for_call(self, sid, call_id):
-            return self.rows.get(call_id)
+        def approval_for_exact_call(self, sid, call_id, tools, args):
+            row = self.rows.get(call_id)
+            return row if row is not None and row["tool"] in tools and row["args"] == args else None
 
     lib.db = Approvals()
     args = {"path": "categories/sport/gear.md", "content": "# Gear\n- Innova bag\n", "summary": "Add gear list"}
@@ -272,7 +273,12 @@ def test_memory_write_denied_or_stale_is_not_saved(tmp_path):
         assert "+- Innova bag" in detail
         with pytest.raises(Exception, match="wasn't approved"):
             await lib.call("memory_write", args, session={"id": "s1"}, call_id="c1")
-        lib.db.rows["c1"] = {"status": "denied", "detail": detail}
+        lib.db.rows["c1"] = {"status": "denied", "detail": detail, "tool": "memory_write", "args": args}
+        with pytest.raises(Exception, match="wasn't approved"):
+            await lib.call("memory_write", args, session={"id": "s1"}, call_id="c1")
+        # approved, but for another call under the same id: it is not this call's approval (#1063)
+        lib.db.rows["c1"] = {"status": "approved", "detail": detail, "tool": "memory_write",
+                             "args": {**args, "summary": "something else"}}
         with pytest.raises(Exception, match="wasn't approved"):
             await lib.call("memory_write", args, session={"id": "s1"}, call_id="c1")
         # someone else pushes a different gear file after the proposal: the approved diff no longer matches
@@ -282,7 +288,7 @@ def test_memory_write_denied_or_stale_is_not_saved(tmp_path):
         git(other, "-c", "user.name=t", "-c", "user.email=t@example.com", "add", "-A")
         git(other, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "other")
         git(other, "push", "-q")
-        lib.db.rows["c1"] = {"status": "approved", "detail": detail}
+        lib.db.rows["c1"] = {"status": "approved", "detail": detail, "tool": "mcp__harness__memory_write", "args": args}
         with pytest.raises(Exception, match="changed after this change was proposed"):
             await lib.call("memory_write", args, session={"id": "s1"}, call_id="c1")
         assert git(lib.root, "status", "--porcelain") == ""

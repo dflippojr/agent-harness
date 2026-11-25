@@ -113,7 +113,8 @@ def test_a_failed_run_cancels_its_pending_approval(tmp_path, monkeypatch):
             s = await wait_status(m, sid, "failed")
             assert s["run"]["failure"]["code"] == "internal_error"
             assert m.db.sessions.pending_approvals(sid) == []
-            approval = m.db.sessions.approval_for_call(sid, "c0-write_file")
+            approval = m.db.sessions.approval_for_exact_call(sid, "c0-write_file", "write_file",
+                                                              {"path": "a.txt", "content": "x"})
             assert approval is not None and approval["status"] == "cancelled"
             results = {msg["tool_call_id"]: msg["content"] for msg in s["context"] if msg["role"] == "tool"}
             assert results == {"c0-write_file": NOT_RUN}

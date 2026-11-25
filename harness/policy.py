@@ -82,6 +82,18 @@ MCP_SERVER = "harness"
 MCP_PREFIX = f"mcp__{MCP_SERVER}__"
 
 
+def canonical_args(args) -> str:
+    """A call's arguments as one text form, the only way two calls' arguments are compared (#1063): key order does
+    not count, JSON types do. Python's == takes true for 1, false for 0 and 1 for 1.0, nested too; this does not
+    (and NaN, which never equals itself as a float, still matches its own text)."""
+    return json.dumps(args, sort_keys=True)
+
+
+def harness_tool_names(bare: str) -> tuple[str, str]:
+    """The names a harness tool's call is asked and recorded under: native, and over MCP (mcp__harness__<tool>)."""
+    return bare, MCP_PREFIX + bare
+
+
 def mcp_harness_tool(name: str) -> str | None:
     """The harness tool behind a Claude Code MCP tool name (mcp__harness__web_search -> web_search), else None."""
     bare = name[len(MCP_PREFIX):] if name.startswith(MCP_PREFIX) else ""

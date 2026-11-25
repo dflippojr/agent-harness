@@ -30,7 +30,7 @@ from .backends.print_mode import PrintModeSession
 from .cli_backends import CliBackendError, forwarder_url
 from .config import BUILTIN_BACKENDS, ModelConfig
 from .mcp_server import MCP_BACKENDS
-from .policy import ALLOW, ASK, DENY, TOOLS_ONLY, Decision, mcp_harness_tool
+from .policy import ALLOW, ASK, DENY, TOOLS_ONLY, Decision, canonical_args, mcp_harness_tool
 from .tools import truncate_middle
 
 if TYPE_CHECKING:
@@ -589,7 +589,7 @@ class HostedRuns:
         args = obj(request, "input")
         call_id = str(request.get("tool_use_id") or request_id)
         s = self._live(sid)
-        existing = self.db.sessions.approval_for_call(sid, call_id)
+        existing = self.db.sessions.approval_for_exact_call(sid, call_id, name, args)
         if existing is None and recovered and s["status"] == "waiting_approval":
             existing = self._recovery_approval(sid, name, args)
         if existing is None:
@@ -624,7 +624,7 @@ class HostedRuns:
         unanswered = self._recovery_unanswered.get(sid, set())
         matches = [approval for approval in self.db.sessions.approvals(sid)
                    if approval["id"] in unanswered and approval["id"] not in self.approval_events
-                   and approval["tool"] == name and approval["args"] == args]
+                   and approval["tool"] == name and canonical_args(approval["args"]) == canonical_args(args)]
         if len(matches) != 1:
             return None
         unanswered.discard(matches[0]["id"])
