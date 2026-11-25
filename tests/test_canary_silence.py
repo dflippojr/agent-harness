@@ -612,3 +612,49 @@ def test_alert_test_publishes_or_reports_the_refusal(tmp_path):
         m.notifier.publish = refused
         response = client.post("/canary/alert-test")
         assert response.status_code == 502 and response.json()["detail"] == "ntfy answered 401"
+
+
+# the freshness timestamp the production sweep reads from /metrics (#1071)
+LAST_COMPLETE = "harness_canary_last_complete_timestamp_seconds"
+
+
+def _metric_lines(store: CanaryStore) -> list[str]:
+    out = _Out()
+    _canary_metrics(SimpleNamespace(db=store.db, cfg=SimpleNamespace(canary=CanaryConfig()), guard=None), out)
+    return out.lines
+
+
+def test_last_complete_timestamp_is_the_newest_complete_finish_in_unix_seconds(tmp_path):
+    store = CanaryStore(Database(tmp_path / "h.sqlite3"))
+    for sha, started, finished in (("a", 1_000.0, 1_700_000_000.5), ("b", 2_000.0, 1_700_086_400.25),
+                                   ("c", 3_000.0, 1_700_043_200.0)):
+        store.begin(sha * 40, started)
+        store.finish(sha * 40, "complete", _outcomes(18), finished)
+    lines = _metric_lines(store)
+    assert f"# TYPE {LAST_COMPLETE} gauge" in lines
+    assert _gauges(store)[LAST_COMPLETE] == 1_700_086_400.25
+
+
+def test_last_complete_timestamp_is_absent_without_a_complete_row(tmp_path):
+    store = CanaryStore(Database(tmp_path / "h.sqlite3"))
+    assert not any(LAST_COMPLETE in line for line in _metric_lines(store))
+    store.begin("a" * 40, 1.0)
+    store.finish("a" * 40, "blocked", [], 2.0)
+    store.begin("b" * 40, 3.0)  # still running: no finish yet
+    store.begin("c" * 40, 4.0)  # complete, but no attempt was graded: not a result, as for the age gauge (#732)
+    store.finish("c" * 40, "complete", [{**o, "status": "suspended"} for o in _outcomes(0, total=2)], 5.0)
+    assert not any(LAST_COMPLETE in line for line in _metric_lines(store))
+    store.begin("d" * 40, 6.0)
+    store.finish("d" * 40, "complete", _outcomes(18), 1_700_000_000.0)
+    assert _gauges(store)[LAST_COMPLETE] == 1_700_000_000.0
+
+
+def test_last_complete_timestamp_ignores_rows_of_any_other_status(tmp_path):
+    store = CanaryStore(Database(tmp_path / "h.sqlite3"))
+    store.begin("a" * 40, 1.0)
+    store.finish("a" * 40, "complete", _outcomes(18), 1_700_000_000.0)
+    for sha, status in (("b", "blocked"), ("c", "skipped"), ("d", "failed"), ("e", "interrupted")):
+        store.begin(sha * 40, 2.0)
+        store.finish(sha * 40, status, _outcomes(18), 1_800_000_000.0)
+    store.begin("f" * 40, 3.0)  # a running row
+    assert _gauges(store)[LAST_COMPLETE] == 1_700_000_000.0
