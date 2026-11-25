@@ -13,7 +13,7 @@ requires-python = ">=3.12"
 # tests/test_packaging.py fails when the two lists differ.
 dependencies = [
     "httpx>=0.28.1",
-    "pyyaml>=6.0.3",
+    "pyyaml>=6.0.4",
     "fastapi>=0.163.1",
     "uvicorn>=0.54.0",
     "jsonschema>=4.26.0",
