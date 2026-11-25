@@ -271,6 +271,16 @@ Not on this surface: `/api/v1` app sessions, `/v1` inference, runner `POST /runn
 and ntfy `POST /a/{token}/{decision}`. Household members receive **403** `members cannot use the owner API` on
 every `/api/admin/v1` path and learn no admin data from the error.
 
+## Scheduled jobs
+
+`POST /jobs` and `PUT /jobs/{jid}` answer **400** with the reason for a schedule they reject: one that does not
+parse (`0,30, * * * *`) or one that parses but never matches (`0 0 30 2 *`, `0 0 31 4 *`). Nothing is saved.
+`catch_up_minutes` may be at most 525600 (one year); a larger value answers **422** and nothing is saved.
+
+`GET /jobs/preview?cron=...` reports on the schedule instead of rejecting the request (owner decision on #971): every
+schedule that create and update reject with 400 gets **200** with `{"ok": false, "error": "<reason>"}`, and a valid
+one gets 200 with `{"ok": true, "cron": "<normalized>", "next": [<timestamps>]}` (`count` 1-10, default 3).
+
 ## Maintenance
 
 `POST /api/admin/v1/maintenance/backup` (also `/maintenance/backup`) is owner-only. The dated backup contains
