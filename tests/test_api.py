@@ -293,6 +293,22 @@ def test_approval_requested_is_heard_only_once_the_session_waits(tmp_path):
         assert heard.count("status:waiting_approval") == 1  # announced once, not again by the waiting caller
 
 
+def test_approval_found_pending_again_parks_the_session_once(tmp_path):
+    """#1077: an approval found pending again (a retried or recovered call) parks a session that is not yet
+    `waiting_approval`, and announces nothing new for one that already is."""
+    client, m, _ = make_client(tmp_path, [Completion(content="hi")])
+    statuses: list[str] = []
+    m.bus.add_listener(lambda e: statuses.append(e["data"]["status"]) if e["type"] == "status" else None)
+    with client:
+        sid = client.post("/sessions", json={"prompt": "hello"}).json()["id"]
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
+        statuses.clear()
+        client.portal.call(m.runner._await_approval_status, sid)
+        assert m.db.sessions.get_session(sid)["status"] == "waiting_approval"
+        client.portal.call(m.runner._await_approval_status, sid)
+        assert statuses == ["waiting_approval"]
+
+
 @needs_host_git
 def test_templates_rerun_and_changes(tmp_path):
     steps = [
