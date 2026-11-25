@@ -312,13 +312,13 @@ def step_location(files: list[dict], path: str, start: int | None, end: int | No
         new_path = entry.get("filename", path)
         if status == "removed":
             return FileStep("touched", path)
+        # No patch and no changed lines: a pure rename or a permission change. The text, and every line, stays put.
+        metadata_only = not entry.get("patch") and not entry.get("changes")
         if start is None or end is None:
-            if status == "renamed" and not entry.get("patch") and not entry.get("changes"):
-                return FileStep("untouched", new_path)
-            return FileStep("touched", new_path)
+            return FileStep("untouched" if metadata_only else "touched", new_path)
         patch = entry.get("patch")
         if not patch:
-            if status == "renamed" and not entry.get("changes"):
+            if metadata_only:
                 return FileStep("untouched", new_path, start, end)
             return FileStep("unknown", reason="the diff has no text patch for the cited file")
         check = check_patch(patch, start, end, 0, adjacent)
@@ -543,7 +543,8 @@ class Measurer:
             if placed.outcome != "untouched":
                 # The parent no longer holds the cited lines as reviewed (a base merge rewrote them). That only
                 # matters when this commit changes the file; then it cannot be judged.
-                if any(finding.path in (f.get("filename"), f.get("previous_filename")) for f in own):
+                names = {finding.path, placed.path or finding.path}  # the file may have been renamed on the way
+                if any(names & {f.get("filename"), f.get("previous_filename")} for f in own):
                     unmappable = "the cited lines were rewritten by a merge before a later commit changed the file"
                 continue
             judged = step_location(own, placed.path, start and placed.start, end and placed.end)
