@@ -258,7 +258,7 @@ _SHELL_PUNCTUATION = re.compile(r";;&|;;|;&|\|&|<<<|<<-?|<>|\(\(|\)\)|>\||&&|\|\
 _SHELL_SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "\n"}
 _SHELL_REDIRECTS = {"<", ">", ">>", ">|", "<&", ">&", "&>", "&>>"}
 _PYTHON_MODULES = {"pytest", "unittest", "ruff", "mypy", "black", "isort", "pylint", "pyright",
-                   "py_compile", "compileall", "build", "todo"}
+                   "py_compile", "compileall", "build"}
 _PYTHON_STARTUP_VALUES = {"W": {"ignore", "default", "error", "always", "once", "module"},
                           "X": {"dev", "utf8", "utf8=0", "utf8=1", "faulthandler"}}
 _MODELED_ENV_VALUES = {"LC_ALL": {"C", "C.UTF-8"}, "LANG": {"C", "C.UTF-8"}, "TZ": {"UTC"}}
@@ -271,6 +271,57 @@ class _ShellToken:
     end: int
     operator: bool = False
     plain: bool = True
+
+
+def _join_shell_continuations(source: str) -> tuple[str, bool]:
+    """Normalize source before lexing, preserving quotes and non-continuation escapes.
+
+    Single-quoted text and comments retain literal line endings. Escaped
+    backslashes cannot quote a following newline. The returned flag keeps any
+    active continuation human-only, including after normalization resolves it.
+    """
+    out: list[str] = []
+    quote = ""
+    comment = False
+    word_start = True
+    continued = False
+    i = 0
+    while i < len(source):
+        char = source[i]
+        if comment:
+            out.append(char)
+            if char == "\n":
+                comment, word_start = False, True
+            i += 1
+            continue
+        if quote == "'":
+            out.append(char)
+            if char == "'":
+                quote = ""
+            i += 1
+            continue
+        if char == "\\" and i + 1 < len(source):
+            following = source[i + 1]
+            if following == "\n":
+                continued = True
+                i += 2
+                continue
+            if not quote or following in '$`"\\':
+                out.extend((char, following))
+                word_start = False
+                i += 2
+                continue
+        if quote == '"':
+            if char == '"':
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and word_start:
+            comment = True
+        out.append(char)
+        word_start = not quote and char in " \t\r\n;&|()<>"
+        i += 1
+    return "".join(out), continued
 
 
 class _ShellLexer:
@@ -307,12 +358,9 @@ class _ShellLexer:
         if self.i + 1 == len(self.command):
             raise ValueError("unfinished shell escape")
         following = self.command[self.i + 1]
-        if following == "\n":
-            # Continue collecting literal hazards, but do not claim this syntax
-            # is resolved. This includes continuations beside $ / ` / (.
-            self.result.opaque = True
-            self.i += 2  # removed before token recognition, also inside double quotes
-            return
+        # Joining belongs exclusively to the pre-lex pass. An unresolved escape
+        # here stays opaque; never recognize an operator on partially joined input.
+        self.result.opaque |= following == "\n"
         self._begin()
         self.plain = False
         if self.quote == '"' and following not in '$`"\\':
@@ -616,6 +664,8 @@ def _analyze_shell(command: str, result: _ShellAnalysis, changed_cwd: bool = Fal
     if depth > 20:
         result.opaque = True
         return
+    command, continued = _join_shell_continuations(command)
+    result.opaque |= continued
     try:
         tokens = _ShellLexer(command, result).scan()
     except ValueError:
