@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from harness.policy import ALLOW, ASK, DENY, Policy
+from harness.policy import ALLOW, ASK, DENY, Decision, Policy
 from harness.smart_approvals import (
     BLOCKING_FLAGS, RISK_FLAGS, SmartConfig, SmartReviewer, _relative_ok, assess_eligibility,
     parse_reviewer_output, reviewer_payload, runtime_mode, save_runtime_mode, strip_shell_comments,
@@ -24,6 +24,22 @@ def _ask(command: str, **args):
 
 def _eligible(command: str, **args) -> bool:
     return _ask(command, **args).ok
+
+
+def _static_rejection(command: str):
+    """Check the classifier's rejection independently, and the real policy pipeline too.
+
+    A deterministic human-only decision returns before eligibility inspects text,
+    so its diagnostic need not match the classifier's more specific reason.
+    """
+    args = {"command": command}
+    actual = Policy().decide(BASH, args)
+    assert actual.action == ASK, command
+    assert not assess_eligibility(BASH, args, actual).ok, command
+    decision = Decision(ASK, "runs a Claude Code shell command", smart_eligible=True)
+    result = assess_eligibility(BASH, args, decision)
+    assert not result.ok, command
+    return result
 
 
 # policy tagging
@@ -96,7 +112,7 @@ def test_midword_hash_never_hides_the_executed_command(command):
     stripped, err = strip_shell_comments(command)
     assert not err
     assert stripped == command
-    eligibility = _ask(command)
+    eligibility = _static_rejection(command)
     assert eligibility.ok is False
     assert eligibility.command == command
 
@@ -581,22 +597,22 @@ def test_workspace_confinement_rejects_home_drive_unc_and_dotdot():
         "echo {1..3}",
     ]
     for command in path_escape:
-        el = _ask(command)
+        el = _static_rejection(command)
         assert el.ok is False, command
         assert el.reason == "path escapes workspace", (command, el.reason)
     for command in substitution:
-        el = _ask(command)
+        el = _static_rejection(command)
         assert el.ok is False, command
         assert el.reason == "unresolved substitution", (command, el.reason)
-    globbed = _ask("ls ~/*")
+    globbed = _static_rejection("ls ~/*")
     assert globbed.ok is False
     assert globbed.reason == "unresolved glob"
-    redirected = _ask("pytest > ~/out.txt")
+    redirected = _static_rejection("pytest > ~/out.txt")
     assert redirected.ok is False
     assert redirected.reason == "shell chaining"
-    cd_home = _ask("cd ~")
+    cd_home = _static_rejection("cd ~")
     assert cd_home.ok is False
-    ssh_incidental = _ask("head ~/.ssh/id_rsa")
+    ssh_incidental = _static_rejection("head ~/.ssh/id_rsa")
     assert ssh_incidental.ok is False
     assert ssh_incidental.reason == "networked command", ssh_incidental.reason
 
@@ -677,7 +693,7 @@ def test_assignment_tokens_cannot_escape_workspace():
         "ls OUT=//server/share",
     ]
     for command in path_escape:
-        el = _ask(command)
+        el = _static_rejection(command)
         assert el.ok is False, command
         assert el.reason == "path escapes workspace", (command, el.reason)
     assert _eligible("make build DESTDIR=/workspace/out")
@@ -825,7 +841,7 @@ def test_closed_argv_grammar_allows_only_exact_shapes():
         el = _ask(command)
         assert el.ok is True, (command, el.reason)
     for command, reason in rejected:
-        el = _ask(command)
+        el = _static_rejection(command)
         assert el.ok is False, command
         assert el.reason == reason, (command, el.reason)
 
