@@ -157,8 +157,8 @@ def test_network_hazard_reason_survives_opaque_execution(tool, rules):
 
 
 @pytest.mark.parametrize("tool", ["run_shell", "exec_command"])
-@pytest.mark.parametrize("command", ["cd /workspace", "python -m todo list", "cd /workspace && python -m todo list"])
-def test_canary_read_and_absolute_cd_are_modeled(tool, command):
+@pytest.mark.parametrize("command", ["cd /workspace", "python -m pytest -q", "cd /workspace && python -m pytest -q"])
+def test_supported_module_and_absolute_cd_are_modeled(tool, command):
     assert Policy().decide(tool, {"command": command}).action == ALLOW
 
 
