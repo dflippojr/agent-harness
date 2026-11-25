@@ -69,6 +69,7 @@ CASES = [
     ("unmodeled-git-pager", "git --paginate status", ASK),
     ("resolved-alias-chain", "git -c alias.p=q -c alias.q=push p origin HEAD", DENY),
     ("resolved-shell-alias-push", "git -c 'alias.p=!git push' p origin HEAD", DENY),
+    ("r2b-canary-cd-rm-todo", "cd /workspace && rm -f /tmp/todo.json && python -m todo list", ASK),
 ]
 POSITIONS = ["{cmd}; echo tail", "echo head; {cmd}; echo tail", "echo head; {cmd}"]
 ENTRY_POINTS = ["{cmd}", "command -- sh -c {quoted}", "env LC_ALL=C sh -c {quoted}", "({cmd})"]
@@ -84,6 +85,8 @@ def test_closed_grammar_grid_never_allows_unresolved_execution(tool, entry, posi
     decision = Policy(repo=True).decide(tool, {"command": command})
     assert decision.action == expected, (case, command, decision)
     assert not decision.smart_eligible, (case, command, decision)
+    if case == "r2b-canary-cd-rm-todo":
+        assert decision.reason == "deletes files outside the scratch area"
 
 
 @pytest.mark.parametrize("tool", ["run_shell", "exec_command"])
@@ -121,4 +124,47 @@ def test_alias_resolution_is_bounded_and_stays_human_only():
     command = f"git {aliases} p0"
     decision = Policy().decide("exec_command", {"command": command})
     assert decision.action == ASK
+    assert not decision.smart_eligible
+
+
+@pytest.mark.parametrize("tool", SHELL_TOOLS)
+@pytest.mark.parametrize("rules", [[], ALLOW_ALL], ids=["default", "project-allow"])
+@pytest.mark.parametrize("hazard,reason", [
+    ("rm -rf src", "deletes files outside the scratch area"),
+    ("cd /workspace && rm -f /tmp/todo.json", "deletes files outside the scratch area"),
+    ("git reset --hard HEAD", "discards uncommitted work"),
+    ("git clean --for -d", "discards uncommitted work"),
+    ("git push origin HEAD", "git push"),
+])
+@pytest.mark.parametrize("opaque", ["python -m unknown_module", 'echo "$VALUE"',
+                                    "git --exec-path=helpers status"])
+@pytest.mark.parametrize("before", [False, True], ids=["opaque-after", "opaque-before"])
+def test_known_hazard_reason_survives_other_opaque_parts(tool, rules, hazard, reason, opaque, before):
+    command = f"{opaque}; {hazard}" if before else f"{hazard}; {opaque}"
+    decision = Policy(rules).decide(tool, {"command": command})
+    assert decision.action == ASK
+    assert decision.reason == reason
+    assert not decision.smart_eligible
+
+
+@pytest.mark.parametrize("tool", SHELL_TOOLS)
+@pytest.mark.parametrize("rules", [[], ALLOW_ALL], ids=["default", "project-allow"])
+def test_network_hazard_reason_survives_opaque_execution(tool, rules):
+    decision = Policy(rules).decide(tool, {"command": "python -m unknown_module", "network": True})
+    assert decision.action == ASK
+    assert decision.reason == "command needs network access"
+    assert not decision.smart_eligible
+
+
+@pytest.mark.parametrize("tool", ["run_shell", "exec_command"])
+@pytest.mark.parametrize("command", ["cd /workspace", "python -m todo list", "cd /workspace && python -m todo list"])
+def test_canary_read_and_absolute_cd_are_modeled(tool, command):
+    assert Policy().decide(tool, {"command": command}).action == ALLOW
+
+
+@pytest.mark.parametrize("tool", SHELL_TOOLS)
+def test_opaque_without_a_known_hazard_keeps_generic_human_only_reason(tool):
+    decision = Policy().decide(tool, {"command": "python -m unknown_module"})
+    assert decision.action == ASK
+    assert decision.reason == "cannot determine what the shell command does"
     assert not decision.smart_eligible
