@@ -649,6 +649,9 @@ class Runner(HostedRuns):
                                        "approval.auto_decide", target=existing["id"], kind="approval",
                                        metadata={"decision": "approved"})
             else:
+                # #1077: the session is waiting_approval before anyone hears of the request, in the same write, so
+                # a reader acting on the notification (or the event) finds the approval in `pending_approvals`.
+                self._status_writer(sid, "waiting_approval", {})()
                 self.bus.emit(sid, "approval_requested", public)
         with operation_audit.operation(
                 self.db, audit_context.AuditContext("system", "system", "", "agent"),
@@ -713,6 +716,13 @@ class Runner(HostedRuns):
 
     def set_status(self, sid: str, status: str, **fields) -> None:
         self.db.for_session(sid).write(self._status_writer(sid, status, fields))
+
+    async def _await_approval_status(self, sid: str) -> None:
+        """Park the session as `waiting_approval` for a pending approval. A new ask set it already, with the request
+        (`_persist_ask`); an approval found pending again (a retried or recovered call) sets it here."""
+        s = self.db.sessions.get_session(sid)
+        if s is None or s["status"] != "waiting_approval":
+            await self.aset_status(sid, "waiting_approval")
 
     async def aset_status(self, sid: str, status: str, **fields) -> None:
         """`set_status` for the event loop. A final status waits for the background checkpoint, so a session that
@@ -1750,7 +1760,7 @@ class Runner(HostedRuns):
 
         if existing["status"] == "pending":
             self.scheduler.release(sid)
-            await self.aset_status(sid, "waiting_approval")
+            await self._await_approval_status(sid)
             await self._park_sandbox(sid)
             with telemetry.span("approval_wait") as span:
                 existing = await self._wait_approval(existing["id"])

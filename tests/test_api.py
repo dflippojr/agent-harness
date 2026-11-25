@@ -265,6 +265,50 @@ def test_approval_notification_and_token_buttons(tmp_path):
         assert done["click"].endswith(f"/#/s/{sid}")
 
 
+def test_approval_requested_is_heard_only_once_the_session_waits(tmp_path):
+    """#1077: whoever hears `approval_requested` (the ntfy notifier, an event stream) and reads the session at once
+    finds it `waiting_approval`, with the approval in `pending_approvals`, and has already heard that status."""
+    rules = [{"tool": "write_file", "action": "ask", "reason": "test gate"}]
+    steps = [Completion(tool_calls=[call("write_file", 0, path="a.txt", content="x")]), Completion(content="done")]
+    client, m, _ = make_client(tmp_path, steps, rules=rules)
+    heard: list[str] = []
+    seen: list[dict] = []
+
+    def probe(event: dict) -> None:  # bus listeners run synchronously, right after the event's commit
+        heard.append(event["type"] if event["type"] != "status" else f"status:{event['data']['status']}")
+        if event["type"] == "approval_requested":
+            s = m.db.sessions.get_session(event["session_id"])
+            seen.append({"status": s["status"], "pending": m.summary(s).get("pending_approvals"),
+                         "id": event["data"]["id"], "heard": list(heard)})
+    m.bus.add_listener(probe)
+    with client:
+        sid = client.post("/sessions", json={"prompt": "write a file", "project": "guarded"}).json()["id"]
+        wait_for(lambda: seen)
+        approval = seen[0]
+        assert approval["status"] == "waiting_approval"
+        assert [a["id"] for a in approval["pending"] or []] == [approval["id"]]
+        assert "status:waiting_approval" in approval["heard"]
+        client.post(f"/sessions/{sid}/approvals/{approval['id']}", json={"decision": "approve"})
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
+        assert heard.count("status:waiting_approval") == 1  # announced once, not again by the waiting caller
+
+
+def test_approval_found_pending_again_parks_the_session_once(tmp_path):
+    """#1077: an approval found pending again (a retried or recovered call) parks a session that is not yet
+    `waiting_approval`, and announces nothing new for one that already is."""
+    client, m, _ = make_client(tmp_path, [Completion(content="hi")])
+    statuses: list[str] = []
+    m.bus.add_listener(lambda e: statuses.append(e["data"]["status"]) if e["type"] == "status" else None)
+    with client:
+        sid = client.post("/sessions", json={"prompt": "hello"}).json()["id"]
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
+        statuses.clear()
+        client.portal.call(m.runner._await_approval_status, sid)
+        assert m.db.sessions.get_session(sid)["status"] == "waiting_approval"
+        client.portal.call(m.runner._await_approval_status, sid)
+        assert statuses == ["waiting_approval"]
+
+
 @needs_host_git
 def test_templates_rerun_and_changes(tmp_path):
     steps = [
