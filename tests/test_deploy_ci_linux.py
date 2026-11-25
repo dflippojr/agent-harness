@@ -115,11 +115,16 @@ def _executable(path: Path, text: str) -> None:
     path.chmod(0o755)
 
 
-def _layout(tmp_path: Path, *, python: Path | None = None, exec_start: str | None = None) -> dict[str, object]:
-    """A release checkout, a live checkout, an installer layout, and fake commands on PATH."""
+def _layout(
+    tmp_path: Path, *, python: Path | None = None, exec_start: str | None = None, home: Path | None = None
+) -> dict[str, object]:
+    """A release checkout, a live checkout, an installer layout, and fake commands on PATH.
+
+    With `home`, the checkout and the installer sit at the script's Linux defaults under that home directory.
+    """
     release = tmp_path / "release"
-    deploy = tmp_path / "agent-harness"
-    install = tmp_path / "install"
+    deploy = tmp_path / "agent-harness" if home is None else home / "Projects" / "agent-harness"
+    install = tmp_path / "install" if home is None else home / ".local" / "share" / "agent-harness"
     (release / ".git").mkdir(parents=True)
     (deploy / ".git").mkdir(parents=True)
     (release / "requirements.txt").write_text("# intentionally empty\n", encoding="utf-8")
@@ -191,6 +196,8 @@ def _layout(tmp_path: Path, *, python: Path | None = None, exec_start: str | Non
         "FAKE_FAIL_STOP_CALLS": "",
         "FAKE_FAIL_RESTART": "0",
     }
+    if home is not None:
+        env["HOME"] = str(home)
     return {
         "release": release, "deploy": deploy, "install": install, "supervisor": supervisor,
         "stables": stables, "env": env, "state": state,
@@ -325,6 +332,32 @@ def test_linux_dry_run_plans_systemd_steps_against_linux_paths_without_restartin
     assert layout["supervisor"].read_text(encoding="utf-8") == OLD_SUPERVISOR
     assert not (layout["deploy"] / ".venv-path").exists()
     assert not staged_venv.exists()
+
+
+def test_linux_default_paths_follow_the_user_home_not_the_owner(tmp_path):
+    """Without -DeployDir and -InstallDir, the Linux defaults are under $HOME, so a service user's deploy finds its own
+    checkout and installer (#1070)."""
+    layout = _layout(tmp_path, home=tmp_path / "service-home")
+    # The defaults are the only paths left out, so the run takes both from $HOME.
+    arguments = [part for name, value in _deploy_object(layout).items()
+                 if name not in ("DeployDir", "InstallDir") for part in (f"-{name}", value)]
+    result = subprocess.run(
+        [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(ROOT / "ops/harness/deploy-ci.ps1"),
+         *arguments, "-DryRun"],
+        cwd=ROOT, env=layout["env"], capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert_no_sudo(layout)
+    assert result.returncode == 0, output(result)
+
+    plan = result.stdout
+    install = layout["install"]
+    assert f"[dry run] {install}/venv/bin/python -m venv" in plan
+    assert f"{layout['deploy']}/.venv-path -> " in plan
+    assert "/home/daniel" not in plan
+
+    script = (ROOT / "ops/harness/deploy-ci.ps1").read_text(encoding="utf-8")
+    assert "/home/daniel" not in script
+    assert r"else { 'D:\Projects\agent-harness' }" in script, "the Windows default changed"
 
 
 def test_linux_deploy_refuses_a_unit_that_does_not_run_the_installed_supervisor(tmp_path):
