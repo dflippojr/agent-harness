@@ -242,3 +242,67 @@ def test_a_pdf_parser_failure_marks_and_taints_a_native_session_instead_of_crash
         await wait_status(m, s["id"], "done")
         await m.stop()
     asyncio.run(body())
+
+
+class _LockedPdf:
+    def __init__(self, stream):
+        self.is_encrypted = True
+
+    def decrypt(self, password):
+        return 0
+
+
+def test_failures_in_fixed_harness_wording_stay_plain_after_the_request(monkeypatch):
+    """Criterion 3 also holds after a request: a message with no value from the response is the harness's own."""
+    import pypdf
+
+    def server(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/big":
+            return httpx.Response(200, headers={"content-type": "text/plain"}, content=b"x" * 2048)
+        if path.startswith("/loop"):
+            return httpx.Response(302, headers={"location": f"/loop{len(path)}"})
+        return httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.7 locked")
+
+    monkeypatch.setattr(pypdf, "PdfReader", _LockedPdf)
+    web = WebTools(WebConfig(enabled=True, max_bytes=1024), resolver=_resolve, transport=httpx.MockTransport(server))
+    for url, text in [("https://evil.example/big", "larger than"), ("https://evil.example/loop", "too many redirects"),
+                      ("https://evil.example/doc.pdf", "password-protected")]:
+        with pytest.raises(ToolError, match=text) as caught:
+            asyncio.run(web.web_fetch(url))
+        assert getattr(caught.value, "banner", None) is None, url
+
+
+def test_a_message_quoting_a_value_from_the_document_stays_untrusted(monkeypatch):
+    import pypdf
+
+    class _Blank:
+        def __init__(self, stream):
+            self.is_encrypted, self.metadata = False, None
+            self.pages = [type("P", (), {"extract_text": lambda self: ""})()] * 7
+
+    monkeypatch.setattr(pypdf, "PdfReader", _Blank)
+    web = WebTools(WebConfig(enabled=True), resolver=_resolve, transport=httpx.MockTransport(_pdf_server))
+    with pytest.raises(ToolError, match=r"\(7 pages\) has almost no text layer") as caught:
+        asyncio.run(web.web_fetch("https://evil.example/doc.pdf"))
+    assert getattr(caught.value, "banner", None) == UNTRUSTED
+
+
+def test_an_oversized_page_neither_marks_nor_taints_a_native_session(tmp_path):
+    cfg = make_cfg(tmp_path, rules=NET_ALLOW)
+
+    async def body():
+        m = Manager(cfg, chat=Script([
+            Completion(tool_calls=[call("web_fetch", 0, url="https://evil.example/big")]),
+            Completion(content="done")]))
+        m.runner.web = WebTools(WebConfig(enabled=True, max_bytes=1024), resolver=_resolve,
+                                transport=httpx.MockTransport(lambda r: httpx.Response(
+                                    200, headers={"content-type": "text/plain"}, content=b"x" * 2048)))
+        await m.start()
+        s = m.create("read the page", project="guarded")
+        await wait_status(m, s["id"], "done")
+        result = events(m, s["id"], "tool_result")[0]
+        assert result["ok"] is False and result["output"] == "Error: page is larger than 0 MB"
+        assert not events(m, s["id"], "taint_added") and not m.db.sessions.get_session(s["id"]).get("taint")
+        await m.stop()
+    asyncio.run(body())
