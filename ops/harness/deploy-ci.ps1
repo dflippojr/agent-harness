@@ -28,9 +28,9 @@ unit) are the deployed ones and the daemon is healthy, the script reports that a
 param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$Commit,
     [string]$ReleaseRoot = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
-    [string]$DeployDir = $(if ($IsLinux) { '/home/daniel/Projects/agent-harness' } else { 'D:\Projects\agent-harness' }),
+    [string]$DeployDir = $(if ($IsLinux) { Join-Path $HOME 'Projects/agent-harness' } else { 'D:\Projects\agent-harness' }),
     # Linux only: the install/install.sh layout and the systemd user unit that runs the daemon.
-    [string]$InstallDir = '/home/daniel/.local/share/agent-harness',
+    [string]$InstallDir = (Join-Path $HOME '.local/share/agent-harness'),
     [string]$DaemonUnit = 'agent-harness-main-daemon.service',
     [string]$Registry = 'ghcr.io/dflippojr',
     [string]$StablesRelease = '',
