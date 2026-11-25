@@ -41,6 +41,16 @@ class ToolError(Exception):
     pass
 
 
+class UntrustedToolError(ToolError):
+    """A tool failure whose message carries text a remote party chose, such as a redirect target or a content type
+    (#1060). The runner opens the error result with `banner` and taints the session as the tool's successful result
+    would."""
+
+    def __init__(self, message: str, *, banner: str):
+        super().__init__(message)
+        self.banner = banner
+
+
 def truncate_middle(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text

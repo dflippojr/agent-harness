@@ -12,9 +12,14 @@ SNI keep the original name), so a DNS answer can't change between the check and 
 Hermes Agent's tools/url_safety.py and web_tools_truncate.py (MIT); see docs/phase6a-hermes-study.md.
 
 GitHub repository and file pages extract badly as HTML (navigation noise, a truncated README), so they're read through
-GitHub's public API and raw file host instead (github_sources / github_text), falling back to the HTML on any error.
+GitHub's public API and raw file host instead (github_sources / github_text), falling back to the HTML when a download
+fails. An answer github_text can't turn into text is an untrusted failure like any other after the request (#1060).
 
-What a page says is untrusted data; results say so to the model.
+What a page says is untrusted data; results say so to the model. So is a failure from the first request on (#1060): its
+message can carry a status, header, redirect target or error text the server chose, so it is an UntrustedToolError
+with the same banner, and it taints the session like a page. Refusals decided from the model's own URL before any
+request (scheme, credentials, internal name, DNS, blocked address) stay plain errors, as do the few later failures in
+fixed harness wording (FixedToolError: the size cap, the redirect limit, a password-protected PDF).
 """
 
 from __future__ import annotations
@@ -34,7 +39,7 @@ import httpx
 
 from .config import WebConfig
 from . import taint
-from .fileops import ToolError
+from .fileops import ToolError, UntrustedToolError
 
 log = logging.getLogger("harness.web_tools")
 
@@ -50,6 +55,18 @@ PDF_TYPES = ("application/pdf", "application/x-pdf")
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 MAX_PDF_PAGES = 400
 UNTRUSTED = taint.banner("web content")
+MAX_ERROR_CHARS = 300  # an untrusted failure's whole message is cut to this
+
+
+class FixedToolError(ToolError):
+    """A failure after the request whose message is fixed harness wording with no value from the response (a size
+    cap, the redirect limit): it passes the untrusted boundary as a plain error (#1060). Any other failure from the
+    first request on is untrusted, so a new error is marked unless it opts out here."""
+
+
+def _untrusted(message: str) -> UntrustedToolError:
+    """A fetch failure whose message may carry text the server chose (#1060)."""
+    return UntrustedToolError(message[:MAX_ERROR_CHARS], banner=UNTRUSTED)
 
 
 def _fn(name: str, description: str, properties: dict, required: list[str] | None = None) -> dict:
@@ -133,7 +150,7 @@ def pdf_to_text(body: bytes) -> tuple[str, str]:
     try:
         reader = pypdf.PdfReader(io.BytesIO(body))
         if reader.is_encrypted and not reader.decrypt(""):
-            raise ToolError("the PDF is password-protected")
+            raise FixedToolError("the PDF is password-protected")
     except ToolError:
         raise
     except Exception as e:  # noqa: BLE001 - pypdf raises many kinds of errors for broken files
@@ -414,8 +431,9 @@ class WebTools:
         host_header = host + (f":{parts.port}" if parts.port else "")
         return urlunsplit((parts.scheme, netloc, parts.path or "/", parts.query, "")), host, host_header
 
-    async def _download(self, url: str) -> tuple[str, str, bytes]:
-        """(final URL, content type, body) following redirects, each hop checked."""
+    async def _download(self, url: str, sent: list | None = None) -> tuple[str, str, bytes]:
+        """(final URL, content type, body) following redirects, each hop checked. Failures are raised as they come;
+        `sent` gets an item once the first request is about to go out, and _page decides what they are (#1060)."""
         current = url
         async with self._client(self.cfg.timeout_seconds) as client:
             for _ in range(MAX_REDIRECTS + 1):
@@ -423,6 +441,8 @@ class WebTools:
                 request = client.build_request("GET", target, headers={
                     "Host": host_header, "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5"},
                     extensions={"sni_hostname": host})
+                if sent is not None and not sent:
+                    sent.append(True)
                 resp = await client.send(request, stream=True)
                 try:
                     if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("location"):
@@ -436,40 +456,56 @@ class WebTools:
                     return current, ctype, await self._read_limited(resp, limit)
                 finally:
                     await resp.aclose()
-        raise ToolError(f"too many redirects (more than {MAX_REDIRECTS})")
+        raise FixedToolError(f"too many redirects (more than {MAX_REDIRECTS})")
 
     async def _read_limited(self, resp: httpx.Response, limit: int) -> bytes:
         body = bytearray()
         async for chunk in resp.aiter_bytes():
             body += chunk
             if len(body) > limit:
-                raise ToolError(f"{'document' if limit != self.cfg.max_bytes else 'page'} is larger "
-                                f"than {limit // 2**20} MB")
+                raise FixedToolError(f"{'document' if limit != self.cfg.max_bytes else 'page'} is larger "
+                                     f"than {limit // 2**20} MB")
         return bytes(body)
 
     async def _page(self, url: str) -> tuple[str, str, str]:
         hit = self._pages.get(url)
         if hit and time.time() - hit[0] < CACHE_SECONDS:
             return url, hit[1], hit[2]
-        github = await self._github(url)
-        if github:
-            entry = (time.time(), *github)
-            self._remember(self._pages, url, entry)
-            return url, entry[1], entry[2]
+        # The one untrusted choke point (#1060). From the first request on, whatever fails (a status, a redirect
+        # target, a transport error, a parser reading the body lazily, GitHub API answers turned into text) may carry
+        # the server's words, so any exception leaves here as one bounded UntrustedToolError with its cause. Only
+        # fixed harness wording (FixedToolError) and refusals of the model's own URL before any request pass as plain
+        # errors.
+        sent: list = []
         try:
-            final, ctype, body = await self._download(url)
-        except httpx.HTTPError as e:
-            raise ToolError(f"fetch failed: {type(e).__name__}: {e}"[:300]) from e
-        convert, args = _extract_text(ctype, body, final)
-        title, text = await asyncio.to_thread(convert, *args)
-        text = strip_base64_images(re.sub(r"\n{3,}", "\n\n", text)).strip()
+            github = await self._github(url, sent)
+            if github:
+                entry = (time.time(), *github)
+                self._remember(self._pages, url, entry)
+                return url, entry[1], entry[2]
+            final, ctype, body = await self._download(url, sent)
+            convert, args = _extract_text(ctype, body, final)
+            title, text = await asyncio.to_thread(convert, *args)
+            text = strip_base64_images(re.sub(r"\n{3,}", "\n\n", text)).strip()
+        except FixedToolError:
+            raise
+        except Exception as e:  # noqa: BLE001 - after a request every kind of error may quote the server
+            if not sent:
+                if isinstance(e, ToolError):
+                    raise
+                raise ToolError(f"invalid URL: {type(e).__name__}: {e}"[:MAX_ERROR_CHARS]) from e
+            if isinstance(e, ToolError):
+                raise _untrusted(str(e)) from (e.__cause__ or e)
+            raise _untrusted(f"fetch failed: {type(e).__name__}: {e}") from e
         entry = (time.time(), title, f"(final URL: {final})\n\n{text}" if final != url else text)
         self._remember(self._pages, url, entry)
         return url, entry[1], entry[2]
 
-    async def _github(self, url: str) -> tuple[str, str] | None:
+    async def _github(self, url: str, sent: list) -> tuple[str, str] | None:
         """(title, text) of a GitHub repository/folder/file page via the API and raw host, or None to use the HTML.
-        The README and file listing are optional; the repository metadata (or the raw file) is not."""
+        The README and file listing are optional; the repository metadata (or the raw file) is not. A failed download
+        falls back to the HTML page; once the bodies are in, `sent` is marked and any failure turning them into text
+        is _page's untrusted error (#1060)."""
         info = github_sources(url)
         if info is None:
             return None
@@ -477,15 +513,13 @@ class WebTools:
         for key, source in info["urls"].items():
             try:
                 _, _, bodies[key] = await self._download(source)
-            except (ToolError, httpx.HTTPError) as e:
+            except Exception as e:  # noqa: BLE001 - any failure falls back to the HTML page, read through _page
                 if key in ("meta", "raw"):
                     log.info("GitHub API unavailable for %s (%s); using the HTML page", url, e)
                     return None
-        try:
-            return github_text(info, bodies)
-        except (ValueError, KeyError, TypeError) as e:
-            log.info("unexpected GitHub API answer for %s (%s); using the HTML page", url, e)
-            return None
+        if not sent:
+            sent.append(True)
+        return github_text(info, bodies)
 
     async def web_fetch(self, url: str, start: int = 0, find: str = "") -> str:
         url = url.strip()

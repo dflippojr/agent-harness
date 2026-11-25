@@ -42,7 +42,7 @@ from .disk_watch import AccountLimit, DiskLimits
 from .sandbox import NoDockerSandbox, Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
 from .settings import app_allows
-from .fileops import CAPTURE_CAPPED_NOTE, dir_size  # noqa: F401 - dir_size is re-exported for maintenance
+from .fileops import CAPTURE_CAPPED_NOTE, UntrustedToolError, dir_size  # noqa: F401 - dir_size is re-exported for maintenance
 from .tools import ToolError, Workspace, artifact_footer, bound_shell_text, truncate_middle, utf8_text, validate_args
 from .verify import ToolOutput, bound_rendered, render_verify
 from .local_inference import EXPECTED_WAKE_SECONDS, SLEEPING, UNLOADED, WAKING, NoWarmer
@@ -491,13 +491,13 @@ class Runner(HostedRuns):
             return ("Error: this call was not allowed through the harness approval policy. Call the tool normally "
                     "so the harness can decide it."), False
         s = self.db.sessions.get_session(sid)
-        if name not in {t["function"]["name"] for t in self.mcp_tool_schemas(sid)}:
+        if s is None or name not in {t["function"]["name"] for t in self.mcp_tool_schemas(sid)}:
             return f"Error: unknown tool {name!r}", False
         try:
             with telemetry.span("mcp_tool_call", {"gen_ai.tool.name": name, "harness.backend": s["backend"]}):
                 output = await self._dispatch_mcp(s, grant["approval_call_id"], name, args)
         except (ToolError, OSError, UnicodeError) as e:
-            return f"Error: {e}", False
+            return self._error_result(s, name, args, e), False
         self._taint_from_result(s, name, args, output)  # MCP results are untrusted content like the native tools' (#262)
         # The hosted model gets the native loop's context-only banner (#653); _record_cli_tool_result drops it again.
         tainted = isinstance(output, ToolOutput) and bool(output.taint)
@@ -1836,6 +1836,14 @@ class Runner(HostedRuns):
         for kind, origin in sources:
             self._add_taint(s["id"], kind, origin)
 
+    def _error_result(self, s: dict, name: str, args: dict, e: Exception) -> str:
+        """The result text of a failed call. A failure carrying text a remote party chose (#1060) opens with the
+        tool's untrusted banner and taints the session exactly as a successful result of that call would."""
+        if not isinstance(e, UntrustedToolError):
+            return f"Error: {e}"
+        self._taint_from_result(s, name, args)
+        return f"{e.banner}\nError: {e}"
+
     async def _member_tool_block(self, s: dict, call: dict, name: str, ws: Workspace) -> str | None:
         """An approved call still can't run for a household member without the tool; the recorded error, else None."""
         if session_user_id(s) == OWNER_USER_ID:
@@ -1928,7 +1936,7 @@ class Runner(HostedRuns):
                 output = await self._dispatch(sid, s, call, name, args, ws, kit)
         except (ToolError, OSError, UnicodeError) as e:
             ok = False
-            output = f"Error: {e}"
+            output = self._error_result(s, name, args, e)
         if ok:
             self._taint_from_result(s, name, args, output)
         extra = {}
