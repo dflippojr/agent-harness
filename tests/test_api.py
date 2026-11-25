@@ -311,7 +311,10 @@ def test_approval_found_pending_again_parks_the_session_once(tmp_path):
     m.bus._deliver = slow_done
     with client:
         sid = client.post("/sessions", json={"prompt": "hello"}).json()["id"]
-        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
+        # Wait for the listener to hear `done`, not for the database to read it: the event is delivered after
+        # the commit, so a status it brings late would otherwise land after the clear (#1090).
+        wait_for(lambda: "done" in statuses)
+        assert m.db.sessions.get_session(sid)["status"] == "done"
         statuses.clear()
         client.portal.call(m.runner._await_approval_status, sid)
         assert m.db.sessions.get_session(sid)["status"] == "waiting_approval"
