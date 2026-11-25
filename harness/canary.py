@@ -210,6 +210,14 @@ class CanaryStore:
             ).fetchone()[0]
         return self.db.read(read)
 
+    def last_finished_complete_at(self) -> float | None:
+        """When the newest `complete` row finished, graded or not: the freshness timestamp the production sweep reads
+        from /metrics (#1071). Unlike `last_complete_at`, a complete run with no graded attempt still counts."""
+        def read():
+            return self.db.conn.execute(
+                "SELECT MAX(finished_at) FROM canary_results WHERE status = 'complete'").fetchone()[0]
+        return self.db.read(read)
+
     # the nightly slots (#732)
     def open_slot(self, at: float, sha: str) -> int:
         """Record a slot as it starts, before anything else it writes. It stays `pending` until `record_slot`, so a
