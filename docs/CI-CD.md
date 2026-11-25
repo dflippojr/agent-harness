@@ -532,6 +532,16 @@ and the session and marker cleanup above is the fallback. The session and marker
 path. On the namespace path, a descendant outlives the review only if `pwsh` and its watchdog are both killed while
 the command itself keeps running.
 
+### Review acceptance
+
+`scripts/review_acceptance.py` measures how often authors act on the automated review (#1011). For each review
+comment on the last N merged PRs, it records whether a commit pushed after the reviewed commit, before the merge,
+changed the cited lines. Advisory suggestions name only a file, so they are measured at file level. It reports
+acceptance per backend, per severity (blocking or advisory) and per finding type. It reads GitHub through `gh api`
+and changes nothing in the review itself. The committed baseline is [review-acceptance.md](review-acceptance.md):
+`python scripts/review_acceptance.py --limit 50 --out docs/review-acceptance.md` regenerates it, and `--json`
+also writes the per-finding rows.
+
 ### Adopting the review workflow
 
 Other projects call this repository's `review.yml` as a reusable workflow (`on: workflow_call`) instead of carrying a
