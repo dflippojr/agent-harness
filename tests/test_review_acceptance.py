@@ -693,3 +693,24 @@ def test_a_failed_fetch_stops_the_run(git_env, monkeypatch, capsys):
     })
     assert ra.main(["--repo", REPO, "--remote", (git_env / "nowhere").as_uri()], fetch=fake) == 1
     assert "git fetch" in capsys.readouterr().err
+
+
+def test_grid_a_permission_only_commit_keeps_the_line_positions(git_env):
+    """Review round 3 on #1089 (F1): a mode change has no text patch; the fix after it still maps and counts."""
+    origin = Origin(git_env / "origin")
+    origin.git("update-index", "--chmod=+x", "a.py")
+    origin.git("commit", "-q", "-m", "make a.py executable")
+    origin.commit("fix", {"a.py": numbered(l10="fixed")})
+    assert measure_case(origin) == (ra.ACCEPTED, "")
+
+
+def test_grid_a_later_edit_of_a_file_a_base_merge_renamed_and_rewrote_is_unknown(git_env):
+    """Review round 3 on #1089 (F2): the unmappable check follows the rename, so this is unknown, not not-accepted."""
+    origin = Origin(git_env / "origin")
+    origin.checkout("main")
+    origin.commit("main renames a.py and rewrites the line", {"a.py": None, "d.py": numbered(l10="from main")})
+    origin.checkout("pr")
+    origin.merge("main")
+    origin.commit("edit the renamed file elsewhere", {"d.py": numbered(l2="two", l10="from main")})
+    outcome, reason = measure_case(origin)
+    assert outcome == ra.UNKNOWN and "rewritten by a merge" in reason
