@@ -508,3 +508,171 @@ def test_the_backend_is_the_job_footer_not_one_quoted_in_the_review():
     )
     review = ra.parse_review(quoted)
     assert review is not None and (review.backend, review.model) == ("codex", "gpt-6.1-sol, xhigh")
+
+
+# ------------------------------------------------- owner decision 1a on #1011: the PR's own commits, judged in git
+#
+# "Later commits" are exactly the PR's own commits after the reviewed commit: from pulls/N/commits, descending from
+# it, not reachable from the base. Each non-merge commit is judged on its own diff. These cases run real git
+# repositories as the remote, fetched the way the script fetches GitHub.
+
+
+@pytest.fixture
+def git_env(tmp_path, monkeypatch):
+    config = tmp_path / "gitconfig"
+    config.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for name in ("GIT_AUTHOR", "GIT_COMMITTER"):
+        monkeypatch.setenv(f"{name}_NAME", "Test")
+        monkeypatch.setenv(f"{name}_EMAIL", "test@example.invalid")
+    return tmp_path
+
+
+def numbered(count: int = 20, **changes: str) -> str:
+    """A file of `line1`..`lineN`, with `l<number>=text` replacing single lines."""
+    lines = [changes.get(f"l{i}", f"line{i}") for i in range(1, count + 1)]
+    return "\n".join(lines) + "\n"
+
+
+class Origin:
+    """A git repository standing in for GitHub: branches, merges and refs/pull/N/head."""
+
+    def __init__(self, path: Path):
+        path.mkdir()
+        self.path = path
+        self.git("init", "-q", "-b", "main")
+        self.base = self.commit("base", {"a.py": numbered(), "b.py": "b\n", "c.py": "c\n"})
+        self.git("checkout", "-q", "-b", "pr")
+        self.reviewed = self.commit("reviewed", {"b.py": "b reviewed\n"})
+
+    def git(self, *args: str) -> str:
+        proc = subprocess.run(["git", "-c", "core.autocrlf=false", "-c", "commit.gpgsign=false", *args],
+                              cwd=self.path, capture_output=True, text=True, check=True)
+        return proc.stdout.strip()
+
+    def commit(self, message: str, files: dict[str, str | None]) -> str:
+        for name, text in files.items():
+            target = self.path / name
+            if text is None:
+                target.unlink()
+            else:
+                target.write_text(text, encoding="utf-8", newline="\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "--allow-empty", "-m", message)
+        return self.git("rev-parse", "HEAD")
+
+    def checkout(self, branch: str, new_at: str | None = None) -> None:
+        self.git("checkout", "-q", *(["-b", branch, new_at] if new_at else [branch]))
+
+    def merge(self, other: str) -> str:
+        self.git("merge", "-q", "--no-ff", "--no-edit", other)
+        return self.git("rev-parse", "HEAD")
+
+    def publish(self, number: int) -> tuple[str, list[dict]]:
+        """Point refs/pull/N/head at the PR branch; return the head and GitHub's commit list (base..head)."""
+        head = self.git("rev-parse", "pr")
+        self.git("update-ref", f"refs/pull/{number}/head", head)
+        listed = []
+        for line in self.git("rev-list", "--reverse", "--parents", f"main..{head}").splitlines():
+            sha, *parents = line.split()
+            listed.append({"sha": sha, "parents": [{"sha": p} for p in parents]})
+        return head, listed
+
+
+def measure_case(origin: Origin, citation: str = "a.py:10", reviewed: str | None = None,
+                 window: int = 0) -> tuple[str, str]:
+    head, listed = origin.publish(7)
+    body = review_body(f"- {citation} — a bug", sha=reviewed or origin.reviewed)
+    fake = FakeGitHub({
+        f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1":
+            [pull(7, "2026-11-21T00:00:00Z", head)],
+        f"repos/{REPO}/issues/7/comments?per_page=100&page=1": [comment(body)],
+        f"repos/{REPO}/pulls/7/commits?per_page=100&page=1": listed,
+    })
+    report = ra.measure(REPO, 5, fake, window=window, remote=origin.path.as_uri())
+    (result,) = report.results
+    return result.outcome, result.reason
+
+
+def test_grid_1_a_linear_edit_counts(git_env):
+    origin = Origin(git_env / "origin")
+    origin.commit("fix", {"a.py": numbered(l10="fixed")})
+    assert measure_case(origin) == (ra.ACCEPTED, "")
+
+
+def test_grid_2_an_edit_reverted_later_still_counts(git_env):
+    origin = Origin(git_env / "origin")
+    origin.commit("fix", {"a.py": numbered(l10="fixed")})
+    origin.commit("revert", {"a.py": numbered()})
+    assert measure_case(origin) == (ra.ACCEPTED, "")
+
+
+def test_grid_3_a_base_merge_that_changes_the_line_does_not_count(git_env):
+    origin = Origin(git_env / "origin")
+    origin.checkout("main")
+    origin.commit("main edits the line", {"a.py": numbered(l10="from main")})
+    origin.checkout("pr")
+    origin.merge("main")
+    assert measure_case(origin) == (ra.NOT_ACCEPTED, "")
+    # A later PR commit to another file leaves that answer alone.
+    origin.commit("unrelated", {"c.py": "c changed\n"})
+    assert measure_case(origin) == (ra.NOT_ACCEPTED, "")
+    # A later PR commit to the same file cannot be placed against lines main rewrote: unknown, outside the rate.
+    origin.commit("same file", {"a.py": numbered(l2="two", l10="from main")})
+    assert measure_case(origin)[0] == ra.UNKNOWN
+
+
+def test_grid_4_a_topic_branch_merge_carrying_the_fix_counts(git_env):
+    origin = Origin(git_env / "origin")
+    origin.checkout("topic", origin.reviewed)
+    origin.commit("fix on a topic branch", {"a.py": numbered(l10="fixed")})
+    origin.checkout("pr")
+    origin.commit("other work", {"c.py": "c changed\n"})
+    origin.merge("topic")
+    assert measure_case(origin) == (ra.ACCEPTED, "")
+
+
+def test_grid_5_a_fix_on_a_branch_merged_twice_counts(git_env):
+    origin = Origin(git_env / "origin")
+    origin.checkout("topic", origin.reviewed)
+    origin.commit("topic part one", {"c.py": "c one\n"})
+    origin.checkout("pr")
+    origin.merge("topic")
+    origin.checkout("topic")
+    origin.commit("topic part two fixes the line", {"a.py": numbered(l10="fixed")})
+    origin.checkout("pr")
+    origin.merge("topic")
+    assert measure_case(origin) == (ra.ACCEPTED, "")
+
+
+def test_grid_6_a_rename_then_an_edit_counts(git_env):
+    origin = Origin(git_env / "origin")
+    origin.commit("rename", {"a.py": None, "d.py": numbered()})
+    origin.commit("edit after the rename", {"d.py": numbered(l10="fixed")})
+    assert measure_case(origin) == (ra.ACCEPTED, "")
+
+
+def test_grid_7_a_line_moved_by_an_earlier_pr_commit_then_edited(git_env):
+    origin = Origin(git_env / "origin")
+    shifted = "new1\nnew2\nnew3\n" + numbered()
+    origin.commit("insert three lines at the top", {"a.py": shifted})
+    origin.commit("edit the cited line, now line 13", {"a.py": shifted.replace("line10\n", "fixed\n")})
+    assert measure_case(origin) == (ra.ACCEPTED, "")
+
+
+def test_grid_7_an_edit_at_the_old_line_number_is_another_line(git_env):
+    origin = Origin(git_env / "origin")
+    shifted = "new1\nnew2\nnew3\n" + numbered()
+    origin.commit("insert three lines at the top", {"a.py": shifted})
+    origin.commit("edit line 10, which was line 7", {"a.py": shifted.replace("line7\n", "seven\n")})
+    assert measure_case(origin) == (ra.NOT_ACCEPTED, "")
+
+
+def test_grid_8_a_force_push_is_unknown(git_env):
+    origin = Origin(git_env / "origin")
+    reviewed = origin.reviewed
+    origin.git("reset", "-q", "--hard", origin.base)
+    origin.commit("rewritten history", {"a.py": numbered(l10="fixed")})
+    outcome, reason = measure_case(origin, reviewed=reviewed)
+    assert outcome == ra.UNKNOWN and "reviewed commit" in reason
