@@ -179,3 +179,108 @@ def test_catch_up_parks_stored_job_with_empty_list_item(tmp_path):
     assert JobStore(m.db).get_job("fake-good")["next_run_at"] > now  # the good job's miss is skipped and rescheduled as usual
     assert m.jobs.tick(now) == [] and started == []
     m.db.close()
+
+
+# #934 / #971: a schedule that parses but never matches, and an out-of-range catch_up_minutes.
+NEVER_MATCHES = ["0 0 30 2 *", "0 0 31 4 *"]
+CATCH_UP_MAX = 525600  # one year in minutes (owner decision on #934)
+
+
+@pytest.mark.parametrize("cron", NEVER_MATCHES)
+def test_job_routes_reject_never_matching_schedule(tmp_path, cron):
+    m = jobs_manager(tmp_path)
+    with TestClient(create_app(m)) as client:
+        body = {"name": "Fake", "prompt": "fake", "cron": cron}
+        created = client.post("/jobs", json=body)
+        assert created.status_code == 400 and "never matches" in created.json()["detail"]
+        assert client.get("/jobs").json() == []
+        jid = client.post("/jobs", json={**body, "cron": "@daily"}).json()["id"]
+        updated = client.put(f"/jobs/{jid}", json=body)
+        assert updated.status_code == 400 and "never matches" in updated.json()["detail"]
+        assert client.get(f"/jobs/{jid}").json()["cron"] == "0 0 * * *"
+    m.db.close()
+
+
+@pytest.mark.parametrize("cron", NEVER_MATCHES)
+def test_preview_answers_ok_false_for_a_schedule_create_rejects(tmp_path, cron):
+    """#971 (owner decision): preview reports on the input, so a cron create and update reject with 400 gets 200."""
+    m = jobs_manager(tmp_path)
+    with TestClient(create_app(m)) as client:
+        preview = client.get("/jobs/preview", params={"cron": cron})
+        assert preview.status_code == 200
+        assert preview.json()["ok"] is False and "never matches" in preview.json()["error"]
+    m.db.close()
+
+
+@pytest.mark.parametrize("minutes", [CATCH_UP_MAX + 1, 10**20])
+def test_job_routes_reject_catch_up_minutes_above_a_year(tmp_path, minutes):
+    m = jobs_manager(tmp_path)
+    with TestClient(create_app(m)) as client:
+        body = {"name": "Fake", "prompt": "fake", "cron": "@daily"}
+        assert client.post("/jobs", json={**body, "catch_up_minutes": minutes}).status_code == 422
+        assert client.get("/jobs").json() == []
+        jid = client.post("/jobs", json=body).json()["id"]
+        before = m.db.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        assert client.put(f"/jobs/{jid}", json={**body, "catch_up_minutes": minutes}).status_code == 422
+        assert client.get(f"/jobs/{jid}").json()["catch_up_minutes"] == 360
+        assert m.db.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] == before
+    with pytest.raises(ValueError):
+        service.validate({**body, "catch_up_minutes": minutes}, m.cfg.projects, m.cfg.models)
+    m.db.close()
+
+
+def test_job_routes_accept_catch_up_minutes_of_a_year(tmp_path):
+    m = jobs_manager(tmp_path)
+    with TestClient(create_app(m)) as client:
+        body = {"name": "Fake", "prompt": "fake", "cron": "@daily", "catch_up_minutes": CATCH_UP_MAX}
+        created = client.post("/jobs", json=body)
+        assert created.status_code == 201 and created.json()["catch_up_minutes"] == CATCH_UP_MAX
+        updated = client.put(f"/jobs/{created.json()['id']}", json=body)
+        assert updated.status_code == 200 and updated.json()["catch_up_minutes"] == CATCH_UP_MAX
+    m.db.close()
+
+
+def test_job_stored_with_catch_up_above_the_bound_still_reads(tmp_path):
+    """A job saved before the bound existed must not turn GET and list into 500s through response validation."""
+    m = jobs_manager(tmp_path)
+    job = service.validate({"name": "Fake", "prompt": "fake", "cron": "@daily"}, m.cfg.projects, m.cfg.models)
+    JobStore(m.db).insert_job({**job, "id": "old-job", "next_run_at": None, "catch_up_minutes": 10**12})
+    with TestClient(create_app(m)) as client:
+        assert client.get("/jobs/old-job").json()["catch_up_minutes"] == 10**12
+        assert client.get("/jobs").status_code == 200
+    m.db.close()
+
+
+# Class-level check (#934), bug class "input accepted by validation, then fails downstream with a 5xx": every
+# day-of-month x month schedule (the dates that can never exist among them) and the catch_up_minutes boundaries,
+# through create, update and preview. No answer may be a server error; whatever create accepts must be stored.
+def test_job_routes_never_answer_5xx_for_schedule_or_catch_up_input(tmp_path):
+    m = jobs_manager(tmp_path)
+    failures = []
+    with TestClient(create_app(m), raise_server_exceptions=False) as client:
+        base = {"name": "Fake", "prompt": "fake", "cron": "@daily"}
+        jid = client.post("/jobs", json=base).json()["id"]
+        cases = [{"cron": f"0 0 {day} {month} *"} for month in range(1, 13) for day in range(1, 32)]
+        cases += [{"catch_up_minutes": n} for n in (-1, 0, CATCH_UP_MAX, CATCH_UP_MAX + 1, 2**63 - 1, 2**63, 10**20)]
+        for extra in cases:
+            body = {**base, **extra}
+            answers = {"POST /jobs": client.post("/jobs", json=body), "PUT /jobs/{id}": client.put(f"/jobs/{jid}", json=body)}
+            if "cron" in extra:
+                answers["GET /jobs/preview"] = client.get("/jobs/preview", params={"cron": extra["cron"]})
+            for route, answer in answers.items():
+                if answer.status_code >= 500:
+                    failures.append((route, extra, answer.status_code))
+            created = answers["POST /jobs"]
+            if created.status_code == 201:
+                assert client.get(f"/jobs/{created.json()['id']}").status_code == 200
+    assert failures == []
+    m.db.close()
+
+
+def test_job_integer_fields_fit_sqlite():
+    """Every integer field a client sends is bounded within SQLite's signed 64-bit INTEGER."""
+    from harness_modules.jobs.routes import Job
+    for name, field in Job.model_fields.items():
+        if field.annotation is int:
+            bounds = [getattr(meta, "le", None) for meta in field.metadata]
+            assert any(b is not None and b < 2**63 for b in bounds), name
