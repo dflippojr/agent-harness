@@ -34,7 +34,8 @@ def _num(value) -> str:
     value = float(value)
     if math.isinf(value):
         return "+Inf" if value > 0 else "-Inf"
-    return f"{value:g}"
+    # exact, not `:g`'s six significant digits, which round a Unix timestamp to the nearest 10 s or worse (#1071)
+    return str(int(value)) if value.is_integer() else repr(value)
 
 
 class _Out:
@@ -274,6 +275,10 @@ def _silence_metrics(m: Manager, out: _Out) -> None:
     out.metric("harness_canary_last_complete_age_seconds", "gauge",
                "Seconds since the newest complete canary result (+Inf when there is none).",
                [({}, now - last if last is not None else math.inf)])
+    finished = store.last_finished_complete_at()
+    if finished is not None:  # absent, not 0, when there is none: the production sweep reads it (#1071)
+        out.metric("harness_canary_last_complete_timestamp_seconds", "gauge",
+                   "Unix time the newest complete canary row finished.", [({}, finished)])
     out.metric("harness_canary_consecutive_unrun_slots", "gauge",
                "Nightly canary slots in a row that ended blocked or skipped.", [({}, len(store.unrun_streak()))])
     guard = getattr(m, "guard", None)

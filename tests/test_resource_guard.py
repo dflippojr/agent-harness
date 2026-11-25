@@ -495,7 +495,7 @@ def test_metrics_export_resources(tmp_path):
     m = guarded_manager(tmp_path, ram=FakeRam(2))
     m.guard.control.flag = True
     text = render(m)
-    assert f"harness_resource_ram_available_bytes {float(2 * GIB):g}" in text
+    assert f"harness_resource_ram_available_bytes {2 * GIB}" in text
     assert "harness_resource_memory_low 1" in text
     assert "harness_model_parked 1" in text
     assert "harness_model_pinned_until_seconds 0" in text
@@ -508,9 +508,9 @@ def test_metrics_export_vram_free_and_nvenc_sessions(tmp_path, monkeypatch):
     monkeypatch.setattr(resources, "_run", lambda args, timeout=5: "1024, 8192, 37, 7168, 2\n")
     monkeypatch.setattr(resources, "_gpu_cache", (-1e9, None))
     text = render(guarded_manager(tmp_path))
-    assert f"harness_resource_vram_free_bytes {float(7168 * resources.MIB):g}" in text
+    assert f"harness_resource_vram_free_bytes {7168 * resources.MIB}" in text
     assert "harness_resource_nvenc_sessions 2" in text
-    assert f"harness_resource_vram_used_bytes {float(1024 * resources.MIB):g}" in text
+    assert f"harness_resource_vram_used_bytes {1024 * resources.MIB}" in text
 
 
 def test_metrics_leave_out_only_the_series_nvidia_smi_does_not_report(tmp_path, monkeypatch):
