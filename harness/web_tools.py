@@ -12,7 +12,8 @@ SNI keep the original name), so a DNS answer can't change between the check and 
 Hermes Agent's tools/url_safety.py and web_tools_truncate.py (MIT); see docs/phase6a-hermes-study.md.
 
 GitHub repository and file pages extract badly as HTML (navigation noise, a truncated README), so they're read through
-GitHub's public API and raw file host instead (github_sources / github_text), falling back to the HTML on any error.
+GitHub's public API and raw file host instead (github_sources / github_text), falling back to the HTML when a download
+fails. An answer github_text can't turn into text is an untrusted failure like any other after the request (#1060).
 
 What a page says is untrusted data; results say so to the model. So is a failure from the first request on (#1060): its
 message can carry a status, header, redirect target or error text the server chose, so it is an UntrustedToolError
@@ -470,17 +471,18 @@ class WebTools:
         hit = self._pages.get(url)
         if hit and time.time() - hit[0] < CACHE_SECONDS:
             return url, hit[1], hit[2]
-        github = await self._github(url)
-        if github:
-            entry = (time.time(), *github)
-            self._remember(self._pages, url, entry)
-            return url, entry[1], entry[2]
         # The one untrusted choke point (#1060). From the first request on, whatever fails (a status, a redirect
-        # target, a transport error, a parser reading the body lazily) may carry the server's words, so any exception
-        # leaves here as one bounded UntrustedToolError with its cause. Only fixed harness wording (FixedToolError)
-        # and refusals of the model's own URL before any request pass as plain errors.
+        # target, a transport error, a parser reading the body lazily, GitHub API answers turned into text) may carry
+        # the server's words, so any exception leaves here as one bounded UntrustedToolError with its cause. Only
+        # fixed harness wording (FixedToolError) and refusals of the model's own URL before any request pass as plain
+        # errors.
         sent: list = []
         try:
+            github = await self._github(url, sent)
+            if github:
+                entry = (time.time(), *github)
+                self._remember(self._pages, url, entry)
+                return url, entry[1], entry[2]
             final, ctype, body = await self._download(url, sent)
             convert, args = _extract_text(ctype, body, final)
             title, text = await asyncio.to_thread(convert, *args)
@@ -499,9 +501,11 @@ class WebTools:
         self._remember(self._pages, url, entry)
         return url, entry[1], entry[2]
 
-    async def _github(self, url: str) -> tuple[str, str] | None:
+    async def _github(self, url: str, sent: list) -> tuple[str, str] | None:
         """(title, text) of a GitHub repository/folder/file page via the API and raw host, or None to use the HTML.
-        The README and file listing are optional; the repository metadata (or the raw file) is not."""
+        The README and file listing are optional; the repository metadata (or the raw file) is not. A failed download
+        falls back to the HTML page; once the bodies are in, `sent` is marked and any failure turning them into text
+        is _page's untrusted error (#1060)."""
         info = github_sources(url)
         if info is None:
             return None
@@ -513,11 +517,9 @@ class WebTools:
                 if key in ("meta", "raw"):
                     log.info("GitHub API unavailable for %s (%s); using the HTML page", url, e)
                     return None
-        try:
-            return github_text(info, bodies)
-        except (ValueError, KeyError, TypeError) as e:
-            log.info("unexpected GitHub API answer for %s (%s); using the HTML page", url, e)
-            return None
+        if not sent:
+            sent.append(True)
+        return github_text(info, bodies)
 
     async def web_fetch(self, url: str, start: int = 0, find: str = "") -> str:
         url = url.strip()
