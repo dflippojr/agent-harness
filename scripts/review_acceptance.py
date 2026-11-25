@@ -2,8 +2,9 @@
 
 For each automated review comment on the last N merged pull requests, this records whether a commit pushed after the
 reviewed commit, before merge, touched the lines the review flagged, and reports the acceptance rate per backend, per
-severity and per finding type. It reads everything from GitHub through `gh api` and changes nothing: not the review
-prompt, the backends or the gate.
+severity and per finding type. GitHub is its only source: `gh api` for pull requests, comments and commit lists, and
+a shallow `git fetch` of each `refs/pull/N/head` into a temporary bare repository that is deleted afterwards. It writes
+nothing to GitHub and changes nothing: not the review prompt, the backends or the gate.
 
     python scripts/review_acceptance.py --repo dflippojr/agent-harness --limit 50 --out docs/review-acceptance.md
     python scripts/review_acceptance.py --limit 50 --json .tmp/review-acceptance.json
@@ -18,16 +19,21 @@ What counts, in the words of the review format in `.github/workflows/review.yml`
 * Severity is the section: `blocking` for an item under `## Findings`, `advisory` for a suggestion under
   `## Style and structure`. The type is the item's bold label (Unmet criterion, Untested fix, ...); a located
   blocking item with no label is `correctness`; an advisory one is `style` or `structure`.
-* A blocking finding cites `path:line` (or `path:a-b`). It is accepted when a later commit deletes or changes one of
-  those lines, or inserts a line right next to them (`--window` widens the range). The line numbers refer to the file
-  at the reviewed commit; walking the commits after it, the script maps untouched lines through each commit's diff.
+* "Later commits" are exactly the PR's own commits after the reviewed commit (owner decision 1a on #1011): those
+  `pulls/N/commits` lists (so none reachable from the base branch) that descend from the reviewed commit. Merge
+  commits are left out; each other commit is judged on its own diff, in any order, so an edit a later commit reverts
+  still counts, a fix merged in from a topic branch counts, and a merge from the base never does.
+* A blocking finding cites `path:line` (or `path:a-b`) in the file at the reviewed commit. A commit accepts it when its
+  diff deletes or changes one of those lines, or inserts a line between or right next to them (`--window` widens the
+  range). The lines are first placed in the commit's parent through `git diff -M` from the reviewed commit, which
+  follows renames and earlier edits.
 * An advisory suggestion names only a file, never a line (the prompt reserves `path:line` for findings), so it is
   measured at file level: accepted when a later commit changed that file. The report marks those rows.
 * A `**Spec**` finding has no location and is counted as unlocated, outside the rate.
-* The outcome is unknown, outside the rate, when it cannot be measured: the reviewed commit is gone or no longer an
-  ancestor of the merged head (a force push), GitHub omits the file's patch, a compare is truncated, or a merge from
-  the base branch touched the flagged lines. When the range holds a merge commit, the commits are walked one by one
-  along the first-parent chain, so changes the merge brings in from the base branch never count as acceptance.
+* The outcome is unknown, counted but outside the rate, only when it cannot be measured: the reviewed commit is not an
+  ancestor of the merged head (a force push), the PR's head ref is gone or moved, GitHub lists 250 commits (its cap),
+  the cited file has no text patch (binary), or a later commit changed the file after a merge had rewritten the cited
+  lines, so they cannot be placed in it.
 
 The report holds counts and per-finding rows only, never review text, which is untrusted.
 """
@@ -36,9 +42,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -58,7 +68,7 @@ HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 LEAD = "\u2014\u2013-:, \t"  # dashes, colons and commas between a citation and its label
 NO_FINDINGS_RE = re.compile(r"\bno\b.*\bfindings?\b", re.I)
 
-COMPARE_FILE_CAP = 300
+PR_COMMIT_CAP = 250  # GitHub's pulls/N/commits lists no more
 MAX_PULL_PAGES = 100
 
 ACCEPTED = "accepted"
@@ -238,12 +248,15 @@ class LineCheck:
     end: int = 0
 
 
-def check_patch(patch: str, start: int, end: int, window: int = 0) -> LineCheck:
-    """Did this unified-diff patch change old lines [start, end] (widened by window), or insert right next to them?
+def check_patch(patch: str, start: int, end: int, window: int = 0, adjacent: bool = True) -> LineCheck:
+    """Did this unified-diff patch change old lines [start, end] (widened by window)?
 
-    A deleted or changed line in the range touches it, and so does a line inserted directly above or below it.
-    When untouched, the result gives the range's line numbers in the new file, for walking commit by commit.
+    A deleted or changed line in the range touches it, and so does a line inserted between two of its lines. With
+    `adjacent`, a line inserted directly above or below the range touches it too: that is how a commit is judged.
+    Mapping lines through someone else's diff passes adjacent=False, since a neighbour's insertion leaves the lines
+    where they were. When untouched, the result gives the range's line numbers in the new file.
     """
+    edge = 1 if adjacent else 0
     lo, hi = max(1, start - window), end + window
     delta = 0
     old = new = 0  # no hunk yet: lines before the first header are not diff lines
@@ -265,7 +278,7 @@ def check_patch(patch: str, start: int, end: int, window: int = 0) -> LineCheck:
                 return LineCheck(True)
             old += 1
         elif tag == "+":
-            if lo <= old <= hi + 1:
+            if lo + 1 - edge <= old <= hi + edge:
                 return LineCheck(True)
             new += 1
         elif tag == " ":
@@ -289,8 +302,8 @@ class FileStep:
     reason: str = ""
 
 
-def step_location(files: list[dict], truncated: bool, path: str, start: int | None, end: int | None, window: int) -> FileStep:
-    """Follow a cited file (and line range, when given) through one compare's file list."""
+def step_location(files: list[dict], path: str, start: int | None, end: int | None, adjacent: bool = True) -> FileStep:
+    """Follow a cited file (and line range, when given) through one diff's file list."""
     for entry in files:
         status = entry.get("status")
         renamed_from_path = status == "renamed" and entry.get("previous_filename") == path
@@ -307,14 +320,57 @@ def step_location(files: list[dict], truncated: bool, path: str, start: int | No
         if not patch:
             if status == "renamed" and not entry.get("changes"):
                 return FileStep("untouched", new_path, start, end)
-            return FileStep("unknown", reason="GitHub omitted the file's patch")
-        check = check_patch(patch, start, end, window)
+            return FileStep("unknown", reason="the diff has no text patch for the cited file")
+        check = check_patch(patch, start, end, 0, adjacent)
         if check.touched:
             return FileStep("touched", new_path)
         return FileStep("untouched", new_path, check.start, check.end)
-    if truncated:
-        return FileStep("unknown", reason="compare truncated at GitHub's file cap")
     return FileStep("untouched", path, start or 0, end or 0)
+
+
+def parse_git_diff(text: str) -> list[dict]:
+    """`git diff -M` output as GitHub-style file entries: filename, previous_filename, status, patch, changes."""
+    files: list[dict] = []
+    entry: dict | None = None
+    in_patch = False
+    for line in text.splitlines():
+        if line.startswith("diff --git "):
+            names = line[len("diff --git "):]
+            old, _, new = names.partition(" b/")
+            entry = {"filename": new, "previous_filename": old.removeprefix("a/"), "status": "modified",
+                     "changes": 0}
+            files.append(entry)
+            in_patch = False
+            continue
+        if entry is None:
+            continue
+        if in_patch:
+            if line[:1] in ("+", "-"):
+                entry["changes"] += 1
+            entry["patch"] += line + "\n"
+            continue
+        if line.startswith("@@ "):
+            in_patch = True
+            entry["patch"] = line + "\n"
+        elif line.startswith("rename from "):
+            entry["previous_filename"] = line[len("rename from "):]
+            entry["status"] = "renamed"
+        elif line.startswith("rename to "):
+            entry["filename"] = line[len("rename to "):]
+        elif line.startswith("new file mode"):
+            entry["status"] = "added"
+        elif line.startswith("deleted file mode"):
+            entry["status"] = "removed"
+        elif line.startswith("--- a/"):
+            entry["previous_filename"] = line[len("--- a/"):]
+        elif line.startswith("+++ b/"):
+            entry["filename"] = line[len("+++ b/"):]
+        elif line.startswith("Binary files "):
+            entry["changes"] = 1
+    for item in files:
+        if item["status"] == "removed":
+            item["filename"] = item["previous_filename"]
+    return files
 
 
 # ---------------------------------------------------------------------------------------------- measurement
@@ -337,91 +393,165 @@ class Result:
     reason: str = ""
 
 
-class Measurer:
-    """Resolves outcomes against GitHub, caching every compare."""
+class GitError(Exception):
+    """A git command failed for a reason other than a commit or ref the remote does not have."""
 
-    def __init__(self, repo: str, fetch: Fetch = gh_fetch, window: int = 0):
+
+class PullHistory:
+    """One merged PR's own commits, fetched from the remote into a temporary bare repository."""
+
+    def __init__(self, workdir: Path, head: str, listed: list[dict], problem: str = ""):
+        self.git_dir = workdir
+        self.head = head
+        self.problem = problem  # why nothing can be measured, when it cannot
+        self.commits = {str(c.get("sha")): [str(p.get("sha")) for p in c.get("parents") or []] for c in listed}
+        self._diffs: dict[tuple[str, str], list[dict]] = {}
+
+    def git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+        return run_git(["--git-dir", str(self.git_dir), *args], check=check)
+
+    def has(self, sha: str) -> bool:
+        return self.git("cat-file", "-e", f"{sha}^{{commit}}", check=False).returncode == 0
+
+    def is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        return self.git("merge-base", "--is-ancestor", ancestor, descendant, check=False).returncode == 0
+
+    def diff(self, old: str, new: str) -> list[dict]:
+        key = (old, new)
+        if key not in self._diffs:
+            out = self.git("-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "-M", "-U0",
+                           old, new).stdout
+            self._diffs[key] = parse_git_diff(out)
+        return self._diffs[key]
+
+
+def run_git(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    proc = subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          env=env, check=False)
+    if check and proc.returncode != 0:
+        raise GitError(f"git {' '.join(args[2:4])}: {(proc.stderr or proc.stdout).strip()[-300:]}")
+    return proc
+
+
+def _remove_tree(path: Path) -> None:
+    """Delete a temporary repository; git writes its packs read-only, which Windows will not delete as they are."""
+
+    def make_writable_and_retry(func, target, _exc):
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=make_writable_and_retry)
+    else:  # pragma: no cover - CI runs 3.12 and later
+        shutil.rmtree(path, onerror=make_writable_and_retry)
+
+
+class Measurer:
+    """Judges findings against each PR's own commits after the review, fetched from the remote one PR at a time.
+
+    "Later commits" are exactly the PR's own commits after the reviewed commit (owner decision 1a on #1011): those
+    GitHub lists for the PR (so none reachable from the base), descending from the reviewed commit, merges left out.
+    Each is judged on its own diff. The cited lines are placed in that commit's parent through `git diff -M` from the
+    reviewed commit; `git log -L` cannot do this, because it follows lines backwards from a tip, and a line some commit
+    deleted has no position at the tip.
+    """
+
+    def __init__(self, repo: str, fetch: Fetch = gh_fetch, window: int = 0, remote: str | None = None):
         self.repo = repo
         self.fetch = fetch
         self.window = window
-        self._compares: dict[tuple[str, str], dict | GitHubError] = {}
+        self.remote = remote or f"https://github.com/{repo}.git"
+        self._root = Path(tempfile.mkdtemp(prefix="review-acceptance-"))
+        self._histories: dict[int, PullHistory] = {}
 
-    def compare(self, base: str, head: str) -> dict:
-        key = (base, head)
-        if key not in self._compares:
-            try:
-                data = self.fetch(f"repos/{self.repo}/compare/{base}...{head}")
-                self._compares[key] = data if isinstance(data, dict) else {}
-            except GitHubError as exc:
-                if not exc.missing:
-                    raise
-                self._compares[key] = exc
-        cached = self._compares[key]
-        if isinstance(cached, GitHubError):
-            raise cached
-        return cached
+    def __enter__(self) -> Measurer:
+        return self
 
-    def outcome(self, finding: Finding, reviewed: str, head: str) -> tuple[str, str]:
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._root.exists():
+            _remove_tree(self._root)
+
+    def history(self, number: int, head: str) -> PullHistory:
+        """The PR's listed commits and a shallow fetch of refs/pull/N/head deep enough to hold them all."""
+        if number in self._histories:
+            return self._histories[number]
+        listed: list[dict] = []
+        page = 1
+        while page <= PR_COMMIT_CAP // 100 + 1:
+            batch = self.fetch(f"repos/{self.repo}/pulls/{number}/commits?per_page=100&page={page}")
+            if not isinstance(batch, list):
+                break
+            listed.extend(c for c in batch if isinstance(c, dict))
+            if len(batch) < 100:
+                break
+            page += 1
+        # One bare repository per run, so each fetch sends only what earlier ones did not. measure() judges each PR
+        # right after its own fetch, before a later fetch can move the shallow boundary.
+        workdir = self._root / "repo"
+        history = PullHistory(workdir, head, listed)
+        self._histories[number] = history
+        if len(listed) >= PR_COMMIT_CAP:
+            history.problem = "GitHub lists at most 250 commits of a pull request"
+            return history
+        if not workdir.exists():
+            run_git(["init", "-q", "--bare", str(workdir)])
+        ref = f"refs/pull/{number}/head"
+        fetched = history.git("fetch", "-q", "--no-tags", f"--depth={len(listed) + 1}", self.remote,
+                              f"+{ref}:refs/measured/{number}", check=False)
+        if fetched.returncode != 0:
+            detail = (fetched.stderr or "").lower()
+            if "couldn't find remote ref" in detail or "not our ref" in detail:
+                history.problem = "the remote no longer has the pull request's head ref"
+                return history
+            raise GitError(f"git fetch {ref}: {(fetched.stderr or fetched.stdout).strip()[-300:]}")
+        if history.git("rev-parse", f"refs/measured/{number}").stdout.strip() != head:
+            history.problem = "the pull request's head ref no longer points at the merged head"
+        return history
+
+    def outcome(self, finding: Finding, reviewed: str, number: int, head: str) -> tuple[str, str]:
         if finding.path is None:
             return UNLOCATED, "the finding cites no file"
-        try:
-            data = self.compare(reviewed, head)
-        except GitHubError as exc:
-            if not exc.missing:
-                raise
-            return UNKNOWN, "GitHub cannot compare the reviewed commit with the merged head"
-        status = data.get("status")
-        if status not in ("ahead", "identical"):
-            return UNKNOWN, "the reviewed commit is not an ancestor of the merged head"
-        commits = data.get("commits") or []
-        if status == "identical" or not data.get("ahead_by"):
+        if reviewed == head:
             return NOT_ACCEPTED, "no commit after the review"
-        if int(data.get("total_commits") or len(commits)) > len(commits):
-            return UNKNOWN, "more commits after the review than one compare lists"
-        return self._walk(finding, reviewed, head, commits)
-
-    @staticmethod
-    def _files(data: dict) -> list[dict]:
-        return [f for f in data.get("files") or [] if isinstance(f, dict)]
-
-    def _walk(self, finding: Finding, reviewed: str, head: str, commits: list[dict]) -> tuple[str, str]:
-        """Commit by commit along the first-parent chain, never the range's net diff alone.
-
-        A commit that edits a cited line counts even when a later one restores it, and a merge from the base
-        branch never counts as acceptance: it only moves the cited lines.
-        """
-        parents = {c.get("sha"): (c.get("parents") or []) for c in commits}
-        chain: list[str] = []
-        sha = head
-        while sha != reviewed:
-            if sha not in parents or not parents[sha]:
-                return UNKNOWN, "the reviewed commit is not on the merged head's first-parent chain"
-            chain.append(sha)
-            sha = str(parents[sha][0].get("sha") or "")
-        chain.reverse()
-        path, start, end = finding.path or "", finding.start, finding.end
-        previous = reviewed
-        for sha in chain:
-            is_merge = len(parents[sha]) > 1
-            try:
-                data = self.compare(previous, sha)
-            except GitHubError as exc:
-                if not exc.missing:
-                    raise
-                return UNKNOWN, "GitHub cannot compare one of the commits after the review"
-            step = step_location(self._files(data), len(data.get("files") or []) >= COMPARE_FILE_CAP,
-                                 path, start, end, self.window)
-            if step.outcome == "unknown":
-                return UNKNOWN, step.reason
-            if step.outcome == "touched":
-                if is_merge:
-                    return UNKNOWN, "a merge from the base branch changed the cited lines"
+        history = self.history(number, head)
+        if history.problem:
+            return UNKNOWN, history.problem
+        if not history.has(reviewed) or not history.is_ancestor(reviewed, head):
+            return UNKNOWN, "the reviewed commit is not an ancestor of the merged head"
+        later = [sha for sha, parents in history.commits.items()
+                 if len(parents) == 1 and sha != reviewed and history.is_ancestor(reviewed, sha)]
+        if not later:
+            merges = any(len(parents) > 1 and history.is_ancestor(reviewed, sha)
+                         for sha, parents in history.commits.items())
+            return NOT_ACCEPTED, "only merges after the review" if merges else "no commit after the review"
+        start = end = None
+        if finding.start is not None and finding.end is not None:
+            start, end = max(1, finding.start - self.window), finding.end + self.window
+        unmappable = ""
+        for sha in later:  # any order: one commit that touches the lines is enough
+            parent = history.commits[sha][0]
+            own = history.diff(parent, sha)
+            placed = FileStep("untouched", finding.path, start or 0, end or 0)
+            if parent != reviewed:
+                placed = step_location(history.diff(reviewed, parent), finding.path, start, end, adjacent=False)
+                if start is None and placed.outcome == "touched" and placed.path:
+                    placed = FileStep("untouched", placed.path)  # file level: only the name has to be followed
+            if placed.outcome != "untouched":
+                # The parent no longer holds the cited lines as reviewed (a base merge rewrote them). That only
+                # matters when this commit changes the file; then it cannot be judged.
+                if any(finding.path in (f.get("filename"), f.get("previous_filename")) for f in own):
+                    unmappable = "the cited lines were rewritten by a merge before a later commit changed the file"
+                continue
+            judged = step_location(own, placed.path, start and placed.start, end and placed.end)
+            if judged.outcome == "touched":
                 return ACCEPTED, ""
-            path = step.path
-            if start is not None:
-                start, end = step.start, step.end
-            previous = sha
-        return NOT_ACCEPTED, ""
+            if judged.outcome == "unknown":
+                unmappable = judged.reason
+        return (UNKNOWN, unmappable) if unmappable else (NOT_ACCEPTED, "")
 
 
 def review_comments(fetch: Fetch, repo: str, pr: int, login: str) -> list[dict]:
@@ -475,8 +605,13 @@ class Measurement:
 
 
 def measure(repo: str, limit: int, fetch: Fetch = gh_fetch, window: int = 0, login: str = REVIEW_LOGIN,
-            now: datetime | None = None) -> Measurement:
-    measurer = Measurer(repo, fetch, window)
+            now: datetime | None = None, remote: str | None = None) -> Measurement:
+    with Measurer(repo, fetch, window, remote) as measurer:
+        return _measure(measurer, repo, limit, fetch, window, login, now)
+
+
+def _measure(measurer: Measurer, repo: str, limit: int, fetch: Fetch, window: int, login: str,
+             now: datetime | None) -> Measurement:
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
     report = Measurement(repo, limit, window, stamp)
     for pull in merged_pulls(fetch, repo, limit):
@@ -494,7 +629,7 @@ def measure(repo: str, limit: int, fetch: Fetch = gh_fetch, window: int = 0, log
                 continue
             rounds += 1
             for finding in review.findings:
-                outcome, reason = measurer.outcome(finding, review.sha, head)
+                outcome, reason = measurer.outcome(finding, review.sha, number, head)
                 report.results.append(Result(
                     number, rounds, review.backend, review.model, review.sha, finding.severity, finding.type,
                     finding.granularity, finding.path, finding.start, finding.end, outcome, reason,
@@ -603,6 +738,7 @@ def main(argv: list[str] | None = None, fetch: Fetch = gh_fetch) -> int:
     parser.add_argument("--limit", type=int, default=50, help="how many of the latest merged PRs to read (N)")
     parser.add_argument("--window", type=int, default=0, help="extra lines around a cited range that also count")
     parser.add_argument("--login", default=REVIEW_LOGIN, help="the account that posts the automated review")
+    parser.add_argument("--remote", help="git URL to fetch refs/pull/N/head from (default: the GitHub repository)")
     parser.add_argument("--out", type=Path, help="write the Markdown report here (default: print it)")
     parser.add_argument("--json", type=Path, help="also write the per-finding results as JSON here")
     args = parser.parse_args(argv)
@@ -610,8 +746,8 @@ def main(argv: list[str] | None = None, fetch: Fetch = gh_fetch) -> int:
         parser.error("--limit must be at least 1 and --window at least 0")
     try:
         out, data = (_inside_cwd(path, parser) for path in (args.out, args.json))
-        report = measure(args.repo, args.limit, fetch, args.window, args.login)
-    except GitHubError as exc:
+        report = measure(args.repo, args.limit, fetch, args.window, args.login, remote=args.remote)
+    except (GitHubError, GitError) as exc:
         print(f"review_acceptance: {exc}", file=sys.stderr)
         return 1
     markdown = render_markdown(report)

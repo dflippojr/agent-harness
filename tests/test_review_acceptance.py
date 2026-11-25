@@ -180,22 +180,49 @@ def entry(filename: str, status: str = "modified", patch: str | None = PATCH, **
 
 def test_step_location_through_one_file_list():
     step = ra.step_location
-    assert step([entry("a.py")], False, "a.py", 10, 10, 0).outcome == "touched"
-    assert step([entry("a.py")], False, "a.py", 20, 20, 0) == ra.FileStep("untouched", "a.py", 21, 21)
-    assert step([entry("b.py")], False, "a.py", 10, 10, 0) == ra.FileStep("untouched", "a.py", 10, 10)
-    assert step([entry("b.py")], True, "a.py", 10, 10, 0).outcome == "unknown"
-    assert step([entry("a.py", "removed", None)], False, "a.py", 1, 1, 0).outcome == "touched"
-    missing = step([entry("a.py", patch=None)], False, "a.py", 1, 1, 0)
-    assert (missing.outcome, missing.reason) == ("unknown", "GitHub omitted the file's patch")
+    assert step([entry("a.py")], "a.py", 10, 10).outcome == "touched"
+    assert step([entry("a.py")], "a.py", 20, 20) == ra.FileStep("untouched", "a.py", 21, 21)
+    assert step([entry("b.py")], "a.py", 10, 10) == ra.FileStep("untouched", "a.py", 10, 10)
+    assert step([entry("a.py", "removed", None)], "a.py", 1, 1).outcome == "touched"
+    missing = step([entry("a.py", patch=None)], "a.py", 1, 1)
+    assert (missing.outcome, missing.reason) == ("unknown", "the diff has no text patch for the cited file")
     moved = entry("c.py", "renamed", None, previous_filename="a.py", changes=0)
-    assert step([moved], False, "a.py", 5, 6, 0) == ra.FileStep("untouched", "c.py", 5, 6)
-    assert step([moved], False, "a.py", None, None, 0) == ra.FileStep("untouched", "c.py")
+    assert step([moved], "a.py", 5, 6) == ra.FileStep("untouched", "c.py", 5, 6)
+    assert step([moved], "a.py", None, None) == ra.FileStep("untouched", "c.py")
     edited = entry("c.py", "renamed", previous_filename="a.py")
-    assert step([edited], False, "a.py", 10, 10, 0) == ra.FileStep("touched", "c.py")
-    assert step([edited], False, "a.py", None, None, 0) == ra.FileStep("touched", "c.py")
+    assert step([edited], "a.py", 10, 10) == ra.FileStep("touched", "c.py")
+    assert step([edited], "a.py", None, None) == ra.FileStep("touched", "c.py")
     copied = entry("c.py", "copied", previous_filename="a.py")
-    assert step([copied], False, "a.py", 10, 10, 0) == ra.FileStep("untouched", "a.py", 10, 10)
-    assert step([entry("a.py")], False, "a.py", None, None, 0) == ra.FileStep("touched", "a.py")
+    assert step([copied], "a.py", 10, 10) == ra.FileStep("untouched", "a.py", 10, 10)
+    assert step([entry("a.py")], "a.py", None, None) == ra.FileStep("touched", "a.py")
+
+
+def test_mapping_ignores_a_neighbours_insertion_but_judging_counts_it():
+    insert_above = "@@ -9,0 +10 @@\n+new\n"  # a line inserted between old lines 9 and 10
+    assert ra.check_patch(insert_above, 10, 10) == ra.LineCheck(True)
+    assert ra.check_patch(insert_above, 10, 10, adjacent=False) == ra.LineCheck(False, 11, 11)
+    inside = "@@ -10,0 +11 @@\n+new\n"  # between old lines 10 and 11
+    assert ra.check_patch(inside, 10, 11, adjacent=False) == ra.LineCheck(True)
+
+
+def test_parse_git_diff_entries():
+    text = (
+        "diff --git a/a.py b/a.py\nindex 1..2 100644\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+y\n"
+        "diff --git a/old.py b/new.py\nsimilarity index 100%\nrename from old.py\nrename to new.py\n"
+        "diff --git a/gone.py b/gone.py\ndeleted file mode 100644\nindex 1..0\n--- a/gone.py\n+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n-z\n"
+        "diff --git a/n.py b/n.py\nnew file mode 100644\n--- /dev/null\n+++ b/n.py\n@@ -0,0 +1 @@\n+n\n"
+        "diff --git a/i.png b/i.png\nindex 1..2 100644\nBinary files a/i.png and b/i.png differ\n"
+    )
+    files = ra.parse_git_diff("noise before the first header\n" + text)
+    assert [(f["filename"], f["previous_filename"], f["status"], f["changes"], "patch" in f) for f in files] == [
+        ("a.py", "a.py", "modified", 2, True),
+        ("new.py", "old.py", "renamed", 0, False),
+        ("gone.py", "gone.py", "removed", 1, True),
+        ("n.py", "n.py", "added", 1, True),
+        ("i.png", "i.png", "modified", 1, False),
+    ]
+    assert files[0]["patch"] == "@@ -1 +1 @@\n-x\n+y\n"
 
 
 # ---------------------------------------------------------------------------------------------- outcomes
@@ -218,90 +245,6 @@ class FakeGitHub:
         return answer
 
 
-def compare_path(base: str, head: str) -> str:
-    return f"repos/{REPO}/compare/{base}...{head}"
-
-
-def commit(sha: str, *parents: str) -> dict:
-    return {"sha": sha, "parents": [{"sha": p} for p in parents]}
-
-
-LINE = ra.Finding("blocking", "correctness", "a.py", 10, 10)
-
-
-def test_outcomes_for_a_linear_range():
-    fake = FakeGitHub({
-        compare_path(SHA_A, SHA_B): {"status": "ahead", "ahead_by": 1, "total_commits": 1,
-                                     "commits": [commit(SHA_B, SHA_A)], "files": [entry("a.py")]},
-        compare_path(SHA_A, SHA_A): {"status": "identical", "ahead_by": 0, "commits": [], "files": []},
-        compare_path(SHA_C, SHA_B): {"status": "diverged", "ahead_by": 1, "commits": [], "files": []},
-        compare_path(SHA_X, SHA_B): {"status": "ahead", "ahead_by": 300, "total_commits": 300,
-                                     "commits": [commit(SHA_B, SHA_A)], "files": []},
-    })
-    m = ra.Measurer(REPO, fake)
-    assert m.outcome(LINE, SHA_A, SHA_B) == (ra.ACCEPTED, "")
-    assert m.outcome(ra.Finding("blocking", "correctness", "a.py", 20, 20), SHA_A, SHA_B) == (ra.NOT_ACCEPTED, "")
-    assert m.outcome(LINE, SHA_A, SHA_A) == (ra.NOT_ACCEPTED, "no commit after the review")
-    assert m.outcome(LINE, SHA_C, SHA_B)[0] == ra.UNKNOWN
-    assert m.outcome(LINE, SHA_M, SHA_B)[0] == ra.UNKNOWN  # the reviewed commit is gone (404)
-    assert m.outcome(LINE, SHA_X, SHA_B) == (ra.UNKNOWN, "more commits after the review than one compare lists")
-    assert m.outcome(ra.Finding("blocking", "spec", None), SHA_A, SHA_B)[0] == ra.UNLOCATED
-    m.outcome(LINE, SHA_A, SHA_B)
-    assert fake.calls.count(compare_path(SHA_A, SHA_B)) == 1  # cached
-    assert fake.calls.count(compare_path(SHA_M, SHA_B)) == 1  # a 404 is cached too
-
-
-def test_other_github_failures_propagate():
-    fake = FakeGitHub({compare_path(SHA_A, SHA_B): ra.GitHubError("HTTP 502", missing=False)})
-    with pytest.raises(ra.GitHubError):
-        ra.Measurer(REPO, fake).outcome(LINE, SHA_A, SHA_B)
-
-
-def merged_range(files_m: list[dict], files_c: list[dict]) -> dict[str, object]:
-    """reviewed A -> merge M (first parent A, second parent X from main) -> fix commit C."""
-    return {
-        compare_path(SHA_A, SHA_C): {"status": "ahead", "ahead_by": 3, "total_commits": 3,
-                                     "commits": [commit(SHA_X, "f" * 40), commit(SHA_M, SHA_A, SHA_X),
-                                                 commit(SHA_C, SHA_M)],
-                                     "files": [entry("a.py")]},
-        compare_path(SHA_A, SHA_M): {"status": "ahead", "files": files_m},
-        compare_path(SHA_M, SHA_C): {"status": "ahead", "files": files_c},
-    }
-
-
-def test_a_merge_from_the_base_is_walked_past_and_never_counts():
-    shift_two = "@@ -0,0 +1,2 @@\n+x\n+y\n"
-    # Main's merge inserts two lines at the top; the later fix edits old line 10, now line 12.
-    fix_at_12 = "@@ -12 +12 @@\n-old\n+new\n"
-    m = ra.Measurer(REPO, FakeGitHub(merged_range([entry("a.py", patch=shift_two)], [entry("a.py", patch=fix_at_12)])))
-    assert m.outcome(LINE, SHA_A, SHA_C) == (ra.ACCEPTED, "")
-    # The fix edits line 10 of the merged file, which is old line 8: not the cited line.
-    fix_at_10 = "@@ -10 +10 @@\n-old\n+new\n"
-    m = ra.Measurer(REPO, FakeGitHub(merged_range([entry("a.py", patch=shift_two)], [entry("a.py", patch=fix_at_10)])))
-    assert m.outcome(LINE, SHA_A, SHA_C) == (ra.NOT_ACCEPTED, "")
-    # The single compare would have said accepted, because main's change to line 10 is in it.
-    main_edit = "@@ -10 +10 @@\n-old\n+main\n"
-    m = ra.Measurer(REPO, FakeGitHub(merged_range([entry("a.py", patch=main_edit)], [])))
-    assert m.outcome(LINE, SHA_A, SHA_C) == (ra.UNKNOWN, "a merge from the base branch changed the cited lines")
-    m = ra.Measurer(REPO, FakeGitHub(merged_range([entry("a.py", patch=None)], [])))
-    assert m.outcome(LINE, SHA_A, SHA_C) == (ra.UNKNOWN, "GitHub omitted the file's patch")
-    # An advisory suggestion follows a rename through the merge and counts a later edit of the new name.
-    moved = entry("b.py", "renamed", None, previous_filename="a.py", changes=0)
-    m = ra.Measurer(REPO, FakeGitHub(merged_range([moved], [entry("b.py")])))
-    assert m.outcome(ra.Finding("advisory", "style", "a.py"), SHA_A, SHA_C) == (ra.ACCEPTED, "")
-
-
-def test_a_walk_that_cannot_reach_the_reviewed_commit_is_unknown():
-    answers = merged_range([], [])
-    del answers[compare_path(SHA_M, SHA_C)]
-    m = ra.Measurer(REPO, FakeGitHub(answers))
-    assert m.outcome(LINE, SHA_A, SHA_C) == (ra.UNKNOWN, "GitHub cannot compare one of the commits after the review")
-    answers = merged_range([], [])
-    answers[compare_path(SHA_B, SHA_C)] = answers[compare_path(SHA_A, SHA_C)]
-    m = ra.Measurer(REPO, FakeGitHub(answers))
-    assert m.outcome(LINE, SHA_B, SHA_C)[1] == "the reviewed commit is not on the merged head's first-parent chain"
-
-
 # --------------------------------------------------------------------------------------- the whole run
 
 
@@ -313,15 +256,19 @@ def comment(body: str, created_at: str = "2026-11-20T00:00:00Z", login: str = ra
     return {"user": {"login": login}, "body": body, "created_at": created_at}
 
 
-def fake_repo() -> FakeGitHub:
+def fake_repo(origin: Origin) -> FakeGitHub:
+    """PR 7: two review rounds, the first answered by a commit that edits a.py:10 and b.py; PR 9: no reviews."""
+    head = origin.commit("answer the review", {"a.py": numbered(l10="fixed"), "b.py": "b answered\n"})
+    _, listed = origin.publish(7)
     review = review_body(
         "- a.py:10 — **Unmet criterion**: x\n- a.py:20 — a bug\n- **Spec** — y",
         advisory="**Style** — `b.py`, near the top: rename.",
     )
-    second = review_body("- a.py:3 — later round", backend="codex (gpt, xhigh)", sha=SHA_B)
+    review = review.replace(f"sha={SHA_A}", f"sha={origin.reviewed}")
+    second = review_body("- a.py:3 — later round", backend="codex (gpt, xhigh)", sha=head)
     return FakeGitHub({
         f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1": [
-            pull(7, "2026-11-21T00:00:00Z"), pull(8, None), pull(9, "2026-11-22T00:00:00Z", SHA_A),
+            pull(7, "2026-11-21T00:00:00Z", head), pull(8, None), pull(9, "2026-11-22T00:00:00Z", SHA_A),
         ],
         f"repos/{REPO}/issues/7/comments?per_page=100&page=1": [
             comment(second, "2026-11-20T12:00:00Z"),
@@ -331,14 +278,14 @@ def fake_repo() -> FakeGitHub:
             comment(review, "2026-11-23T00:00:00Z"),  # after the merge
         ],
         f"repos/{REPO}/issues/9/comments?per_page=100&page=1": [],
-        compare_path(SHA_A, SHA_B): {"status": "ahead", "ahead_by": 1, "total_commits": 1,
-                                     "commits": [commit(SHA_B, SHA_A)], "files": [entry("a.py"), entry("b.py")]},
-        compare_path(SHA_B, SHA_B): {"status": "identical", "ahead_by": 0, "commits": [], "files": []},
+        f"repos/{REPO}/pulls/7/commits?per_page=100&page=1": listed,
     })
 
 
-def test_measure_reads_merged_prs_and_counts_each_round():
-    report = ra.measure(REPO, 5, fake_repo(), now=datetime(2026, 11, 25, tzinfo=timezone.utc))
+def test_measure_reads_merged_prs_and_counts_each_round(git_env):
+    origin = Origin(git_env / "origin")
+    report = ra.measure(REPO, 5, fake_repo(origin), now=datetime(2026, 11, 25, tzinfo=timezone.utc),
+                        remote=origin.path.as_uri())
     assert report.generated_at == "2026-11-25T00:00:00Z"
     assert report.pulls == [{"number": 9, "merged_at": "2026-11-22T00:00:00Z", "reviews": 0},
                             {"number": 7, "merged_at": "2026-11-21T00:00:00Z", "reviews": 2}]
@@ -351,11 +298,13 @@ def test_measure_reads_merged_prs_and_counts_each_round():
         (1, "claude", "advisory", "style", "b.py", None, ra.ACCEPTED),
         (2, "codex", "blocking", "correctness", "a.py", 3, ra.NOT_ACCEPTED),
     ]
-    assert ra.measure(REPO, 1, fake_repo()).pulls[0]["number"] == 9
+    assert ra.measure(REPO, 1, fake_repo(origin), remote=origin.path.as_uri()).pulls[0]["number"] == 9
 
 
-def test_report_tables_per_backend_severity_and_type():
-    report = ra.measure(REPO, 5, fake_repo(), now=datetime(2026, 11, 25, tzinfo=timezone.utc))
+def test_report_tables_per_backend_severity_and_type(git_env):
+    origin = Origin(git_env / "origin")
+    report = ra.measure(REPO, 5, fake_repo(origin), now=datetime(2026, 11, 25, tzinfo=timezone.utc),
+                        remote=origin.path.as_uri())
     text = ra.render_markdown(report)
     assert "last 5 by merge time (2 found, merged 2026-11-21 to 2026-11-22), 1 with automated reviews, 2 review rounds" in text
     assert "| all findings | 5 | 2 | 2 | 0 | 1 | 50.0% |" in text
@@ -380,14 +329,18 @@ def test_report_cells_are_escaped_and_empty_runs_render():
     assert "| #1 | 1 | x\\|y | blocking | a&lt;b | `p\\|q.py:2-4` | unknown | r\\|s |" in text
 
 
-def test_main_writes_the_report_and_json(tmp_path, monkeypatch, capsys):
+def test_main_writes_the_report_and_json(git_env, monkeypatch, capsys):
+    tmp_path = git_env
+    origin = Origin(git_env / "origin")
+    remote = ["--remote", origin.path.as_uri()]
     monkeypatch.chdir(tmp_path)
     out, data = tmp_path / "report.md", tmp_path / "sub" / ".." / "report.json"
-    assert ra.main(["--repo", REPO, "--limit", "5", "--out", "report.md", "--json", str(data)], fetch=fake_repo()) == 0
+    assert ra.main(["--repo", REPO, "--limit", "5", "--out", "report.md", "--json", str(data), *remote],
+                   fetch=fake_repo(origin)) == 0
     assert "## By finding type" in out.read_text(encoding="utf-8")
     payload = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
     assert payload["limit"] == 5 and len(payload["results"]) == 5
-    assert ra.main(["--repo", REPO, "--limit", "1"], fetch=fake_repo()) == 0
+    assert ra.main(["--repo", REPO, "--limit", "1", *remote], fetch=fake_repo(origin)) == 0
     assert "# Automated review acceptance" in capsys.readouterr().out
 
 
@@ -454,19 +407,6 @@ def test_output_paths_must_stay_inside_the_working_directory(tmp_path, monkeypat
             ra.main(["--repo", REPO, *argv], fetch=fake)
     assert not list(tmp_path.glob("escape.*"))
     assert fake.calls == []  # refused before reading GitHub
-
-
-def test_an_edit_later_reverted_still_counts():
-    """Review round 1 on #1089: the range's net diff is empty, but a commit after the review changed the line."""
-    edit = "@@ -10 +10 @@\n-old\n+new\n"
-    revert = "@@ -10 +10 @@\n-new\n+old\n"
-    fake = FakeGitHub({
-        compare_path(SHA_A, SHA_C): {"status": "ahead", "ahead_by": 2, "total_commits": 2,
-                                     "commits": [commit(SHA_B, SHA_A), commit(SHA_C, SHA_B)], "files": []},
-        compare_path(SHA_A, SHA_B): {"status": "ahead", "files": [entry("a.py", patch=edit)]},
-        compare_path(SHA_B, SHA_C): {"status": "ahead", "files": [entry("a.py", patch=revert)]},
-    })
-    assert ra.Measurer(REPO, fake).outcome(LINE, SHA_A, SHA_C) == (ra.ACCEPTED, "")
 
 
 def test_merged_pulls_keep_paging_until_no_later_page_can_hold_a_newer_merge():
@@ -614,7 +554,7 @@ def test_grid_3_a_base_merge_that_changes_the_line_does_not_count(git_env):
     origin.commit("main edits the line", {"a.py": numbered(l10="from main")})
     origin.checkout("pr")
     origin.merge("main")
-    assert measure_case(origin) == (ra.NOT_ACCEPTED, "")
+    assert measure_case(origin) == (ra.NOT_ACCEPTED, "only merges after the review")
     # A later PR commit to another file leaves that answer alone.
     origin.commit("unrelated", {"c.py": "c changed\n"})
     assert measure_case(origin) == (ra.NOT_ACCEPTED, "")
@@ -676,3 +616,80 @@ def test_grid_8_a_force_push_is_unknown(git_env):
     origin.commit("rewritten history", {"a.py": numbered(l10="fixed")})
     outcome, reason = measure_case(origin, reviewed=reviewed)
     assert outcome == ra.UNKNOWN and "reviewed commit" in reason
+
+
+def test_grid_window_and_file_level_findings(git_env):
+    origin = Origin(git_env / "origin")
+    origin.commit("edit line 12", {"a.py": numbered(l12="twelve")})
+    assert measure_case(origin) == (ra.NOT_ACCEPTED, "")
+    assert measure_case(origin, window=1) == (ra.NOT_ACCEPTED, "")  # lines 9-11: line 12 was replaced, not inserted
+    assert measure_case(origin, window=2) == (ra.ACCEPTED, "")
+    # A file-level suggestion follows a rename made by a base merge.
+    origin = Origin(git_env / "origin2")
+    origin.checkout("main")
+    origin.commit("main renames c.py", {"c.py": None, "e.py": "c\n"})
+    origin.checkout("pr")
+    origin.merge("main")
+    origin.commit("edit the renamed file", {"e.py": "c edited\n"})
+    head, listed = origin.publish(7)
+    advisory = review_body("No significant findings.", advisory="**Style** \u2014 `c.py`, near the top: x.",
+                           sha=origin.reviewed)
+    fake = FakeGitHub({
+        f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1":
+            [pull(7, "2026-11-21T00:00:00Z", head)],
+        f"repos/{REPO}/issues/7/comments?per_page=100&page=1": [comment(advisory)],
+        f"repos/{REPO}/pulls/7/commits?per_page=100&page=1": listed,
+    })
+    (result,) = ra.measure(REPO, 5, fake, remote=origin.path.as_uri()).results
+    assert (result.granularity, result.outcome) == ("file", ra.ACCEPTED)
+
+
+def test_unmeasurable_pull_requests_are_unknown(git_env, monkeypatch):
+    origin = Origin(git_env / "origin")
+    origin.commit("fix", {"a.py": numbered(l10="fixed")})
+    head, listed = origin.publish(7)
+    finding = ra.Finding("blocking", "correctness", "a.py", 10, 10)
+    remote = origin.path.as_uri()
+
+    def measurer(commits: list[dict], number: int = 7) -> ra.Measurer:
+        return ra.Measurer(REPO, FakeGitHub({f"repos/{REPO}/pulls/{number}/commits?per_page=100&page=1": commits}),
+                           remote=remote)
+
+    with measurer(listed) as m:
+        assert m.outcome(finding, origin.reviewed, 7, head) == (ra.ACCEPTED, "")
+        assert m.outcome(finding, origin.reviewed, 7, head) == (ra.ACCEPTED, "")  # the fetch is reused
+        root = m._root
+    assert not root.exists()  # the temporary repositories are removed afterwards
+    with measurer(listed, 8) as m:  # no refs/pull/8/head on the remote
+        assert m.outcome(finding, origin.reviewed, 8, head)[1] == "the remote no longer has the pull request's head ref"
+    origin.commit("pushed after the merge", {"c.py": "late\n"})
+    origin.publish(7)
+    with measurer(listed) as m:
+        assert m.outcome(finding, origin.reviewed, 7, head)[1] == "the pull request's head ref no longer points at the merged head"
+    many = [{"sha": f"{i:040x}", "parents": [{"sha": "0" * 40}]} for i in range(100)]
+    pages = {f"repos/{REPO}/pulls/7/commits?per_page=100&page={n}": many for n in (1, 2, 3)}
+    with ra.Measurer(REPO, FakeGitHub(pages), remote=remote) as m:
+        assert m.outcome(finding, origin.reviewed, 7, head) == (
+            ra.UNKNOWN, "GitHub lists at most 250 commits of a pull request")
+    with measurer([]) as m:
+        assert m.outcome(finding, head, 7, head) == (ra.NOT_ACCEPTED, "no commit after the review")
+        assert m.outcome(ra.Finding("blocking", "spec", None), head, 7, head)[0] == ra.UNLOCATED
+
+
+def test_a_failed_fetch_stops_the_run(git_env, monkeypatch, capsys):
+    origin = Origin(git_env / "origin")
+    origin.commit("fix", {"a.py": numbered(l10="fixed")})
+    head, listed = origin.publish(7)
+    finding = ra.Finding("blocking", "correctness", "a.py", 10, 10)
+    fake = FakeGitHub({f"repos/{REPO}/pulls/7/commits?per_page=100&page=1": listed})
+    with ra.Measurer(REPO, fake, remote=(git_env / "nowhere").as_uri()) as m, pytest.raises(ra.GitError):
+        m.outcome(finding, origin.reviewed, 7, head)
+    body = review_body("- a.py:10 \u2014 x", sha=origin.reviewed)
+    fake = FakeGitHub({
+        f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1":
+            [pull(7, "2026-11-21T00:00:00Z", head)],
+        f"repos/{REPO}/issues/7/comments?per_page=100&page=1": [comment(body)],
+        f"repos/{REPO}/pulls/7/commits?per_page=100&page=1": listed,
+    })
+    assert ra.main(["--repo", REPO, "--remote", (git_env / "nowhere").as_uri()], fetch=fake) == 1
+    assert "git fetch" in capsys.readouterr().err

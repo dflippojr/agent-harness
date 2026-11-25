@@ -7,42 +7,42 @@ accepted plus not accepted; unknown and unlocated findings are counted but left 
 docstring defines each outcome.
 
 - Repository: `dflippojr/agent-harness`
-- Generated: 2026-11-25T21:13:22Z
-- Merged pull requests: last 50 by merge time (50 found, merged 2026-11-15 to 2026-11-25), 47 with automated reviews, 115 review rounds
+- Generated: 2026-11-25T22:26:18Z
+- Merged pull requests: last 50 by merge time (50 found, merged 2026-11-15 to 2026-11-25), 47 with automated reviews, 104 review rounds
 - Line window: 0 (plus an insertion directly above or below the cited lines)
 - Review comments posted after the merge, not counted: 0
-- Pull requests: #1086, #1085, #1072, #1068, #1069, #1076, #1074, #1073, #1067, #809, #1006, #1004, #1005, #1044, #1043, #1041, #1042, #1039, #1038, #1037, #1036, #1035, #1033, #1032, #1031, #1030, #1029, #1028, #1022, #1025, #1021, #1020, #1019, #1007, #1017, #1016, #1002, #1001, #999, #997, #988, #987, #953, #959, #958, #955, #952, #983, #985, #978
+- Pull requests: #1088, #1086, #1085, #1072, #1068, #1069, #1076, #1074, #1073, #1067, #809, #1006, #1004, #1005, #1044, #1043, #1041, #1042, #1039, #1038, #1037, #1036, #1035, #1033, #1032, #1031, #1030, #1029, #1028, #1022, #1025, #1021, #1020, #1019, #1007, #1017, #1016, #1002, #1001, #999, #997, #988, #987, #953, #959, #958, #955, #952, #983, #985
 
 ## Overall
 
 | Scope | Findings | Accepted | Not accepted | Unknown | Unlocated | Acceptance |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| all findings | 105 | 77 | 21 | 0 | 7 | 78.6% |
+| all findings | 82 | 58 | 17 | 0 | 7 | 77.3% |
 
 ## By backend
 
 | Backend | Findings | Accepted | Not accepted | Unknown | Unlocated | Acceptance |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | claude | 12 | 9 | 2 | 0 | 1 | 81.8% |
-| codex | 93 | 68 | 19 | 0 | 6 | 78.2% |
+| codex | 70 | 49 | 15 | 0 | 6 | 76.6% |
 
 ## By severity
 
 | Severity | Findings | Accepted | Not accepted | Unknown | Unlocated | Acceptance |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| advisory (file level) | 33 | 26 | 7 | 0 | 0 | 78.8% |
-| blocking (line level) | 72 | 51 | 14 | 0 | 7 | 78.5% |
+| advisory (file level) | 22 | 16 | 6 | 0 | 0 | 72.7% |
+| blocking (line level) | 60 | 42 | 11 | 0 | 7 | 79.2% |
 
 ## By finding type
 
 | Type | Findings | Accepted | Not accepted | Unknown | Unlocated | Acceptance |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| advisory: structure | 22 | 17 | 5 | 0 | 0 | 77.3% |
+| advisory: structure | 11 | 7 | 4 | 0 | 0 | 63.6% |
 | advisory: style | 11 | 9 | 2 | 0 | 0 | 81.8% |
-| blocking: correctness | 30 | 25 | 5 | 0 | 0 | 83.3% |
+| blocking: correctness | 25 | 21 | 4 | 0 | 0 | 84.0% |
 | blocking: proof contradicted | 6 | 3 | 0 | 0 | 3 | 100.0% |
 | blocking: test cannot fail | 1 | 1 | 0 | 0 | 0 | 100.0% |
-| blocking: unmet criterion | 27 | 17 | 6 | 0 | 4 | 73.9% |
+| blocking: unmet criterion | 20 | 12 | 4 | 0 | 4 | 75.0% |
 | blocking: untested fix | 3 | 1 | 2 | 0 | 0 | 33.3% |
 | blocking: weakened test | 5 | 4 | 1 | 0 | 0 | 80.0% |
 
@@ -50,6 +50,7 @@ docstring defines each outcome.
 
 | PR | Round | Backend | Severity | Type | Location | Outcome | Reason |
 | --- | ---: | --- | --- | --- | --- | --- | --- |
+| #1088 | 1 | codex | blocking | unmet criterion | `tools/openapi/openapi.json:5078` | accepted |  |
 | #1086 | 1 | codex | blocking | unmet criterion | `harness/metrics.py:278` | accepted |  |
 | #1085 | 1 | codex | advisory | structure | `tests/test_api.py` | not accepted | no commit after the review |
 | #1072 | 1 | codex | blocking | correctness | `harness/policy.py:428` | accepted |  |
@@ -131,27 +132,3 @@ docstring defines each outcome.
 | #983 | 5 | codex | blocking | proof contradicted | (none) | unlocated | the finding cites no file |
 | #985 | 1 | codex | blocking | unmet criterion | (none) | unlocated | the finding cites no file |
 | #985 | 2 | codex | blocking | unmet criterion | `tools/ui-tests/tests/defects.spec.ts:511` | accepted |  |
-| #978 | 1 | codex | blocking | unmet criterion | `ops/review/run-review.ps1:2796` | accepted |  |
-| #978 | 2 | codex | blocking | unmet criterion | `ops/review/run-review.ps1:2812` | accepted |  |
-| #978 | 3 | codex | blocking | unmet criterion | `ops/review/run-review.ps1:2823` | accepted |  |
-| #978 | 3 | codex | advisory | structure | `ops/review/run-review.ps1` | accepted |  |
-| #978 | 4 | codex | advisory | structure | `ops/review/run-review.ps1` | accepted |  |
-| #978 | 5 | codex | advisory | structure | `ops/review/run-review.ps1` | accepted |  |
-| #978 | 6 | codex | blocking | correctness | `ops/review/run-review.ps1:2831` | accepted |  |
-| #978 | 6 | codex | advisory | structure | `ops/review/run-review.ps1` | accepted |  |
-| #978 | 7 | codex | blocking | unmet criterion | `ops/review/run-review.ps1:2875` | accepted |  |
-| #978 | 7 | codex | advisory | structure | `ops/review/run-review.ps1` | accepted |  |
-| #978 | 8 | codex | blocking | unmet criterion | `ops/review/run-review.ps1:2881` | accepted |  |
-| #978 | 8 | codex | advisory | structure | `ops/review/run-review.ps1` | accepted |  |
-| #978 | 9 | codex | blocking | correctness | `ops/review/run-review.ps1:2889` | not accepted |  |
-| #978 | 9 | codex | advisory | structure | `ops/review/run-review.ps1` | accepted |  |
-| #978 | 10 | codex | blocking | correctness | `ops/review/run-review.ps1:2831` | accepted |  |
-| #978 | 10 | codex | blocking | correctness | `ops/review/run-review.ps1:2871` | accepted |  |
-| #978 | 10 | codex | advisory | structure | `ops/review/run-review.ps1` | accepted |  |
-| #978 | 11 | codex | blocking | correctness | `ops/review/run-review.ps1:3089` | accepted |  |
-| #978 | 11 | codex | blocking | unmet criterion | `ops/review/run-review.ps1:2871` | accepted |  |
-| #978 | 11 | codex | advisory | structure | `ops/review/run-review.ps1` | accepted |  |
-| #978 | 12 | codex | blocking | unmet criterion | `ops/review/run-review.ps1:2936` | not accepted |  |
-| #978 | 12 | codex | advisory | structure | `ops/review/run-review.ps1` | accepted |  |
-| #978 | 13 | codex | blocking | unmet criterion | `ops/review/run-review.ps1:2939` | not accepted | no commit after the review |
-| #978 | 13 | codex | advisory | structure | `ops/review/run-review.ps1` | not accepted | no commit after the review |

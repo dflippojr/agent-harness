@@ -535,10 +535,12 @@ the command itself keeps running.
 ### Review acceptance
 
 `scripts/review_acceptance.py` measures how often authors act on the automated review (#1011). For each review
-comment on the last N merged PRs, it records whether a commit pushed after the reviewed commit, before the merge,
-changed the cited lines. Advisory suggestions name only a file, so they are measured at file level. It reports
-acceptance per backend, per severity (blocking or advisory) and per finding type. It reads GitHub through `gh api`
-and changes nothing in the review itself. The committed baseline is [review-acceptance.md](review-acceptance.md):
+comment on the last N merged PRs, it records whether one of the PR's own commits after the reviewed commit changed
+the cited lines. Each non-merge commit is judged on its own diff, so a fix merged in from a topic branch counts and a
+merge from `main` never does. Advisory suggestions name only a file, so they are measured at file level. It reports
+acceptance per backend, per severity (blocking or advisory) and per finding type. It reads only GitHub: `gh api`, plus
+a shallow fetch of each `refs/pull/N/head` into a temporary repository that it deletes. It changes nothing in the
+review itself. The committed baseline is [review-acceptance.md](review-acceptance.md):
 `python scripts/review_acceptance.py --limit 50 --out docs/review-acceptance.md` regenerates it, and `--json`
 also writes the per-finding rows.
 
