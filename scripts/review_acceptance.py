@@ -47,18 +47,19 @@ from pathlib import Path
 REVIEW_LOGIN = "github-actions[bot]"
 MARKER_RE = re.compile(r"<!-- agent-review: sha=([0-9a-f]{40}) mode=(full|incremental)(?: base=[A-Za-z0-9._/\-]+)? -->")
 BACKEND_RE = re.compile(r"^Automated review backend: \*\*([a-z][a-z0-9_-]*)(?: \(([^)\r\n]*)\))?\*\*\.?\s*$", re.M)
-HEADING_RE = re.compile(r"^\s*##\s+(.*?)\s*$")
 FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
-ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d{1,3}[.)])\s+(.*)$")
-# The same citation shape as the annotation step of .github/workflows/review.yml.
-CITATION_RE = re.compile(r"^[`*_]*([^\s:`*]+):(\d+)(?:-(\d+))?[`*_]*[:\s)-]*(.*)$")
+ORDINAL_RE = re.compile(r"\d{1,3}[.)]")
+# The citation shape of the annotation step in .github/workflows/review.yml, matched in pieces so nothing backtracks.
+CITATION_RE = re.compile(r"([^\s:`*]+):(\d+)(?:-(\d+))?")
 LABEL_RE = re.compile(r"^\*\*([^*]{1,60}?):?\*\*")
-ADVISORY_RE = re.compile(r"^\s*(?:[-*+]\s+|\d{1,3}[.)]\s+)?\*\*(Style|Structure):?\*\*\s*[—–:-]*\s*`([^`\s]+)`")
+ADVISORY_RE = re.compile(r"\*\*(Style|Structure):?\*\*")
+CODE_PATH_RE = re.compile(r"`([^`\s]+)`")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 LEAD = "\u2014\u2013-:, \t"  # dashes, colons and commas between a citation and its label
 NO_FINDINGS_RE = re.compile(r"\bno\b.*\bfindings?\b", re.I)
 
 COMPARE_FILE_CAP = 300
+MAX_PULL_PAGES = 100
 
 ACCEPTED = "accepted"
 NOT_ACCEPTED = "not_accepted"
@@ -135,9 +136,8 @@ def _sections(body: str) -> dict[str, list[str]]:
             continue
         if fence is not None:
             continue
-        heading = HEADING_RE.match(line)
-        if heading:
-            name = heading.group(1).lower()
+        name = _heading(line)
+        if name is not None:
             current = None if name in sections else sections.setdefault(name, [])
             continue
         if current is not None:
@@ -145,12 +145,37 @@ def _sections(body: str) -> dict[str, list[str]]:
     return sections
 
 
+def _heading(line: str) -> str | None:
+    """The lower-cased title of a `## ` heading line, or None."""
+    text = line.strip()
+    if not text.startswith("##") or text.startswith("###") or text[2:3] not in (" ", "\t"):
+        return None
+    return text[2:].strip().lower()
+
+
+def _item(line: str) -> str | None:
+    """The text of a top-level list item (`- `, `* `, `+ ` or `1. `), or None for any other line."""
+    if len(line) - len(line.lstrip()) > 1:
+        return None  # a nested bullet is part of the finding above it
+    text = line.lstrip()
+    if text[:1] in ("-", "*", "+"):
+        marker = 1
+    else:
+        ordinal = ORDINAL_RE.match(text)
+        if not ordinal:
+            return None
+        marker = ordinal.end()
+    if text[marker:marker + 1] not in (" ", "\t"):
+        return None
+    return text[marker:].strip()
+
+
 def _label(text: str) -> str | None:
     match = LABEL_RE.match(text.lstrip(LEAD))
     if not match:
         return None
     # A combined label such as "Unmet criterion / Proof contradicted" counts under its first type.
-    return re.split(r"\s*[/;,]\s*", match.group(1).strip().lower())[0]
+    return re.split(r"[/;,]", match.group(1).lower())[0].strip()
 
 
 def parse_findings(body: str) -> list[Finding]:
@@ -158,18 +183,18 @@ def parse_findings(body: str) -> list[Finding]:
     sections = _sections(body)
     findings: list[Finding] = []
     for line in sections.get("findings", []):
-        item = ITEM_RE.match(line)
-        if not item or len(line) - len(line.lstrip()) > 1:
-            continue  # a nested bullet is part of the finding above it
-        text = item.group(1).strip()
-        cite = CITATION_RE.match(text)
+        text = _item(line)
+        if text is None:
+            continue
+        cite = CITATION_RE.match(text.lstrip("`*_"))
         if cite:
             start = int(cite.group(2))
             end = int(cite.group(3)) if cite.group(3) else start
             if start < 1 or end < start:
                 end = start
             path = cite.group(1).replace("\\", "/").removeprefix("./")
-            findings.append(Finding("blocking", _label(cite.group(4)) or "correctness", path, start, end))
+            rest = text.lstrip("`*_")[cite.end():].lstrip("`*_").lstrip(":) \t-")
+            findings.append(Finding("blocking", _label(rest) or "correctness", path, start, end))
             continue
         label = _label(text)
         if label == "spec":
@@ -179,9 +204,12 @@ def parse_findings(body: str) -> list[Finding]:
             findings.append(Finding("blocking", label or "unclassified", None))
     advisory_key = next((name for name in sections if name.startswith("style and structure")), None)
     for line in sections.get(advisory_key, []) if advisory_key else []:
-        match = ADVISORY_RE.match(line)
-        if match:
-            path = match.group(2).replace("\\", "/").removeprefix("./")
+        item = _item(line)
+        text = item if item is not None else line.strip()
+        match = ADVISORY_RE.match(text)
+        code = CODE_PATH_RE.match(text[match.end():].lstrip(LEAD)) if match else None
+        if match and code:
+            path = code.group(1).replace("\\", "/").removeprefix("./")
             findings.append(Finding("advisory", match.group(1).lower(), path))
     return findings
 
@@ -347,26 +375,18 @@ class Measurer:
             return NOT_ACCEPTED, "no commit after the review"
         if int(data.get("total_commits") or len(commits)) > len(commits):
             return UNKNOWN, "more commits after the review than one compare lists"
-        if not any(len(c.get("parents") or []) > 1 for c in commits):
-            step = step_location(self._files(data), len(data.get("files") or []) >= COMPARE_FILE_CAP,
-                                 finding.path, finding.start, finding.end, self.window)
-            return self._verdict(step)
         return self._walk(finding, reviewed, head, commits)
 
     @staticmethod
     def _files(data: dict) -> list[dict]:
         return [f for f in data.get("files") or [] if isinstance(f, dict)]
 
-    @staticmethod
-    def _verdict(step: FileStep) -> tuple[str, str]:
-        if step.outcome == "touched":
-            return ACCEPTED, ""
-        if step.outcome == "unknown":
-            return UNKNOWN, step.reason
-        return NOT_ACCEPTED, ""
-
     def _walk(self, finding: Finding, reviewed: str, head: str, commits: list[dict]) -> tuple[str, str]:
-        """Commit by commit along the first-parent chain, so a merge from the base never counts as acceptance."""
+        """Commit by commit along the first-parent chain, never the range's net diff alone.
+
+        A commit that edits a cited line counts even when a later one restores it, and a merge from the base
+        branch never counts as acceptance: it only moves the cited lines.
+        """
         parents = {c.get("sha"): (c.get("parents") or []) for c in commits}
         chain: list[str] = []
         sha = head
@@ -422,16 +442,20 @@ def merged_pulls(fetch: Fetch, repo: str, limit: int) -> list[dict]:
     """The `limit` most recently merged pull requests, newest first."""
     merged: list[dict] = []
     page = 1
-    while page <= 30:
+    while page <= MAX_PULL_PAGES:
         batch = fetch(f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page={page}")
         if not isinstance(batch, list) or not batch:
             break
         merged.extend(p for p in batch if isinstance(p, dict) and p.get("merged_at"))
         if len(batch) < 100:
             break
-        page += 1
-        if len(merged) >= limit * 2:
+        merged.sort(key=lambda p: p["merged_at"], reverse=True)
+        oldest_update = min(str(p.get("updated_at") or "") for p in batch if isinstance(p, dict))
+        # A merge updates the PR, so every later page holds PRs merged no later than this page's oldest update.
+        # Once the N-th latest merge seen is newer than that, no later page can displace it.
+        if len(merged) >= limit and merged[limit - 1]["merged_at"] > oldest_update:
             break
+        page += 1
     merged.sort(key=lambda p: p["merged_at"], reverse=True)
     return merged[:limit]
 
@@ -559,6 +583,17 @@ def to_json(report: Measurement) -> str:
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
+def _inside_cwd(path: Path | None, parser: argparse.ArgumentParser) -> Path | None:
+    """An output path resolved inside the working directory; anything that leaves it is an argument error."""
+    if path is None:
+        return None
+    base = Path.cwd().resolve()
+    resolved = (base / path).resolve()
+    if not resolved.is_relative_to(base):
+        parser.error(f"output paths must stay inside the working directory: {path}")
+    return resolved
+
+
 def main(argv: list[str] | None = None, fetch: Fetch = gh_fetch) -> int:
     parser = argparse.ArgumentParser(description="Acceptance metric for the automated PR review (#1011, step 1).")
     parser.add_argument("--repo", default="dflippojr/agent-harness", help="owner/name of the repository")
@@ -571,17 +606,18 @@ def main(argv: list[str] | None = None, fetch: Fetch = gh_fetch) -> int:
     if args.limit < 1 or args.window < 0:
         parser.error("--limit must be at least 1 and --window at least 0")
     try:
+        out, data = (_inside_cwd(path, parser) for path in (args.out, args.json))
         report = measure(args.repo, args.limit, fetch, args.window, args.login)
     except GitHubError as exc:
         print(f"review_acceptance: {exc}", file=sys.stderr)
         return 1
     markdown = render_markdown(report)
-    if args.out:
-        args.out.write_text(markdown, encoding="utf-8", newline="\n")
+    if out:
+        out.write_text(markdown, encoding="utf-8", newline="\n")
     else:
         sys.stdout.write(markdown)
-    if args.json:
-        args.json.write_text(to_json(report), encoding="utf-8", newline="\n")
+    if data:
+        data.write_text(to_json(report), encoding="utf-8", newline="\n")
     return 0
 
 

@@ -7,7 +7,7 @@ accepted plus not accepted; unknown and unlocated findings are counted but left 
 docstring defines each outcome.
 
 - Repository: `dflippojr/agent-harness`
-- Generated: 2026-11-25T20:03:27Z
+- Generated: 2026-11-25T21:13:22Z
 - Merged pull requests: last 50 by merge time (50 found, merged 2026-11-15 to 2026-11-25), 47 with automated reviews, 115 review rounds
 - Line window: 0 (plus an insertion directly above or below the cited lines)
 - Review comments posted after the merge, not counted: 0

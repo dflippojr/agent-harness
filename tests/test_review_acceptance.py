@@ -380,11 +380,12 @@ def test_report_cells_are_escaped_and_empty_runs_render():
     assert "| #1 | 1 | x\\|y | blocking | a&lt;b | `p\\|q.py:2-4` | unknown | r\\|s |" in text
 
 
-def test_main_writes_the_report_and_json(tmp_path, capsys):
-    out, data = tmp_path / "report.md", tmp_path / "report.json"
-    assert ra.main(["--repo", REPO, "--limit", "5", "--out", str(out), "--json", str(data)], fetch=fake_repo()) == 0
+def test_main_writes_the_report_and_json(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    out, data = tmp_path / "report.md", tmp_path / "sub" / ".." / "report.json"
+    assert ra.main(["--repo", REPO, "--limit", "5", "--out", "report.md", "--json", str(data)], fetch=fake_repo()) == 0
     assert "## By finding type" in out.read_text(encoding="utf-8")
-    payload = json.loads(data.read_text(encoding="utf-8"))
+    payload = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
     assert payload["limit"] == 5 and len(payload["results"]) == 5
     assert ra.main(["--repo", REPO, "--limit", "1"], fetch=fake_repo()) == 0
     assert "# Automated review acceptance" in capsys.readouterr().out
@@ -441,3 +442,58 @@ def test_gh_fetch_calls_the_cli(monkeypatch):
     with pytest.raises(ra.GitHubError) as broken:
         ra.gh_fetch("broken")
     assert not broken.value.missing
+
+
+def test_output_paths_must_stay_inside_the_working_directory(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    fake = FakeGitHub({})
+    for argv in (["--out", "../escape.md"], ["--json", str(tmp_path / "escape.json")]):
+        with pytest.raises(SystemExit):
+            ra.main(["--repo", REPO, *argv], fetch=fake)
+    assert not list(tmp_path.glob("escape.*"))
+    assert fake.calls == []  # refused before reading GitHub
+
+
+def test_an_edit_later_reverted_still_counts():
+    """Review round 1 on #1089: the range's net diff is empty, but a commit after the review changed the line."""
+    edit = "@@ -10 +10 @@\n-old\n+new\n"
+    revert = "@@ -10 +10 @@\n-new\n+old\n"
+    fake = FakeGitHub({
+        compare_path(SHA_A, SHA_C): {"status": "ahead", "ahead_by": 2, "total_commits": 2,
+                                     "commits": [commit(SHA_B, SHA_A), commit(SHA_C, SHA_B)], "files": []},
+        compare_path(SHA_A, SHA_B): {"status": "ahead", "files": [entry("a.py", patch=edit)]},
+        compare_path(SHA_B, SHA_C): {"status": "ahead", "files": [entry("a.py", patch=revert)]},
+    })
+    assert ra.Measurer(REPO, fake).outcome(LINE, SHA_A, SHA_C) == (ra.ACCEPTED, "")
+
+
+def test_merged_pulls_keep_paging_until_no_later_page_can_hold_a_newer_merge():
+    """Review round 1 on #1089: old PRs updated recently fill page one; a newer merge on page two still counts."""
+    old = [dict(pull(n, "2026-01-01T00:00:00Z"), updated_at="2026-11-24T00:00:00Z") for n in range(100)]
+    newer = dict(pull(500, "2026-11-20T00:00:00Z"), updated_at="2026-11-20T00:00:00Z")
+    fake = FakeGitHub({
+        f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1": old,
+        f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=2": [newer],
+    })
+    assert ra.merged_pulls(fake, REPO, 50)[0]["number"] == 500
+    # Once the N-th latest merge is newer than a page's oldest update, later pages are not read.
+    recent = [dict(pull(n, "2026-11-23T00:00:00Z"), updated_at="2026-11-22T00:00:00Z") for n in range(100)]
+    fake = FakeGitHub({f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1": recent})
+    assert len(ra.merged_pulls(fake, REPO, 50)) == 50
+    assert len(fake.calls) == 1
+
+
+def test_heading_and_item_shapes():
+    assert ra._heading("## Findings ") == "findings"
+    assert ra._heading("##\tFindings") == "findings"
+    assert ra._heading("### Findings") is None
+    assert ra._heading("##Findings") is None
+    assert ra._item("- a") == "a"
+    assert ra._item("12) a") == "a"
+    assert ra._item("1. a") == "a"
+    assert ra._item("-a") is None
+    assert ra._item("1.a") is None
+    assert ra._item("plain text") is None
+    assert ra._item("   - nested") is None
