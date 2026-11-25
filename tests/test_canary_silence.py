@@ -641,12 +641,21 @@ def test_last_complete_timestamp_is_absent_without_a_complete_row(tmp_path):
     store.begin("a" * 40, 1.0)
     store.finish("a" * 40, "blocked", [], 2.0)
     store.begin("b" * 40, 3.0)  # still running: no finish yet
-    store.begin("c" * 40, 4.0)  # complete, but no attempt was graded: not a result, as for the age gauge (#732)
-    store.finish("c" * 40, "complete", [{**o, "status": "suspended"} for o in _outcomes(0, total=2)], 5.0)
     assert not any(LAST_COMPLETE in line for line in _metric_lines(store))
     store.begin("d" * 40, 6.0)
     store.finish("d" * 40, "complete", _outcomes(18), 1_700_000_000.0)
     assert _gauges(store)[LAST_COMPLETE] == 1_700_000_000.0
+
+
+def test_last_complete_timestamp_counts_a_complete_row_without_a_graded_attempt(tmp_path):
+    """Every `complete` row counts (#1071), unlike the age gauge, which needs a graded attempt (#732)."""
+    store = CanaryStore(Database(tmp_path / "h.sqlite3"))
+    store.begin("a" * 40, 1.0)
+    store.finish("a" * 40, "complete", _outcomes(18), 1_700_000_000.0)
+    store.begin("c" * 40, 4.0)
+    store.finish("c" * 40, "complete", [{**o, "status": "suspended"} for o in _outcomes(0, total=2)], 1_700_000_500.0)
+    assert _gauges(store)[LAST_COMPLETE] == 1_700_000_500.0
+    assert store.last_complete_at() == 1_700_000_000.0
 
 
 def test_last_complete_timestamp_ignores_rows_of_any_other_status(tmp_path):
