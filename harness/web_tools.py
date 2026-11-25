@@ -54,7 +54,7 @@ PDF_TYPES = ("application/pdf", "application/x-pdf")
 DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 MAX_PDF_PAGES = 400
 UNTRUSTED = taint.banner("web content")
-MAX_ERROR_CHARS = 300  # a failure's server-chosen text (a Location, a Content-Type) is cut to this
+MAX_ERROR_CHARS = 300  # an untrusted failure's whole message is cut to this
 
 
 class FixedToolError(ToolError):
@@ -430,37 +430,31 @@ class WebTools:
         host_header = host + (f":{parts.port}" if parts.port else "")
         return urlunsplit((parts.scheme, netloc, parts.path or "/", parts.query, "")), host, host_header
 
-    async def _download(self, url: str) -> tuple[str, str, bytes]:
-        """(final URL, content type, body) following redirects, each hop checked."""
+    async def _download(self, url: str, sent: list | None = None) -> tuple[str, str, bytes]:
+        """(final URL, content type, body) following redirects, each hop checked. Failures are raised as they come;
+        `sent` gets an item once the first request is about to go out, and _page decides what they are (#1060)."""
         current = url
         async with self._client(self.cfg.timeout_seconds) as client:
-            for hop in range(MAX_REDIRECTS + 1):
+            for _ in range(MAX_REDIRECTS + 1):
+                target, host, host_header = await self._checked_target(current)
+                request = client.build_request("GET", target, headers={
+                    "Host": host_header, "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5"},
+                    extensions={"sni_hostname": host})
+                if sent is not None and not sent:
+                    sent.append(True)
+                resp = await client.send(request, stream=True)
                 try:
-                    target, host, host_header = await self._checked_target(current)
-                except ToolError as e:
-                    if not hop:  # the model's own URL, refused before any request
-                        raise
-                    raise _untrusted(f"redirect refused: {e}") from (e.__cause__ or e)
-                # From here on every failure may carry the server's words: a status, a header, a TLS or protocol error.
-                try:
-                    request = client.build_request("GET", target, headers={
-                        "Host": host_header, "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5"},
-                        extensions={"sni_hostname": host})
-                    resp = await client.send(request, stream=True)
-                    try:
-                        if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("location"):
-                            current = urljoin(current, resp.headers["location"])
-                            continue
-                        if resp.status_code >= 400:
-                            raise _untrusted(f"HTTP {resp.status_code} from {current}")
-                        ctype = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                        limit = (self.cfg.max_document_bytes
-                                 if ctype in PDF_TYPES + (DOCX_TYPE, "application/octet-stream") else self.cfg.max_bytes)
-                        return current, ctype, await self._read_limited(resp, limit)
-                    finally:
-                        await resp.aclose()
-                except (httpx.HTTPError, httpx.InvalidURL) as e:
-                    raise _untrusted(f"fetch failed: {type(e).__name__}: {e}") from e
+                    if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("location"):
+                        current = urljoin(current, resp.headers["location"])
+                        continue
+                    if resp.status_code >= 400:
+                        raise ToolError(f"HTTP {resp.status_code} from {current}")
+                    ctype = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                    limit = (self.cfg.max_document_bytes if ctype in PDF_TYPES + (DOCX_TYPE, "application/octet-stream")
+                             else self.cfg.max_bytes)
+                    return current, ctype, await self._read_limited(resp, limit)
+                finally:
+                    await resp.aclose()
         raise FixedToolError(f"too many redirects (more than {MAX_REDIRECTS})")
 
     async def _read_limited(self, resp: httpx.Response, limit: int) -> bytes:
@@ -481,19 +475,26 @@ class WebTools:
             entry = (time.time(), *github)
             self._remember(self._pages, url, entry)
             return url, entry[1], entry[2]
-        final, ctype, body = await self._download(url)
-        # The content type, final URL and body are the server's, and so is anything a parser says about them: every
-        # ordinary exception from the whole conversion (pypdf parses page trees lazily, say) is untrusted (#1060).
+        # The one untrusted choke point (#1060). From the first request on, whatever fails (a status, a redirect
+        # target, a transport error, a parser reading the body lazily) may carry the server's words, so any exception
+        # leaves here as one bounded UntrustedToolError with its cause. Only fixed harness wording (FixedToolError)
+        # and refusals of the model's own URL before any request pass as plain errors.
+        sent: list = []
         try:
+            final, ctype, body = await self._download(url, sent)
             convert, args = _extract_text(ctype, body, final)
             title, text = await asyncio.to_thread(convert, *args)
             text = strip_base64_images(re.sub(r"\n{3,}", "\n\n", text)).strip()
         except FixedToolError:
             raise
-        except ToolError as e:
-            raise _untrusted(str(e)) from (e.__cause__ or e)
-        except Exception as e:  # noqa: BLE001 - parsers raise many kinds of errors for hostile documents
-            raise _untrusted(f"couldn't read the document: {type(e).__name__}: {e}") from e
+        except Exception as e:  # noqa: BLE001 - after a request every kind of error may quote the server
+            if not sent:
+                if isinstance(e, ToolError):
+                    raise
+                raise ToolError(f"invalid URL: {type(e).__name__}: {e}"[:MAX_ERROR_CHARS]) from e
+            if isinstance(e, ToolError):
+                raise _untrusted(str(e)) from (e.__cause__ or e)
+            raise _untrusted(f"fetch failed: {type(e).__name__}: {e}") from e
         entry = (time.time(), title, f"(final URL: {final})\n\n{text}" if final != url else text)
         self._remember(self._pages, url, entry)
         return url, entry[1], entry[2]
@@ -508,7 +509,7 @@ class WebTools:
         for key, source in info["urls"].items():
             try:
                 _, _, bodies[key] = await self._download(source)
-            except (ToolError, httpx.HTTPError) as e:
+            except Exception as e:  # noqa: BLE001 - any failure falls back to the HTML page, read through _page
                 if key in ("meta", "raw"):
                     log.info("GitHub API unavailable for %s (%s); using the HTML page", url, e)
                     return None
