@@ -265,6 +265,34 @@ def test_approval_notification_and_token_buttons(tmp_path):
         assert done["click"].endswith(f"/#/s/{sid}")
 
 
+def test_approval_requested_is_heard_only_once_the_session_waits(tmp_path):
+    """#1077: whoever hears `approval_requested` (the ntfy notifier, an event stream) and reads the session at once
+    finds it `waiting_approval`, with the approval in `pending_approvals`, and has already heard that status."""
+    rules = [{"tool": "write_file", "action": "ask", "reason": "test gate"}]
+    steps = [Completion(tool_calls=[call("write_file", 0, path="a.txt", content="x")]), Completion(content="done")]
+    client, m, _ = make_client(tmp_path, steps, rules=rules)
+    heard: list[str] = []
+    seen: list[dict] = []
+
+    def probe(event: dict) -> None:  # bus listeners run synchronously, right after the event's commit
+        heard.append(event["type"] if event["type"] != "status" else f"status:{event['data']['status']}")
+        if event["type"] == "approval_requested":
+            s = m.db.sessions.get_session(event["session_id"])
+            seen.append({"status": s["status"], "pending": m.summary(s).get("pending_approvals"),
+                         "id": event["data"]["id"], "heard": list(heard)})
+    m.bus.add_listener(probe)
+    with client:
+        sid = client.post("/sessions", json={"prompt": "write a file", "project": "guarded"}).json()["id"]
+        wait_for(lambda: seen)
+        approval = seen[0]
+        assert approval["status"] == "waiting_approval"
+        assert [a["id"] for a in approval["pending"] or []] == [approval["id"]]
+        assert "status:waiting_approval" in approval["heard"]
+        client.post(f"/sessions/{sid}/approvals/{approval['id']}", json={"decision": "approve"})
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
+        assert heard.count("status:waiting_approval") == 1  # announced once, not again by the waiting caller
+
+
 @needs_host_git
 def test_templates_rerun_and_changes(tmp_path):
     steps = [
