@@ -42,6 +42,7 @@ STATUS_PROMPT = ("This is a scheduled job, so the user isn't watching, and an OK
 DOW_NAMES = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
 MONTH_NAMES = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct",
                                            "nov", "dec"], 1)}
+CATCH_UP_MAX_MINUTES = 525600  # one year (owner decision on #934)
 PRESETS = {"@hourly": "0 * * * *", "@daily": "0 0 * * *", "@weekly": "0 0 * * 0", "@monthly": "0 0 1 * *"}
 
 
@@ -263,6 +264,7 @@ def validate(job: dict, projects: dict, models: dict, backends: dict | None = No
     if not name or not prompt:
         raise ValueError("name and prompt are required")
     cron = Cron(job.get("cron") or "")
+    cron.next_after(time.time())  # CronError when it parses but never matches (`0 0 30 2 *`, #934)
     project = job.get("project") or "scratch"
     if project not in projects:
         raise ValueError(f"unknown project {project!r}")
@@ -272,10 +274,13 @@ def validate(job: dict, projects: dict, models: dict, backends: dict | None = No
     notify = job.get("notify") or "low"
     if notify not in NOTIFY_MODES:
         raise ValueError(f"notify must be one of {', '.join(NOTIFY_MODES)}")
+    catch_up = int(job.get("catch_up_minutes", 360))
+    if catch_up > CATCH_UP_MAX_MINUTES:
+        raise ValueError(f"catch_up_minutes must be at most {CATCH_UP_MAX_MINUTES} (one year)")
     return {"name": name[:80], "prompt": prompt, "cron": cron.expr, "project": project, "backend": backend,
             "model": model,
             "notify": notify, "enabled": bool(job.get("enabled", True)),
-            "catch_up_minutes": max(0, int(job.get("catch_up_minutes", 360)))}
+            "catch_up_minutes": max(0, catch_up)}
 
 
 class JobScheduler:

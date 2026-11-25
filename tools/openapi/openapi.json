@@ -5075,6 +5075,7 @@
           },
           "catch_up_minutes": {
             "default": 360,
+            "maximum": 525600,
             "title": "Catch Up Minutes",
             "type": "integer"
           },

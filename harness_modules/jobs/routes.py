@@ -4,10 +4,11 @@ import uuid
 from typing import Literal
 
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from harness.modules import HarnessError, RouteTable, WebSessionResponse, manager, operation_audit
 
+from .service import CATCH_UP_MAX_MINUTES
 from .store import JobStore
 
 NO_SUCH_JOB = "no such job"
@@ -23,7 +24,7 @@ class Job(BaseModel):
     model: str = ""
     notify: str = "low"          # OK results: attention (no notification) | low | always
     enabled: bool = True
-    catch_up_minutes: int = 360
+    catch_up_minutes: int = Field(360, le=CATCH_UP_MAX_MINUTES)  # #934: above a year is a 422, not an overflow
 
 
 class Template(BaseModel):
@@ -49,6 +50,7 @@ class JobRunResponse(BaseModel):
 class JobResponse(Job):
     model_config = ConfigDict(extra="allow")
     id: str
+    catch_up_minutes: int = 360  # unbounded: a job stored before the bound (#934) must still read
     next_run_at: float | None
     last_run_at: float | None
     last_session_id: str
@@ -102,9 +104,12 @@ async def preview_cron(cron: str, request: Request, count: int = 3):
     except CronError as e:
         return {"ok": False, "error": str(e)}
     times, t = [], _time.time()
-    for _ in range(max(1, min(count, 10))):
-        t = c.next_after(t)
-        times.append(t)
+    try:
+        for _ in range(max(1, min(count, 10))):
+            t = c.next_after(t)
+            times.append(t)
+    except CronError as e:  # parses but never matches (#934): reported like any invalid schedule (#971)
+        return {"ok": False, "error": str(e)}
     return {"ok": True, "cron": c.expr, "next": times}
 
 

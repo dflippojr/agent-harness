@@ -220,10 +220,10 @@ def test_job_routes_reject_catch_up_minutes_above_a_year(tmp_path, minutes):
         assert client.post("/jobs", json={**body, "catch_up_minutes": minutes}).status_code == 422
         assert client.get("/jobs").json() == []
         jid = client.post("/jobs", json=body).json()["id"]
-        before = m.db.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        before = len(m.db.accounts.list_audit())
         assert client.put(f"/jobs/{jid}", json={**body, "catch_up_minutes": minutes}).status_code == 422
         assert client.get(f"/jobs/{jid}").json()["catch_up_minutes"] == 360
-        assert m.db.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] == before
+        assert len(m.db.accounts.list_audit()) == before
     with pytest.raises(ValueError):
         service.validate({**body, "catch_up_minutes": minutes}, m.cfg.projects, m.cfg.models)
     m.db.close()
