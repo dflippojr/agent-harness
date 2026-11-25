@@ -17,7 +17,8 @@ GitHub's public API and raw file host instead (github_sources / github_text), fa
 What a page says is untrusted data; results say so to the model. So is a failure from the first request on (#1060): its
 message can carry a status, header, redirect target or error text the server chose, so it is an UntrustedToolError
 with the same banner, and it taints the session like a page. Refusals decided from the model's own URL before any
-request (scheme, credentials, internal name, DNS, blocked address) stay plain errors.
+request (scheme, credentials, internal name, DNS, blocked address) stay plain errors, as do the few later failures in
+fixed harness wording (FixedToolError: the size cap, the redirect limit, a password-protected PDF).
 """
 
 from __future__ import annotations
@@ -54,6 +55,12 @@ DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.docu
 MAX_PDF_PAGES = 400
 UNTRUSTED = taint.banner("web content")
 MAX_ERROR_CHARS = 300  # a failure's server-chosen text (a Location, a Content-Type) is cut to this
+
+
+class FixedToolError(ToolError):
+    """A failure after the request whose message is fixed harness wording with no value from the response (a size
+    cap, the redirect limit): it passes the untrusted boundary as a plain error (#1060). Any other failure from the
+    first request on is untrusted, so a new error is marked unless it opts out here."""
 
 
 def _untrusted(message: str) -> UntrustedToolError:
@@ -142,7 +149,7 @@ def pdf_to_text(body: bytes) -> tuple[str, str]:
     try:
         reader = pypdf.PdfReader(io.BytesIO(body))
         if reader.is_encrypted and not reader.decrypt(""):
-            raise ToolError("the PDF is password-protected")
+            raise FixedToolError("the PDF is password-protected")
     except ToolError:
         raise
     except Exception as e:  # noqa: BLE001 - pypdf raises many kinds of errors for broken files
@@ -454,15 +461,15 @@ class WebTools:
                         await resp.aclose()
                 except (httpx.HTTPError, httpx.InvalidURL) as e:
                     raise _untrusted(f"fetch failed: {type(e).__name__}: {e}") from e
-        raise _untrusted(f"too many redirects (more than {MAX_REDIRECTS})")
+        raise FixedToolError(f"too many redirects (more than {MAX_REDIRECTS})")
 
     async def _read_limited(self, resp: httpx.Response, limit: int) -> bytes:
         body = bytearray()
         async for chunk in resp.aiter_bytes():
             body += chunk
             if len(body) > limit:
-                raise _untrusted(f"{'document' if limit != self.cfg.max_bytes else 'page'} is larger "
-                                 f"than {limit // 2**20} MB")
+                raise FixedToolError(f"{'document' if limit != self.cfg.max_bytes else 'page'} is larger "
+                                     f"than {limit // 2**20} MB")
         return bytes(body)
 
     async def _page(self, url: str) -> tuple[str, str, str]:
@@ -481,6 +488,8 @@ class WebTools:
             convert, args = _extract_text(ctype, body, final)
             title, text = await asyncio.to_thread(convert, *args)
             text = strip_base64_images(re.sub(r"\n{3,}", "\n\n", text)).strip()
+        except FixedToolError:
+            raise
         except ToolError as e:
             raise _untrusted(str(e)) from (e.__cause__ or e)
         except Exception as e:  # noqa: BLE001 - parsers raise many kinds of errors for hostile documents
