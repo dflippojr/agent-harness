@@ -152,6 +152,7 @@ class HostedRuns:
                                reason: str) -> tuple[str, str, str | None]: ...
         async def _review_ask(self, s: dict, name: str, args: dict, decision) -> dict: ...
         def _persist_ask(self, sid: str, existing: dict, extra: dict) -> dict: ...
+        async def _await_approval_status(self, sid: str) -> None: ...
         async def _wait_approval(self, aid: str) -> dict: ...
 
     def _live(self, sid: str) -> dict:
@@ -597,7 +598,7 @@ class HostedRuns:
             if existing is None:
                 return
         if existing["status"] == "pending":
-            await self.aset_status(sid, "waiting_approval")
+            await self._await_approval_status(sid)
             held = self._held_slots.get(sid)
             # Another session gets the backend slot while this one waits on a person (#524).
             # Decided while the slot is taken: it waits for one as `queued`, still holding its place (HOLDS_PLACE).
