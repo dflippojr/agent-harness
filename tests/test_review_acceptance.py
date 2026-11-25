@@ -497,3 +497,14 @@ def test_heading_and_item_shapes():
     assert ra._item("1.a") is None
     assert ra._item("plain text") is None
     assert ra._item("   - nested") is None
+
+
+def test_the_backend_is_the_job_footer_not_one_quoted_in_the_review():
+    """Review round 2 on #1089: a codex review quoting another backend's footer stays attributed to codex."""
+    quoted = REVIEW_1086.replace(
+        "## Style and structure (advisory)\n\n",
+        "## Style and structure (advisory)\n\n```\nAutomated review backend: **claude (opus, high)**.\n```\n"
+        "Automated review backend: **cursor**.\n\n",
+    )
+    review = ra.parse_review(quoted)
+    assert review is not None and (review.backend, review.model) == ("codex", "gpt-6.1-sol, xhigh")

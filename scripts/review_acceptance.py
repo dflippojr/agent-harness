@@ -20,7 +20,7 @@ What counts, in the words of the review format in `.github/workflows/review.yml`
   blocking item with no label is `correctness`; an advisory one is `style` or `structure`.
 * A blocking finding cites `path:line` (or `path:a-b`). It is accepted when a later commit deletes or changes one of
   those lines, or inserts a line right next to them (`--window` widens the range). The line numbers refer to the file
-  at the reviewed commit, which is the old side of the diff to the merged head, so they need no remapping.
+  at the reviewed commit; walking the commits after it, the script maps untouched lines through each commit's diff.
 * An advisory suggestion names only a file, never a line (the prompt reserves `path:line` for findings), so it is
   measured at file level: accepted when a later commit changed that file. The report marks those rows.
 * A `**Spec**` finding has no location and is counted as unlocated, outside the rate.
@@ -219,7 +219,10 @@ def parse_review(body: str) -> Review | None:
     marker = MARKER_RE.search(body)
     if not marker:
         return None
-    backend = BACKEND_RE.search(body)
+    # The job appends the real footer after the review text, just above its marker, so take the last footer-shaped
+    # line before the marker: one the reviewer quoted (in a fence or not) always comes earlier.
+    footers = list(BACKEND_RE.finditer(body, 0, marker.start()))
+    backend = footers[-1] if footers else None
     name = backend.group(1) if backend else "unknown"
     model = (backend.group(2) or "") if backend else ""
     return Review(marker.group(1), name, model, parse_findings(body))
