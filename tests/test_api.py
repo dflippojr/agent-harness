@@ -299,6 +299,16 @@ def test_approval_found_pending_again_parks_the_session_once(tmp_path):
     client, m, _ = make_client(tmp_path, [Completion(content="hi")])
     statuses: list[str] = []
     m.bus.add_listener(lambda e: statuses.append(e["data"]["status"]) if e["type"] == "status" else None)
+    deliver = m.bus._deliver
+
+    def slow_done(sid, event):
+        # #1090: an event is delivered on the loop after its write commits, so a reader of the database can see
+        # `done` before the listener hears it. Widen that window so the test cannot pass by luck.
+        if event["type"] == "status" and event["data"]["status"] == "done":
+            time.sleep(0.3)
+        deliver(sid, event)
+
+    m.bus._deliver = slow_done
     with client:
         sid = client.post("/sessions", json={"prompt": "hello"}).json()["id"]
         wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
