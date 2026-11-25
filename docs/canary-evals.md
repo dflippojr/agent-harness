@@ -111,7 +111,9 @@ record can't lose a slot.
 `harness_canary_wall_seconds`, each labelled `sha` (first 8 characters), for the latest 30 results only. It also
 exports three unlabelled silence gauges, whether or not the canary is on: `harness_canary_last_complete_age_seconds`
 (`+Inf` with no result yet), `harness_canary_consecutive_unrun_slots` and `harness_gpu_manual_hold_age_seconds`. See
-[production-signals.md](production-signals.md#the-silence-gauges).
+[production-signals.md](production-signals.md#the-silence-gauges). Beside the age,
+`harness_canary_last_complete_timestamp_seconds` gives the same newest complete result's finish as Unix seconds, and
+is absent (not 0) until there is one, so a scraper can read freshness without its own clock.
 
 No Grafana dashboard JSON is checked in under `ops/`, so there is no panel to edit. PromQL for one:
 
