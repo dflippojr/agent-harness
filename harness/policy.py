@@ -258,7 +258,7 @@ _SHELL_PUNCTUATION = re.compile(r";;&|;;|;&|\|&|<<<|<<-?|<>|\(\(|\)\)|>\||&&|\|\
 _SHELL_SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "\n"}
 _SHELL_REDIRECTS = {"<", ">", ">>", ">|", "<&", ">&", "&>", "&>>"}
 _PYTHON_MODULES = {"pytest", "unittest", "ruff", "mypy", "black", "isort", "pylint", "pyright",
-                   "py_compile", "compileall", "build"}
+                   "py_compile", "compileall", "build", "todo"}
 _PYTHON_STARTUP_VALUES = {"W": {"ignore", "default", "error", "always", "once", "module"},
                           "X": {"dev", "utf8", "utf8=0", "utf8=1", "faulthandler"}}
 _MODELED_ENV_VALUES = {"LC_ALL": {"C", "C.UTF-8"}, "LANG": {"C", "C.UTF-8"}, "TZ": {"UTC"}}
@@ -837,7 +837,11 @@ class Policy:
             if self.repo and shell.git_push:
                 return Decision(DENY, REPO_RULES[0]["reason"])
             if shell.opaque:
-                return Decision(ASK, "cannot determine what the shell command does")
+                # Opacity requires a human, but must not erase a known hazard's
+                # explanation. Reuse default rule priority, including network,
+                # publication and deletion, even if a project rule allowed it.
+                hazard = self._rule_decision(name, args, alias, shell, rules=DEFAULT_RULES)
+                return Decision(ASK, hazard.reason if hazard else "cannot determine what the shell command does")
         if (decision is None or decision.action != DENY) and self._writes_claude_dir(name, args):
             return Decision(ASK, CLAUDE_DIR_REASON)
         if decision is not None:
@@ -847,8 +851,8 @@ class Policy:
         return Decision(ASK, "owner-configured MCP tool requires approval") if client else Decision(ALLOW)
 
     def _rule_decision(self, name: str, args: dict, alias: str,
-                       shell: _ShellAnalysis | None = None) -> Decision | None:
-        for rule in self.rules:
+                       shell: _ShellAnalysis | None = None, *, rules: list[dict] | None = None) -> Decision | None:
+        for rule in self.rules if rules is None else rules:
             root = self.workspace_root
             if _matches(rule, name, args, root, shell) or (alias and _matches(rule, alias, args, root, shell)):
                 if name in ALWAYS_ASK and rule["action"] != DENY:
