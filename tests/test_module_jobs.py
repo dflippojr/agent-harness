@@ -278,9 +278,12 @@ def test_job_routes_never_answer_5xx_for_schedule_or_catch_up_input(tmp_path):
 
 
 def test_job_integer_fields_fit_sqlite():
-    """Every integer field a client sends is bounded within SQLite's signed 64-bit INTEGER."""
+    """Every integer field a client sends is rejected by the request model before it can overflow SQLite's signed
+    64-bit INTEGER (the 422 comes from the model, before any route code runs)."""
+    from pydantic import ValidationError
     from harness_modules.jobs.routes import Job
+    base = {"name": "Fake", "prompt": "fake", "cron": "@daily"}
     for name, field in Job.model_fields.items():
         if field.annotation is int:
-            bounds = [getattr(meta, "le", None) for meta in field.metadata]
-            assert any(b is not None and b < 2**63 for b in bounds), name
+            with pytest.raises(ValidationError):
+                Job.model_validate({**base, name: 2**63})

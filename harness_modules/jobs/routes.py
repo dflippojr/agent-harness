@@ -4,7 +4,7 @@ import uuid
 from typing import Literal
 
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from harness.modules import HarnessError, RouteTable, WebSessionResponse, manager, operation_audit
 
@@ -15,7 +15,7 @@ NO_SUCH_JOB = "no such job"
 owner_routes = RouteTable()
 
 
-class Job(BaseModel):
+class JobFields(BaseModel):
     name: str
     prompt: str
     cron: str
@@ -24,7 +24,18 @@ class Job(BaseModel):
     model: str = ""
     notify: str = "low"          # OK results: attention (no notification) | low | always
     enabled: bool = True
-    catch_up_minutes: int = Field(360, le=CATCH_UP_MAX_MINUTES)  # #934: above a year is a 422, not an overflow
+    catch_up_minutes: int = 360
+
+
+class Job(JobFields):
+    @field_validator("catch_up_minutes")
+    @classmethod
+    def _catch_up_at_most_a_year(cls, value: int) -> int:
+        """Above a year is a 422, not a SQLite overflow (#934). A validator, not `Field(le=)`, so the OpenAPI
+        document stays as it was (#971)."""
+        if value > CATCH_UP_MAX_MINUTES:
+            raise ValueError(f"catch_up_minutes must be at most {CATCH_UP_MAX_MINUTES} (one year)")
+        return value
 
 
 class Template(BaseModel):
@@ -47,10 +58,9 @@ class JobRunResponse(BaseModel):
     answer: str
 
 
-class JobResponse(Job):
+class JobResponse(JobFields):  # no catch-up bound: a job stored before it (#934) must still read
     model_config = ConfigDict(extra="allow")
     id: str
-    catch_up_minutes: int = 360  # unbounded: a job stored before the bound (#934) must still read
     next_run_at: float | None
     last_run_at: float | None
     last_session_id: str
