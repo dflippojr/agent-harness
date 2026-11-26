@@ -4,17 +4,18 @@ import uuid
 from typing import Literal
 
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from harness.modules import HarnessError, RouteTable, WebSessionResponse, manager, operation_audit
 
+from .service import CATCH_UP_MAX_MINUTES
 from .store import JobStore
 
 NO_SUCH_JOB = "no such job"
 owner_routes = RouteTable()
 
 
-class Job(BaseModel):
+class JobFields(BaseModel):
     name: str
     prompt: str
     cron: str
@@ -24,6 +25,17 @@ class Job(BaseModel):
     notify: str = "low"          # OK results: attention (no notification) | low | always
     enabled: bool = True
     catch_up_minutes: int = 360
+
+
+class Job(JobFields):
+    @field_validator("catch_up_minutes")
+    @classmethod
+    def _catch_up_at_most_a_year(cls, value: int) -> int:
+        """Above a year is a 422, not a SQLite overflow (#934). A validator, not `Field(le=)`, so the OpenAPI
+        document stays as it was (#971)."""
+        if value > CATCH_UP_MAX_MINUTES:
+            raise ValueError(f"catch_up_minutes must be at most {CATCH_UP_MAX_MINUTES} (one year)")
+        return value
 
 
 class Template(BaseModel):
@@ -46,7 +58,7 @@ class JobRunResponse(BaseModel):
     answer: str
 
 
-class JobResponse(Job):
+class JobResponse(JobFields):  # no catch-up bound: a job stored before it (#934) must still read
     model_config = ConfigDict(extra="allow")
     id: str
     next_run_at: float | None
@@ -102,9 +114,12 @@ async def preview_cron(cron: str, request: Request, count: int = 3):
     except CronError as e:
         return {"ok": False, "error": str(e)}
     times, t = [], _time.time()
-    for _ in range(max(1, min(count, 10))):
-        t = c.next_after(t)
-        times.append(t)
+    try:
+        for _ in range(max(1, min(count, 10))):
+            t = c.next_after(t)
+            times.append(t)
+    except CronError as e:  # parses but never matches (#934): reported like any invalid schedule (#971)
+        return {"ok": False, "error": str(e)}
     return {"ok": True, "cron": c.expr, "next": times}
 
 
