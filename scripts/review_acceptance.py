@@ -25,15 +25,15 @@ What counts, in the words of the review format in `.github/workflows/review.yml`
   still counts, a fix merged in from a topic branch counts, and a merge from the base never does.
 * A blocking finding cites `path:line` (or `path:a-b`) in the file at the reviewed commit. A commit accepts it when its
   diff deletes or changes one of those lines, or inserts a line between or right next to them (`--window` widens the
-  range). The lines are first placed in the commit's parent through `git diff -M` from the reviewed commit, which
-  follows renames and earlier edits.
+  range). The filename is followed through individual commits with `git diff -M`, including merges. The lines are
+  then placed in the commit's parent by comparing the reviewed file's contents with that mapped file's contents.
 * An advisory suggestion names only a file, never a line (the prompt reserves `path:line` for findings), so it is
   measured at file level: accepted when a later commit changed that file. The report marks those rows.
 * A `**Spec**` finding has no location and is counted as unlocated, outside the rate.
 * The outcome is unknown, counted but outside the rate, only when it cannot be measured: the reviewed commit is not an
   ancestor of the merged head (a force push), the PR's head ref is gone or moved, GitHub lists 250 commits (its cap),
-  the cited file has no text patch (binary), or a later commit changed the file after a merge had rewritten the cited
-  lines, so they cannot be placed in it.
+  the cited file has no text patch (binary), its filename cannot be traced through an intermediate commit, or a later
+  commit changed the file after a merge had rewritten the cited lines, so they cannot be placed in it.
 
 The report holds counts and per-finding rows only, never review text, which is untrusted.
 """
@@ -406,6 +406,8 @@ class PullHistory:
         self.problem = problem  # why nothing can be measured, when it cannot
         self.commits = {str(c.get("sha")): [str(p.get("sha")) for p in c.get("parents") or []] for c in listed}
         self._diffs: dict[tuple[str, str], list[dict]] = {}
+        self._ancestries: dict[str, list[list[str]]] = {}
+        self._paths: dict[tuple[str, str], dict[str, str | None]] = {}
 
     def git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         return run_git(["--git-dir", str(self.git_dir), *args], check=check)
@@ -417,12 +419,49 @@ class PullHistory:
         return self.git("merge-base", "--is-ancestor", ancestor, descendant, check=False).returncode == 0
 
     def diff(self, old: str, new: str) -> list[dict]:
+        """Compare trees, or explicit `commit:path` blobs after following a filename."""
         key = (old, new)
         if key not in self._diffs:
             out = self.git("-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "-M", "-U0",
                            old, new).stdout
             self._diffs[key] = parse_git_diff(out)
         return self._diffs[key]
+
+    def path_at(self, reviewed: str, target: str, path: str) -> str | None:
+        """Follow renames along ancestry edges, never an accumulated tree diff that can lose similarity.
+
+        Include merges for placement, although only the PR's non-merge commits can accept a finding. Follow every
+        parent reachable from the review: a topic branch may retain a rename that the first parent's diff loses.
+        Surviving mappings must agree; distinct destinations are ambiguous.
+        A deletion without a detected rename loses the mapping, even if a later commit reuses the old filename.
+        """
+        key = (reviewed, path)
+        if key not in self._paths:
+            if reviewed not in self._ancestries:
+                out = self.git("rev-list", "--reverse", "--topo-order", "--ancestry-path", "--parents",
+                               f"{reviewed}..{self.head}").stdout
+                self._ancestries[reviewed] = [line.split() for line in out.splitlines()]
+            source_type = self.git("cat-file", "-t", f"{reviewed}:{path}", check=False).stdout.strip()
+            paths: dict[str, str | None] = {reviewed: path if source_type == "blob" else None}
+            for sha, *parents in self._ancestries[reviewed]:
+                destinations: set[str] = set()
+                for parent in parents:
+                    previous = paths.get(parent)
+                    if previous is None:
+                        continue
+                    current: str | None = previous
+                    for entry in self.diff(parent, sha):
+                        if entry.get("status") == "renamed" and entry.get("previous_filename") == previous:
+                            current = entry["filename"]
+                            break
+                        if entry.get("status") == "removed" and entry.get("filename") == previous:
+                            current = None
+                            break
+                    if current is not None:
+                        destinations.add(current)
+                paths[sha] = destinations.pop() if len(destinations) == 1 else None
+            self._paths[key] = paths
+        return self._paths[key].get(target)
 
 
 def run_git(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -452,9 +491,9 @@ class Measurer:
 
     "Later commits" are exactly the PR's own commits after the reviewed commit (owner decision 1a on #1011): those
     GitHub lists for the PR (so none reachable from the base), descending from the reviewed commit, merges left out.
-    Each is judged on its own diff. The cited lines are placed in that commit's parent through `git diff -M` from the
-    reviewed commit; `git log -L` cannot do this, because it follows lines backwards from a tip, and a line some commit
-    deleted has no position at the tip.
+    Each is judged on its own diff. The filename is followed commit by commit into that commit's parent, then the
+    cited lines are placed by comparing the two file blobs. `git log -L` cannot do this, because it follows lines
+    backwards from a tip, and a line some commit deleted has no position at the tip.
     """
 
     def __init__(self, repo: str, fetch: Fetch = gh_fetch, window: int = 0, remote: str | None = None):
@@ -535,17 +574,21 @@ class Measurer:
         for sha in later:  # any order: one commit that touches the lines is enough
             parent = history.commits[sha][0]
             own = history.diff(parent, sha)
-            placed = FileStep("untouched", finding.path, start or 0, end or 0)
-            if parent != reviewed:
-                placed = step_location(history.diff(reviewed, parent), finding.path, start, end, adjacent=False)
-                if start is None and placed.outcome == "touched" and placed.path:
-                    placed = FileStep("untouched", placed.path)  # file level: only the name has to be followed
+            mapped = history.path_at(reviewed, parent, finding.path)
+            if mapped is None:
+                unmappable = "the cited file cannot be traced through an intermediate commit"
+                continue
+            placed = FileStep("untouched", mapped, start or 0, end or 0)
+            if parent != reviewed and start is not None:
+                placed = step_location(history.diff(f"{reviewed}:{finding.path}", f"{parent}:{mapped}"),
+                                       mapped, start, end, adjacent=False)
             if placed.outcome != "untouched":
                 # The parent no longer holds the cited lines as reviewed (a base merge rewrote them). That only
                 # matters when this commit changes the file; then it cannot be judged.
-                names = {finding.path, placed.path or finding.path}  # the file may have been renamed on the way
+                names = {finding.path, mapped}  # retain the filename even when the lines have no text patch
                 if any(names & {f.get("filename"), f.get("previous_filename")} for f in own):
-                    unmappable = "the cited lines were rewritten by a merge before a later commit changed the file"
+                    unmappable = (placed.reason
+                                  or "the cited lines were rewritten by a merge before a later commit changed the file")
                 continue
             judged = step_location(own, placed.path, start and placed.start, end and placed.end)
             if judged.outcome == "touched":
