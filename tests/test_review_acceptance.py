@@ -1,0 +1,716 @@
+"""The automated review's acceptance metric (#1011, step 1): parsing review comments, judging later diffs, reporting."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parents[1]))
+from scripts import review_acceptance as ra  # noqa: E402
+
+REPO = "o/r"
+SHA_A = "a" * 40
+SHA_B = "b" * 40
+SHA_C = "c" * 40
+SHA_M = "d" * 40
+SHA_X = "e" * 40
+
+# PR #1086's first automated review, as GitHub serves it (CRLF in the job's own lines).
+REVIEW_1086 = (
+    "Reviewed the full diff\r\n\r\n## Acceptance criteria\n\n"
+    "**Not met** — “newest `finished_at` of a `complete` canary row, in Unix seconds”: "
+    "`harness/metrics.py` reuses a helper in `harness/canary.py`.\n\n"
+    "**Met** — “With no complete row, the gauge is absent (not 0)”: `tests/test_canary_silence.py`.\n\n"
+    "## Findings\n\n"
+    "- harness/metrics.py:278 — **Unmet criterion**: “newest `finished_at` of a `complete` canary row.” "
+    "`last_complete_at()` additionally requires `pass_rate IS NOT NULL`.\n\n"
+    "## Style and structure (advisory)\n\n"
+    "No style or structure suggestions worth a human’s time.\r\n\r\n---\r\n"
+    "Automated review backend: **codex (gpt-6.1-sol, xhigh)**.\r\n\r\n"
+    f"<!-- agent-review: sha={SHA_A} mode=full base=main -->\r\n"
+    f"<!-- agent-review: sha={SHA_A} criteria=3/4 findings=1 -->"
+)
+
+
+def review_body(findings: str, advisory: str = "No suggestions.", backend: str = "claude (opus, high)",
+                sha: str = SHA_A) -> str:
+    return (f"Reviewed the full diff\r\n\r\n## Acceptance criteria\n\n**Met** — x\n\n## Findings\n\n{findings}\n\n"
+            f"## Style and structure (advisory)\n\n{advisory}\r\n\r\n---\r\n"
+            f"Automated review backend: **{backend}**.\r\n\r\n<!-- agent-review: sha={sha} mode=full -->")
+
+
+# ------------------------------------------------------------------------------------------------ parsing
+
+
+def test_parses_the_real_review_comment_from_pr_1086():
+    review = ra.parse_review(REVIEW_1086)
+    assert review is not None
+    assert (review.sha, review.backend, review.model) == (SHA_A, "codex", "gpt-6.1-sol, xhigh")
+    assert review.findings == [ra.Finding("blocking", "unmet criterion", "harness/metrics.py", 278, 278)]
+    assert review.findings[0].granularity == "line"
+
+
+def test_a_comment_without_the_job_marker_is_not_a_review():
+    assert ra.parse_review(REVIEW_1086.split("<!--")[0]) is None
+    quoted = REVIEW_1086.replace(f"sha={SHA_A} mode=full", f"sha={SHA_A} mode=other")
+    assert ra.parse_review(quoted.replace("criteria=3/4", "x")) is None
+
+
+def test_a_review_without_a_backend_footer_has_an_unknown_backend():
+    body = REVIEW_1086.replace("Automated review backend: **codex (gpt-6.1-sol, xhigh)**.", "")
+    review = ra.parse_review(body)
+    assert review is not None and (review.backend, review.model) == ("unknown", "")
+    bare = ra.parse_review(REVIEW_1086.replace("codex (gpt-6.1-sol, xhigh)", "cursor"))
+    assert bare is not None and (bare.backend, bare.model) == ("cursor", "")
+
+
+def test_no_significant_findings_is_no_finding():
+    assert ra.parse_findings(review_body("No significant findings.")) == []
+    assert ra.parse_findings(review_body("- No significant findings.")) == []
+
+
+def test_finding_types_locations_and_nested_bullets():
+    findings = ra.parse_findings(review_body(
+        "- `harness/web_tools.py:464` **Unmet criterion**: quoted.\n"
+        "- `harness/web_tools.py:440`: a redirect can crash the run. The failure path:\n"
+        "  - A server replies 302 with a bad port.\n"
+        "  - It gets past the handler.\n"
+        "1. ./harness/a.py:10-12 — **Untested fix**: no test.\n"
+        "- harness\\b.py:7-3 **Weakened test**: backwards range.\n"
+        "- **Spec**, **Unmet criterion**: \"The PR text describes the functional change only.\"\n"
+        "- **Spec** — the description claims a test that does not exist.\n"
+        "- **Proof contradicted**: the Proof row cites no run.\n"
+        "- a.py:5 \u2014 **Unmet criterion / Proof contradicted**: both.\n"
+        "- a.py:6 \u2014 **Unmet criterion; proof contradicted**: both.\n"
+        "- Something with no label and no location.\n"
+        "```\n- harness/fenced.py:1 — quoted from the diff\n```"
+    ))
+    assert findings == [
+        ra.Finding("blocking", "unmet criterion", "harness/web_tools.py", 464, 464),
+        ra.Finding("blocking", "correctness", "harness/web_tools.py", 440, 440),
+        ra.Finding("blocking", "untested fix", "harness/a.py", 10, 12),
+        ra.Finding("blocking", "weakened test", "harness/b.py", 7, 7),
+        ra.Finding("blocking", "unmet criterion", None),
+        ra.Finding("blocking", "spec", None),
+        ra.Finding("blocking", "proof contradicted", None),
+        ra.Finding("blocking", "unmet criterion", "a.py", 5, 5),
+        ra.Finding("blocking", "unmet criterion", "a.py", 6, 6),
+        ra.Finding("blocking", "unclassified", None),
+    ]
+    assert findings[4].granularity == "none"
+
+
+def test_advisory_suggestions_are_file_level():
+    findings = ra.parse_findings(review_body(
+        "No significant findings.",
+        advisory=("**Structure** — `tests/test_api.py`, near the new test: exercise a stored approval.\n"
+                  "- **Style**: `./harness/x.py`, near `load()`: rename it.\n"
+                  "**Style** with no file named.\n"
+                  "Plain prose naming `harness/y.py`."),
+    ))
+    assert findings == [ra.Finding("advisory", "structure", "tests/test_api.py"),
+                        ra.Finding("advisory", "style", "harness/x.py")]
+    assert findings[0].granularity == "file"
+
+
+def test_only_the_first_findings_heading_counts():
+    body = review_body("- a.py:1 — real") + "\n## Findings\n- b.py:2 — quoted later\n"
+    assert [f.path for f in ra.parse_findings(body)] == ["a.py"]
+    assert ra.parse_findings("no headings at all") == []
+
+
+# ------------------------------------------------------------------------------------------------ patches
+
+
+PATCH = (
+    "@@ -8,7 +8,8 @@ def f():\n"
+    " line8\n"
+    " line9\n"
+    "-line10\n"
+    "+line10 changed\n"
+    "+inserted after 10\n"
+    " line11\n"
+    " line12\n"
+    " line13\n"
+    " line14\n"
+    "@@ -30,2 +30,0 @@\n"
+    "-line30\n"
+    "-line31\n"
+    "\\ No newline at end of file\n"
+)
+
+
+def test_check_patch_cited_lines():
+    assert ra.check_patch(PATCH, 10, 10) == ra.LineCheck(True)  # changed
+    assert ra.check_patch(PATCH, 11, 11) == ra.LineCheck(True)  # a line inserted directly above it
+    assert ra.check_patch(PATCH, 9, 9) == ra.LineCheck(False, 9, 9)  # a change below it does not count
+    assert ra.check_patch(PATCH, 9, 10) == ra.LineCheck(True)  # a range counts when any of its lines changed
+
+
+def test_check_patch_follows_untouched_lines_into_the_new_file():
+    assert ra.check_patch(PATCH, 3, 4) == ra.LineCheck(False, 3, 4)  # before any hunk
+    assert ra.check_patch(PATCH, 12, 13) == ra.LineCheck(False, 13, 14)  # inside the hunk as context
+    assert ra.check_patch(PATCH, 20, 22) == ra.LineCheck(False, 21, 23)  # between hunks
+    assert ra.check_patch(PATCH, 30, 30) == ra.LineCheck(True)  # deleted at the end
+    assert ra.check_patch(PATCH, 40, 41) == ra.LineCheck(False, 39, 40)  # after both hunks
+
+
+def test_check_patch_window_and_pure_insertions():
+    assert ra.check_patch(PATCH, 13, 13, window=1) == ra.LineCheck(False, 14, 14)
+    assert ra.check_patch(PATCH, 13, 13, window=2) == ra.LineCheck(True)  # reaches the insertion above line 11
+    insert = "@@ -10,0 +11,2 @@\n+a\n+b\n"  # two lines inserted after old line 10
+    assert ra.check_patch(insert, 10, 10) == ra.LineCheck(True)
+    assert ra.check_patch(insert, 11, 11) == ra.LineCheck(True)
+    assert ra.check_patch(insert, 9, 9) == ra.LineCheck(False, 9, 9)
+    assert ra.check_patch(insert, 12, 12) == ra.LineCheck(False, 14, 14)
+    assert ra.check_patch("garbage before a header\n" + insert, 1, 1) == ra.LineCheck(False, 1, 1)
+
+
+def entry(filename: str, status: str = "modified", patch: str | None = PATCH, **extra) -> dict:
+    data = {"filename": filename, "status": status, "changes": 3, **extra}
+    if patch is not None:
+        data["patch"] = patch
+    return data
+
+
+def test_step_location_through_one_file_list():
+    step = ra.step_location
+    assert step([entry("a.py")], "a.py", 10, 10).outcome == "touched"
+    assert step([entry("a.py")], "a.py", 20, 20) == ra.FileStep("untouched", "a.py", 21, 21)
+    assert step([entry("b.py")], "a.py", 10, 10) == ra.FileStep("untouched", "a.py", 10, 10)
+    assert step([entry("a.py", "removed", None)], "a.py", 1, 1).outcome == "touched"
+    missing = step([entry("a.py", patch=None)], "a.py", 1, 1)
+    assert (missing.outcome, missing.reason) == ("unknown", "the diff has no text patch for the cited file")
+    moved = entry("c.py", "renamed", None, previous_filename="a.py", changes=0)
+    assert step([moved], "a.py", 5, 6) == ra.FileStep("untouched", "c.py", 5, 6)
+    assert step([moved], "a.py", None, None) == ra.FileStep("untouched", "c.py")
+    edited = entry("c.py", "renamed", previous_filename="a.py")
+    assert step([edited], "a.py", 10, 10) == ra.FileStep("touched", "c.py")
+    assert step([edited], "a.py", None, None) == ra.FileStep("touched", "c.py")
+    copied = entry("c.py", "copied", previous_filename="a.py")
+    assert step([copied], "a.py", 10, 10) == ra.FileStep("untouched", "a.py", 10, 10)
+    assert step([entry("a.py")], "a.py", None, None) == ra.FileStep("touched", "a.py")
+
+
+def test_mapping_ignores_a_neighbours_insertion_but_judging_counts_it():
+    insert_above = "@@ -9,0 +10 @@\n+new\n"  # a line inserted between old lines 9 and 10
+    assert ra.check_patch(insert_above, 10, 10) == ra.LineCheck(True)
+    assert ra.check_patch(insert_above, 10, 10, adjacent=False) == ra.LineCheck(False, 11, 11)
+    inside = "@@ -10,0 +11 @@\n+new\n"  # between old lines 10 and 11
+    assert ra.check_patch(inside, 10, 11, adjacent=False) == ra.LineCheck(True)
+
+
+def test_parse_git_diff_entries():
+    text = (
+        "diff --git a/a.py b/a.py\nindex 1..2 100644\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+y\n"
+        "diff --git a/old.py b/new.py\nsimilarity index 100%\nrename from old.py\nrename to new.py\n"
+        "diff --git a/gone.py b/gone.py\ndeleted file mode 100644\nindex 1..0\n--- a/gone.py\n+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n-z\n"
+        "diff --git a/n.py b/n.py\nnew file mode 100644\n--- /dev/null\n+++ b/n.py\n@@ -0,0 +1 @@\n+n\n"
+        "diff --git a/i.png b/i.png\nindex 1..2 100644\nBinary files a/i.png and b/i.png differ\n"
+    )
+    files = ra.parse_git_diff("noise before the first header\n" + text)
+    assert [(f["filename"], f["previous_filename"], f["status"], f["changes"], "patch" in f) for f in files] == [
+        ("a.py", "a.py", "modified", 2, True),
+        ("new.py", "old.py", "renamed", 0, False),
+        ("gone.py", "gone.py", "removed", 1, True),
+        ("n.py", "n.py", "added", 1, True),
+        ("i.png", "i.png", "modified", 1, False),
+    ]
+    assert files[0]["patch"] == "@@ -1 +1 @@\n-x\n+y\n"
+
+
+# ---------------------------------------------------------------------------------------------- outcomes
+
+
+class FakeGitHub:
+    """Serves canned REST answers by path; a missing path is a 404, a listed exception is raised."""
+
+    def __init__(self, answers: dict[str, object]):
+        self.answers = answers
+        self.calls: list[str] = []
+
+    def __call__(self, path: str) -> object:
+        self.calls.append(path)
+        if path not in self.answers:
+            raise ra.GitHubError(f"HTTP 404 {path}", missing=True)
+        answer = self.answers[path]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+# --------------------------------------------------------------------------------------- the whole run
+
+
+def pull(number: int, merged_at: str | None, head: str = SHA_B) -> dict:
+    return {"number": number, "merged_at": merged_at, "head": {"sha": head}}
+
+
+def comment(body: str, created_at: str = "2026-11-20T00:00:00Z", login: str = ra.REVIEW_LOGIN) -> dict:
+    return {"user": {"login": login}, "body": body, "created_at": created_at}
+
+
+def fake_repo(origin: Origin) -> FakeGitHub:
+    """PR 7: two review rounds, the first answered by a commit that edits a.py:10 and b.py; PR 9: no reviews."""
+    head = origin.commit("answer the review", {"a.py": numbered(l10="fixed"), "b.py": "b answered\n"})
+    _, listed = origin.publish(7)
+    review = review_body(
+        "- a.py:10 — **Unmet criterion**: x\n- a.py:20 — a bug\n- **Spec** — y",
+        advisory="**Style** — `b.py`, near the top: rename.",
+    )
+    review = review.replace(f"sha={SHA_A}", f"sha={origin.reviewed}")
+    second = review_body("- a.py:3 — later round", backend="codex (gpt, xhigh)", sha=head)
+    return FakeGitHub({
+        f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1": [
+            pull(7, "2026-11-21T00:00:00Z", head), pull(8, None), pull(9, "2026-11-22T00:00:00Z", SHA_A),
+        ],
+        f"repos/{REPO}/issues/7/comments?per_page=100&page=1": [
+            comment(second, "2026-11-20T12:00:00Z"),
+            comment(review),
+            comment(review, login="someone"),
+            comment("Thanks!"),
+            comment(review, "2026-11-23T00:00:00Z"),  # after the merge
+        ],
+        f"repos/{REPO}/issues/9/comments?per_page=100&page=1": [],
+        f"repos/{REPO}/pulls/7/commits?per_page=100&page=1": listed,
+    })
+
+
+def test_measure_reads_merged_prs_and_counts_each_round(git_env):
+    origin = Origin(git_env / "origin")
+    report = ra.measure(REPO, 5, fake_repo(origin), now=datetime(2026, 11, 25, tzinfo=timezone.utc),
+                        remote=origin.path.as_uri())
+    assert report.generated_at == "2026-11-25T00:00:00Z"
+    assert report.pulls == [{"number": 9, "merged_at": "2026-11-22T00:00:00Z", "reviews": 0},
+                            {"number": 7, "merged_at": "2026-11-21T00:00:00Z", "reviews": 2}]
+    assert report.skipped_after_merge == 1
+    rows = [(r.round, r.backend, r.severity, r.type, r.path, r.start, r.outcome) for r in report.results]
+    assert rows == [
+        (1, "claude", "blocking", "unmet criterion", "a.py", 10, ra.ACCEPTED),
+        (1, "claude", "blocking", "correctness", "a.py", 20, ra.NOT_ACCEPTED),
+        (1, "claude", "blocking", "spec", None, None, ra.UNLOCATED),
+        (1, "claude", "advisory", "style", "b.py", None, ra.ACCEPTED),
+        (2, "codex", "blocking", "correctness", "a.py", 3, ra.NOT_ACCEPTED),
+    ]
+    assert ra.measure(REPO, 1, fake_repo(origin), remote=origin.path.as_uri()).pulls[0]["number"] == 9
+
+
+def test_report_tables_per_backend_severity_and_type(git_env):
+    origin = Origin(git_env / "origin")
+    report = ra.measure(REPO, 5, fake_repo(origin), now=datetime(2026, 11, 25, tzinfo=timezone.utc),
+                        remote=origin.path.as_uri())
+    text = ra.render_markdown(report)
+    assert "last 5 by merge time (2 found, merged 2026-11-21 to 2026-11-22), 1 with automated reviews, 2 review rounds" in text
+    assert "| all findings | 5 | 2 | 2 | 0 | 1 | 50.0% |" in text
+    assert "| claude | 4 | 2 | 1 | 0 | 1 | 66.7% |" in text
+    assert "| codex | 1 | 0 | 1 | 0 | 0 | 0.0% |" in text
+    assert "| advisory (file level) | 1 | 1 | 0 | 0 | 0 | 100.0% |" in text
+    assert "| blocking (line level) | 4 | 1 | 2 | 0 | 1 | 33.3% |" in text
+    assert "| blocking: spec | 1 | 0 | 0 | 0 | 1 | n/a |" in text
+    assert "| #7 | 1 | claude | blocking | unmet criterion | `a.py:10` | accepted |  |" in text
+    assert "| #7 | 1 | claude | advisory | style | `b.py` | accepted |  |" in text
+    assert "| #7 | 1 | claude | blocking | spec | (none) | unlocated | the finding cites no file |" in text
+    assert "Pull requests: #9, #7" in text
+    assert "<!--" not in text
+
+
+def test_report_cells_are_escaped_and_empty_runs_render():
+    empty = ra.Measurement(REPO, 3, 0, "2026-11-25T00:00:00Z")
+    text = ra.render_markdown(empty)
+    assert "| (none) | 0 | 0 | 0 | 0 | 0 | n/a |" in text and "merged none" in text
+    row = ra.Result(1, 1, "x|y", "", SHA_A, "blocking", "a<b", "line", "p|q.py", 2, 4, ra.UNKNOWN, "r|s")
+    text = ra.render_markdown(ra.Measurement(REPO, 1, 0, "t", [{"number": 1, "merged_at": "2026", "reviews": 1}], [row]))
+    assert "| #1 | 1 | x\\|y | blocking | a&lt;b | `p\\|q.py:2-4` | unknown | r\\|s |" in text
+
+
+def test_main_writes_the_report_and_json(git_env, monkeypatch, capsys):
+    tmp_path = git_env
+    origin = Origin(git_env / "origin")
+    remote = ["--remote", origin.path.as_uri()]
+    monkeypatch.chdir(tmp_path)
+    out, data = tmp_path / "report.md", tmp_path / "sub" / ".." / "report.json"
+    assert ra.main(["--repo", REPO, "--limit", "5", "--out", "report.md", "--json", str(data), *remote],
+                   fetch=fake_repo(origin)) == 0
+    assert "## By finding type" in out.read_text(encoding="utf-8")
+    payload = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
+    assert payload["limit"] == 5 and len(payload["results"]) == 5
+    assert ra.main(["--repo", REPO, "--limit", "1", *remote], fetch=fake_repo(origin)) == 0
+    assert "# Automated review acceptance" in capsys.readouterr().out
+
+
+def test_main_reports_github_failures_and_bad_arguments(capsys):
+    def broken(path: str) -> object:
+        raise ra.GitHubError("HTTP 401 bad credentials")
+
+    assert ra.main(["--repo", REPO], fetch=broken) == 1
+    assert "HTTP 401" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        ra.main(["--limit", "0"], fetch=broken)
+
+
+def test_review_comments_page_through_long_threads():
+    first = [comment("filler")] * 99 + [comment(review_body("x"))]
+    fake = FakeGitHub({
+        f"repos/{REPO}/issues/5/comments?per_page=100&page=1": first,
+        f"repos/{REPO}/issues/5/comments?per_page=100&page=2": [comment(review_body("y"))],
+    })
+    assert len(ra.review_comments(fake, REPO, 5, ra.REVIEW_LOGIN)) == 2
+    assert ra.review_comments(FakeGitHub({f"repos/{REPO}/issues/6/comments?per_page=100&page=1": {}}),
+                              REPO, 6, ra.REVIEW_LOGIN) == []
+
+
+def test_merged_pulls_page_until_enough():
+    page = [pull(n, f"2026-11-{n % 28 + 1:02d}T00:00:00Z") for n in range(100)]
+    fake = FakeGitHub({
+        f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1": page,
+        f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=2": [],
+    })
+    assert len(ra.merged_pulls(fake, REPO, 60)) == 60
+    assert len(ra.merged_pulls(fake, REPO, 30)) == 30
+
+
+def test_gh_fetch_calls_the_cli(monkeypatch):
+    seen: list[list[str]] = []
+
+    def run(args, **kwargs):
+        seen.append(args)
+        if args[-1] == "ok":
+            return subprocess.CompletedProcess(args, 0, '{"a": 1}', "")
+        if args[-1] == "gone":
+            return subprocess.CompletedProcess(args, 1, "", "gh: Not Found (HTTP 404)")
+        return subprocess.CompletedProcess(args, 1, "", "gh: Server Error (HTTP 502)")
+
+    monkeypatch.setattr(ra.subprocess, "run", run)
+    assert ra.gh_fetch("ok") == {"a": 1}
+    assert seen[0][:2] == ["gh", "api"]
+    with pytest.raises(ra.GitHubError) as gone:
+        ra.gh_fetch("gone")
+    assert gone.value.missing
+    with pytest.raises(ra.GitHubError) as broken:
+        ra.gh_fetch("broken")
+    assert not broken.value.missing
+
+
+def test_output_paths_must_stay_inside_the_working_directory(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    fake = FakeGitHub({})
+    for argv in (["--out", "../escape.md"], ["--json", str(tmp_path / "escape.json")]):
+        with pytest.raises(SystemExit):
+            ra.main(["--repo", REPO, *argv], fetch=fake)
+    assert not list(tmp_path.glob("escape.*"))
+    assert fake.calls == []  # refused before reading GitHub
+
+
+def test_merged_pulls_keep_paging_until_no_later_page_can_hold_a_newer_merge():
+    """Review round 1 on #1089: old PRs updated recently fill page one; a newer merge on page two still counts."""
+    old = [dict(pull(n, "2026-01-01T00:00:00Z"), updated_at="2026-11-24T00:00:00Z") for n in range(100)]
+    newer = dict(pull(500, "2026-11-20T00:00:00Z"), updated_at="2026-11-20T00:00:00Z")
+    fake = FakeGitHub({
+        f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1": old,
+        f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=2": [newer],
+    })
+    assert ra.merged_pulls(fake, REPO, 50)[0]["number"] == 500
+    # Once the N-th latest merge is newer than a page's oldest update, later pages are not read.
+    recent = [dict(pull(n, "2026-11-23T00:00:00Z"), updated_at="2026-11-22T00:00:00Z") for n in range(100)]
+    fake = FakeGitHub({f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1": recent})
+    assert len(ra.merged_pulls(fake, REPO, 50)) == 50
+    assert len(fake.calls) == 1
+
+
+def test_heading_and_item_shapes():
+    assert ra._heading("## Findings ") == "findings"
+    assert ra._heading("##\tFindings") == "findings"
+    assert ra._heading("### Findings") is None
+    assert ra._heading("##Findings") is None
+    assert ra._item("- a") == "a"
+    assert ra._item("12) a") == "a"
+    assert ra._item("1. a") == "a"
+    assert ra._item("-a") is None
+    assert ra._item("1.a") is None
+    assert ra._item("plain text") is None
+    assert ra._item("   - nested") is None
+
+
+def test_the_backend_is_the_job_footer_not_one_quoted_in_the_review():
+    """Review round 2 on #1089: a codex review quoting another backend's footer stays attributed to codex."""
+    quoted = REVIEW_1086.replace(
+        "## Style and structure (advisory)\n\n",
+        "## Style and structure (advisory)\n\n```\nAutomated review backend: **claude (opus, high)**.\n```\n"
+        "Automated review backend: **cursor**.\n\n",
+    )
+    review = ra.parse_review(quoted)
+    assert review is not None and (review.backend, review.model) == ("codex", "gpt-6.1-sol, xhigh")
+
+
+# ------------------------------------------------- owner decision 1a on #1011: the PR's own commits, judged in git
+#
+# "Later commits" are exactly the PR's own commits after the reviewed commit: from pulls/N/commits, descending from
+# it, not reachable from the base. Each non-merge commit is judged on its own diff. These cases run real git
+# repositories as the remote, fetched the way the script fetches GitHub.
+
+
+@pytest.fixture
+def git_env(tmp_path, monkeypatch):
+    config = tmp_path / "gitconfig"
+    config.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for name in ("GIT_AUTHOR", "GIT_COMMITTER"):
+        monkeypatch.setenv(f"{name}_NAME", "Test")
+        monkeypatch.setenv(f"{name}_EMAIL", "test@example.invalid")
+    return tmp_path
+
+
+def numbered(count: int = 20, **changes: str) -> str:
+    """A file of `line1`..`lineN`, with `l<number>=text` replacing single lines."""
+    lines = [changes.get(f"l{i}", f"line{i}") for i in range(1, count + 1)]
+    return "\n".join(lines) + "\n"
+
+
+class Origin:
+    """A git repository standing in for GitHub: branches, merges and refs/pull/N/head."""
+
+    def __init__(self, path: Path):
+        path.mkdir()
+        self.path = path
+        self.git("init", "-q", "-b", "main")
+        self.base = self.commit("base", {"a.py": numbered(), "b.py": "b\n", "c.py": "c\n"})
+        self.git("checkout", "-q", "-b", "pr")
+        self.reviewed = self.commit("reviewed", {"b.py": "b reviewed\n"})
+
+    def git(self, *args: str) -> str:
+        proc = subprocess.run(["git", "-c", "core.autocrlf=false", "-c", "commit.gpgsign=false", *args],
+                              cwd=self.path, capture_output=True, text=True, check=True)
+        return proc.stdout.strip()
+
+    def commit(self, message: str, files: dict[str, str | None]) -> str:
+        for name, text in files.items():
+            target = self.path / name
+            if text is None:
+                target.unlink()
+            else:
+                target.write_text(text, encoding="utf-8", newline="\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "--allow-empty", "-m", message)
+        return self.git("rev-parse", "HEAD")
+
+    def checkout(self, branch: str, new_at: str | None = None) -> None:
+        self.git("checkout", "-q", *(["-b", branch, new_at] if new_at else [branch]))
+
+    def merge(self, other: str) -> str:
+        self.git("merge", "-q", "--no-ff", "--no-edit", other)
+        return self.git("rev-parse", "HEAD")
+
+    def publish(self, number: int) -> tuple[str, list[dict]]:
+        """Point refs/pull/N/head at the PR branch; return the head and GitHub's commit list (base..head)."""
+        head = self.git("rev-parse", "pr")
+        self.git("update-ref", f"refs/pull/{number}/head", head)
+        listed = []
+        for line in self.git("rev-list", "--reverse", "--parents", f"main..{head}").splitlines():
+            sha, *parents = line.split()
+            listed.append({"sha": sha, "parents": [{"sha": p} for p in parents]})
+        return head, listed
+
+
+def measure_case(origin: Origin, citation: str = "a.py:10", reviewed: str | None = None,
+                 window: int = 0) -> tuple[str, str]:
+    head, listed = origin.publish(7)
+    body = review_body(f"- {citation} — a bug", sha=reviewed or origin.reviewed)
+    fake = FakeGitHub({
+        f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1":
+            [pull(7, "2026-11-21T00:00:00Z", head)],
+        f"repos/{REPO}/issues/7/comments?per_page=100&page=1": [comment(body)],
+        f"repos/{REPO}/pulls/7/commits?per_page=100&page=1": listed,
+    })
+    report = ra.measure(REPO, 5, fake, window=window, remote=origin.path.as_uri())
+    (result,) = report.results
+    return result.outcome, result.reason
+
+
+def test_grid_1_a_linear_edit_counts(git_env):
+    origin = Origin(git_env / "origin")
+    origin.commit("fix", {"a.py": numbered(l10="fixed")})
+    assert measure_case(origin) == (ra.ACCEPTED, "")
+
+
+def test_grid_2_an_edit_reverted_later_still_counts(git_env):
+    origin = Origin(git_env / "origin")
+    origin.commit("fix", {"a.py": numbered(l10="fixed")})
+    origin.commit("revert", {"a.py": numbered()})
+    assert measure_case(origin) == (ra.ACCEPTED, "")
+
+
+def test_grid_3_a_base_merge_that_changes_the_line_does_not_count(git_env):
+    origin = Origin(git_env / "origin")
+    origin.checkout("main")
+    origin.commit("main edits the line", {"a.py": numbered(l10="from main")})
+    origin.checkout("pr")
+    origin.merge("main")
+    assert measure_case(origin) == (ra.NOT_ACCEPTED, "only merges after the review")
+    # A later PR commit to another file leaves that answer alone.
+    origin.commit("unrelated", {"c.py": "c changed\n"})
+    assert measure_case(origin) == (ra.NOT_ACCEPTED, "")
+    # A later PR commit to the same file cannot be placed against lines main rewrote: unknown, outside the rate.
+    origin.commit("same file", {"a.py": numbered(l2="two", l10="from main")})
+    assert measure_case(origin)[0] == ra.UNKNOWN
+
+
+def test_grid_4_a_topic_branch_merge_carrying_the_fix_counts(git_env):
+    origin = Origin(git_env / "origin")
+    origin.checkout("topic", origin.reviewed)
+    origin.commit("fix on a topic branch", {"a.py": numbered(l10="fixed")})
+    origin.checkout("pr")
+    origin.commit("other work", {"c.py": "c changed\n"})
+    origin.merge("topic")
+    assert measure_case(origin) == (ra.ACCEPTED, "")
+
+
+def test_grid_5_a_fix_on_a_branch_merged_twice_counts(git_env):
+    origin = Origin(git_env / "origin")
+    origin.checkout("topic", origin.reviewed)
+    origin.commit("topic part one", {"c.py": "c one\n"})
+    origin.checkout("pr")
+    origin.merge("topic")
+    origin.checkout("topic")
+    origin.commit("topic part two fixes the line", {"a.py": numbered(l10="fixed")})
+    origin.checkout("pr")
+    origin.merge("topic")
+    assert measure_case(origin) == (ra.ACCEPTED, "")
+
+
+def test_grid_6_a_rename_then_an_edit_counts(git_env):
+    origin = Origin(git_env / "origin")
+    origin.commit("rename", {"a.py": None, "d.py": numbered()})
+    origin.commit("edit after the rename", {"d.py": numbered(l10="fixed")})
+    assert measure_case(origin) == (ra.ACCEPTED, "")
+
+
+def test_grid_7_a_line_moved_by_an_earlier_pr_commit_then_edited(git_env):
+    origin = Origin(git_env / "origin")
+    shifted = "new1\nnew2\nnew3\n" + numbered()
+    origin.commit("insert three lines at the top", {"a.py": shifted})
+    origin.commit("edit the cited line, now line 13", {"a.py": shifted.replace("line10\n", "fixed\n")})
+    assert measure_case(origin) == (ra.ACCEPTED, "")
+
+
+def test_grid_7_an_edit_at_the_old_line_number_is_another_line(git_env):
+    origin = Origin(git_env / "origin")
+    shifted = "new1\nnew2\nnew3\n" + numbered()
+    origin.commit("insert three lines at the top", {"a.py": shifted})
+    origin.commit("edit line 10, which was line 7", {"a.py": shifted.replace("line7\n", "seven\n")})
+    assert measure_case(origin) == (ra.NOT_ACCEPTED, "")
+
+
+def test_grid_8_a_force_push_is_unknown(git_env):
+    origin = Origin(git_env / "origin")
+    reviewed = origin.reviewed
+    origin.git("reset", "-q", "--hard", origin.base)
+    origin.commit("rewritten history", {"a.py": numbered(l10="fixed")})
+    outcome, reason = measure_case(origin, reviewed=reviewed)
+    assert outcome == ra.UNKNOWN and "reviewed commit" in reason
+
+
+def test_grid_window_and_file_level_findings(git_env):
+    origin = Origin(git_env / "origin")
+    origin.commit("edit line 12", {"a.py": numbered(l12="twelve")})
+    assert measure_case(origin) == (ra.NOT_ACCEPTED, "")
+    assert measure_case(origin, window=1) == (ra.NOT_ACCEPTED, "")  # lines 9-11: line 12 was replaced, not inserted
+    assert measure_case(origin, window=2) == (ra.ACCEPTED, "")
+    # A file-level suggestion follows a rename made by a base merge.
+    origin = Origin(git_env / "origin2")
+    origin.checkout("main")
+    origin.commit("main renames c.py", {"c.py": None, "e.py": "c\n"})
+    origin.checkout("pr")
+    origin.merge("main")
+    origin.commit("edit the renamed file", {"e.py": "c edited\n"})
+    head, listed = origin.publish(7)
+    advisory = review_body("No significant findings.", advisory="**Style** \u2014 `c.py`, near the top: x.",
+                           sha=origin.reviewed)
+    fake = FakeGitHub({
+        f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1":
+            [pull(7, "2026-11-21T00:00:00Z", head)],
+        f"repos/{REPO}/issues/7/comments?per_page=100&page=1": [comment(advisory)],
+        f"repos/{REPO}/pulls/7/commits?per_page=100&page=1": listed,
+    })
+    (result,) = ra.measure(REPO, 5, fake, remote=origin.path.as_uri()).results
+    assert (result.granularity, result.outcome) == ("file", ra.ACCEPTED)
+
+
+def test_unmeasurable_pull_requests_are_unknown(git_env, monkeypatch):
+    origin = Origin(git_env / "origin")
+    origin.commit("fix", {"a.py": numbered(l10="fixed")})
+    head, listed = origin.publish(7)
+    finding = ra.Finding("blocking", "correctness", "a.py", 10, 10)
+    remote = origin.path.as_uri()
+
+    def measurer(commits: list[dict], number: int = 7) -> ra.Measurer:
+        return ra.Measurer(REPO, FakeGitHub({f"repos/{REPO}/pulls/{number}/commits?per_page=100&page=1": commits}),
+                           remote=remote)
+
+    with measurer(listed) as m:
+        assert m.outcome(finding, origin.reviewed, 7, head) == (ra.ACCEPTED, "")
+        assert m.outcome(finding, origin.reviewed, 7, head) == (ra.ACCEPTED, "")  # the fetch is reused
+        root = m._root
+    assert not root.exists()  # the temporary repositories are removed afterwards
+    with measurer(listed, 8) as m:  # no refs/pull/8/head on the remote
+        assert m.outcome(finding, origin.reviewed, 8, head)[1] == "the remote no longer has the pull request's head ref"
+    origin.commit("pushed after the merge", {"c.py": "late\n"})
+    origin.publish(7)
+    with measurer(listed) as m:
+        assert m.outcome(finding, origin.reviewed, 7, head)[1] == "the pull request's head ref no longer points at the merged head"
+    many = [{"sha": f"{i:040x}", "parents": [{"sha": "0" * 40}]} for i in range(100)]
+    pages = {f"repos/{REPO}/pulls/7/commits?per_page=100&page={n}": many for n in (1, 2, 3)}
+    with ra.Measurer(REPO, FakeGitHub(pages), remote=remote) as m:
+        assert m.outcome(finding, origin.reviewed, 7, head) == (
+            ra.UNKNOWN, "GitHub lists at most 250 commits of a pull request")
+    with measurer([]) as m:
+        assert m.outcome(finding, head, 7, head) == (ra.NOT_ACCEPTED, "no commit after the review")
+        assert m.outcome(ra.Finding("blocking", "spec", None), head, 7, head)[0] == ra.UNLOCATED
+
+
+def test_a_failed_fetch_stops_the_run(git_env, monkeypatch, capsys):
+    origin = Origin(git_env / "origin")
+    origin.commit("fix", {"a.py": numbered(l10="fixed")})
+    head, listed = origin.publish(7)
+    finding = ra.Finding("blocking", "correctness", "a.py", 10, 10)
+    fake = FakeGitHub({f"repos/{REPO}/pulls/7/commits?per_page=100&page=1": listed})
+    with ra.Measurer(REPO, fake, remote=(git_env / "nowhere").as_uri()) as m, pytest.raises(ra.GitError):
+        m.outcome(finding, origin.reviewed, 7, head)
+    body = review_body("- a.py:10 \u2014 x", sha=origin.reviewed)
+    fake = FakeGitHub({
+        f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1":
+            [pull(7, "2026-11-21T00:00:00Z", head)],
+        f"repos/{REPO}/issues/7/comments?per_page=100&page=1": [comment(body)],
+        f"repos/{REPO}/pulls/7/commits?per_page=100&page=1": listed,
+    })
+    assert ra.main(["--repo", REPO, "--remote", (git_env / "nowhere").as_uri()], fetch=fake) == 1
+    assert "git fetch" in capsys.readouterr().err
+
+
+def test_grid_a_permission_only_commit_keeps_the_line_positions(git_env):
+    """Review round 3 on #1089 (F1): a mode change has no text patch; the fix after it still maps and counts."""
+    origin = Origin(git_env / "origin")
+    origin.git("update-index", "--chmod=+x", "a.py")
+    origin.git("commit", "-q", "-m", "make a.py executable")
+    origin.commit("fix", {"a.py": numbered(l10="fixed")})
+    assert measure_case(origin) == (ra.ACCEPTED, "")
+
+
+def test_grid_a_later_edit_of_a_file_a_base_merge_renamed_and_rewrote_is_unknown(git_env):
+    """Review round 3 on #1089 (F2): the unmappable check follows the rename, so this is unknown, not not-accepted."""
+    origin = Origin(git_env / "origin")
+    origin.checkout("main")
+    origin.commit("main renames a.py and rewrites the line", {"a.py": None, "d.py": numbered(l10="from main")})
+    origin.checkout("pr")
+    origin.merge("main")
+    origin.commit("edit the renamed file elsewhere", {"d.py": numbered(l2="two", l10="from main")})
+    outcome, reason = measure_case(origin)
+    assert outcome == ra.UNKNOWN and "rewritten by a merge" in reason
