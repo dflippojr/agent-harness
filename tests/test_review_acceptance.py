@@ -593,6 +593,28 @@ def test_grid_6_a_rename_then_an_edit_counts(git_env):
     assert measure_case(origin) == (ra.ACCEPTED, "")
 
 
+def test_a_rename_survives_heavy_intermediate_edits_before_the_fix(git_env):
+    origin = Origin(git_env / "origin")
+    origin.commit("rename", {"a.py": None, "d.py": numbered()})
+    # Keep the neighbours too: rewriting them can itself count under the metric's adjacent-insertion rule.
+    rewritten = numbered(**{f"l{i}": f"rewritten {i}" for i in range(1, 21) if not 8 <= i <= 12})
+    origin.commit("rewrite other lines, keeping cited line 10", {"d.py": rewritten})
+    origin.commit("fix cited line 10", {"d.py": rewritten.replace("line10\n", "fixed\n")})
+    assert measure_case(origin) == (ra.ACCEPTED, "")
+
+
+def test_an_untraceable_rename_is_unknown(git_env):
+    origin = Origin(git_env / "origin")
+    origin.checkout("main")
+    rewritten = numbered(**{f"l{i}": f"rewritten {i}" for i in range(1, 21) if i != 10})
+    origin.commit("rename and rewrite below git's similarity threshold", {"a.py": None, "d.py": rewritten})
+    origin.checkout("pr")
+    origin.merge("main")
+    origin.commit("fix cited line in the untraceable file", {"d.py": rewritten.replace("line10\n", "fixed\n")})
+    outcome, reason = measure_case(origin)
+    assert outcome == ra.UNKNOWN and "file" in reason
+
+
 def test_grid_7_a_line_moved_by_an_earlier_pr_commit_then_edited(git_env):
     origin = Origin(git_env / "origin")
     shifted = "new1\nnew2\nnew3\n" + numbered()
