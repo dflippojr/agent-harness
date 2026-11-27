@@ -599,6 +599,7 @@ def test_a_rename_survives_heavy_intermediate_edits_before_the_fix(git_env):
     # Keep the neighbours too: rewriting them can itself count under the metric's adjacent-insertion rule.
     rewritten = numbered(**{f"l{i}": f"rewritten {i}" for i in range(1, 21) if not 8 <= i <= 12})
     origin.commit("rewrite other lines, keeping cited line 10", {"d.py": rewritten})
+    assert measure_case(origin) == (ra.NOT_ACCEPTED, "")
     origin.commit("fix cited line 10", {"d.py": rewritten.replace("line10\n", "fixed\n")})
     assert measure_case(origin) == (ra.ACCEPTED, "")
 
@@ -612,6 +613,49 @@ def test_an_untraceable_rename_is_unknown(git_env):
     origin.merge("main")
     origin.commit("fix cited line in the untraceable file", {"d.py": rewritten.replace("line10\n", "fixed\n")})
     outcome, reason = measure_case(origin)
+    assert outcome == ra.UNKNOWN and "file" in reason
+
+
+@pytest.mark.parametrize("topology", ["linear", "topic_merge", "review_on_topic"])
+@pytest.mark.parametrize("shift", [0, 3])
+def test_rename_tracking_across_branches_and_shifted_lines(git_env, topology, shift):
+    """Heavy edits must not hide earlier renames, regardless of the merge parent or the cited line's offset."""
+    origin = Origin(git_env / "origin")
+    reviewed = origin.reviewed
+    if topology != "linear":
+        origin.checkout("topic", reviewed)
+        if topology == "review_on_topic":
+            reviewed = origin.commit("reviewed on the topic branch", {"b.py": "topic reviewed\n"})
+    origin.commit("first rename", {"a.py": None, "d.py": numbered()})
+    rewritten = "inserted\n" * shift + numbered(
+        **{f"l{i}": f"rewritten {i}" for i in range(1, 21) if not 8 <= i <= 12})
+    origin.commit("rewrite away from the citation and shift it", {"d.py": rewritten})
+    origin.commit("second rename", {"d.py": None, "e.py": rewritten})
+    if topology != "linear":
+        origin.checkout("pr")
+        origin.commit("other work", {"c.py": "changed\n"})
+        origin.merge("topic")
+    assert measure_case(origin, reviewed=reviewed) == (ra.NOT_ACCEPTED, "")
+    origin.commit("fix cited line at its new position", {"e.py": rewritten.replace("line10\n", "fixed\n")})
+    assert measure_case(origin, reviewed=reviewed) == (ra.ACCEPTED, "")
+
+
+def test_a_lost_filename_is_not_recovered_by_reusing_the_name(git_env):
+    origin = Origin(git_env / "origin")
+    origin.checkout("main")
+    origin.commit("delete the cited file", {"a.py": None})
+    origin.checkout("pr")
+    origin.merge("main")
+    origin.commit("reuse its name for a different file", {"a.py": numbered(l10="different")})
+    outcome, reason = measure_case(origin)
+    assert outcome == ra.UNKNOWN and "file" in reason
+
+
+def test_a_citation_missing_from_the_reviewed_tree_is_unknown(git_env):
+    origin = Origin(git_env / "origin")
+    origin.commit("other work", {"c.py": "changed\n"})
+    origin.commit("more work", {"c.py": "changed again\n"})
+    outcome, reason = measure_case(origin, citation="missing.py:10")
     assert outcome == ra.UNKNOWN and "file" in reason
 
 
